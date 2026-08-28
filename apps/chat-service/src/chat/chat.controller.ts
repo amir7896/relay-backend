@@ -20,7 +20,10 @@ import type {
   SearchMessagesPayload,
   SendMessagePayload,
   SetMemberRolePayload,
+  ListAuditPayload,
+  LogAuditPayload,
   UpdateGroupPayload,
+  UpdateWorkspacePayload,
 } from '@app/contracts';
 import { ChatService } from './chat.service';
 
@@ -141,5 +144,30 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.LIST_BLOCKS)
   listBlocks(@Payload() payload: { actorId: string }) {
     return this.chatService.listBlocks(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.GET_ANALYTICS)
+  getAnalytics() {
+    return this.chatService.getAnalytics();
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_AUDIT)
+  listAudit(@Payload() payload: ListAuditPayload) {
+    return this.chatService.listAuditEvents(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LOG_AUDIT)
+  logAudit(@Payload() payload: LogAuditPayload) {
+    return this.chatService.logAudit(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.GET_WORKSPACE)
+  getWorkspace() {
+    return this.chatService.getWorkspaceSettings();
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UPDATE_WORKSPACE)
+  updateWorkspace(@Payload() payload: UpdateWorkspacePayload) {
+    return this.chatService.updateWorkspaceSettings(payload);
   }
 }

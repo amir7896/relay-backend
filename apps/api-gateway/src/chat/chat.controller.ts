@@ -60,6 +60,7 @@ import {
   UpdateGroupDto,
 } from './dto/chat.dto';
 import { PresenceService } from './presence.service';
+import { AiService } from './ai.service';
 import {
   AddMembersDocs,
   ChatDocs,
@@ -85,6 +86,17 @@ const ALLOWED_IMAGE_MIMES = new Set([
   'image/gif',
   'image/webp',
 ]);
+const ALLOWED_AUDIO_MIMES = new Set([
+  'audio/webm',
+  'audio/ogg',
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/wav',
+]);
+const ALLOWED_UPLOAD_MIMES = new Set([
+  ...ALLOWED_IMAGE_MIMES,
+  ...ALLOWED_AUDIO_MIMES,
+]);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
 type UploadedImage = {
@@ -108,6 +120,7 @@ export class ChatController {
     private readonly presence: PresenceService,
     private readonly chatGateway: ChatGateway,
     private readonly conversationCache: ConversationCacheService,
+    private readonly ai: AiService,
   ) {}
 
   @Post('private')
@@ -241,6 +254,8 @@ export class ChatController {
         attachmentMime: dto.attachmentMime,
         attachmentName: dto.attachmentName,
         attachmentSize: dto.attachmentSize,
+        mentionUserIds: dto.mentionUserIds,
+        linkPreview: dto.linkPreview ?? null,
       },
     );
     const { recipientIds, ...data } = result;
@@ -319,6 +334,25 @@ export class ChatController {
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_FORWARDED, data };
   }
 
+  @Post('conversations/:id/summarize')
+  @HttpCode(HttpStatus.OK)
+  async summarizeConversation(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    const data = await this.ai.summarizeConversation(user.id, id);
+    return { message: 'Conversation summary ready', data };
+  }
+
+  @Get('conversations/:id/smart-replies')
+  async smartReplies(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    const data = await this.ai.smartReplies(user.id, id);
+    return { message: 'Smart replies ready', data };
+  }
+
   @Post('uploads')
   @HttpCode(HttpStatus.CREATED)
   @UseInterceptors(
@@ -330,9 +364,9 @@ export class ChatController {
     if (!file) {
       throw new BadRequestAppException('File is required');
     }
-    if (!ALLOWED_IMAGE_MIMES.has(file.mimetype)) {
+    if (!ALLOWED_UPLOAD_MIMES.has(file.mimetype)) {
       throw new BadRequestException(
-        'Only jpeg, png, gif, and webp images are allowed',
+        'Only jpeg, png, gif, webp images and webm/ogg/mp3/mp4/wav audio are allowed',
       );
     }
     if (file.size > MAX_UPLOAD_BYTES) {

@@ -121,4 +121,21 @@ export class PresenceService {
   private lastSeenKey(userId: string): string {
     return `chat:presence:lastSeen:${userId}`;
   }
+
+  async countOnlineUsers(): Promise<number> {
+    let cursor = '0';
+    let total = 0;
+    do {
+      const [next, keys] = await this.redis.scan(
+        cursor,
+        'MATCH',
+        'chat:presence:online:*',
+        'COUNT',
+        100,
+      );
+      cursor = next;
+      total += keys.length;
+    } while (cursor !== '0');
+    return total;
+  }
 }

@@ -65,6 +65,17 @@ export class Message {
   @Column({ type: 'uuid', nullable: true })
   forwardedFromMessageId!: string | null;
 
+  @Column({ type: 'jsonb', default: [] })
+  mentions!: string[];
+
+  @Column({ type: 'jsonb', nullable: true })
+  linkPreview!: {
+    url: string;
+    title: string;
+    description: string;
+    image: string | null;
+  } | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

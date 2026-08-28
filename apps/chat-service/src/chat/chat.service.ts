@@ -15,6 +15,8 @@ import type {
   AddMembersPayload,
   BlockUserPayload,
   BlockView,
+  ChatAnalyticsView,
+  AuditEventView,
   ConversationActorPayload,
   ConversationView,
   CreateGroupChatPayload,
@@ -23,8 +25,10 @@ import type {
   DeleteMessageResult,
   EditMessagePayload,
   ForwardMessagePayload,
+  ListAuditPayload,
   ListConversationsPayload,
   ListMessagesPayload,
+  LogAuditPayload,
   MarkSeenPayload,
   MessageReactionView,
   MessageReplyView,
@@ -39,6 +43,8 @@ import type {
   SendMessageResult,
   SetMemberRolePayload,
   UpdateGroupPayload,
+  UpdateWorkspacePayload,
+  WorkspaceSettingsView,
 } from '@app/contracts';
 import { Conversation } from '../database/entities/conversation.entity';
 import { ConversationMember } from '../database/entities/conversation-member.entity';
@@ -46,6 +52,8 @@ import { Message } from '../database/entities/message.entity';
 import { MessageHide } from '../database/entities/message-hide.entity';
 import { MessageReaction } from '../database/entities/message-reaction.entity';
 import { UserBlock } from '../database/entities/user-block.entity';
+import { AuditEvent } from '../database/entities/audit-event.entity';
+import { WorkspaceSettings } from '../database/entities/workspace-settings.entity';
 
 const MAX_GROUP_MEMBERS = 50;
 const DELETE_FOR_EVERYONE_WINDOW_MS = 60 * 60 * 1000;
@@ -70,6 +78,10 @@ export class ChatService {
     private readonly messageReactions: Repository<MessageReaction>,
     @InjectRepository(UserBlock)
     private readonly userBlocks: Repository<UserBlock>,
+    @InjectRepository(AuditEvent)
+    private readonly auditEvents: Repository<AuditEvent>,
+    @InjectRepository(WorkspaceSettings)
+    private readonly workspaceSettings: Repository<WorkspaceSettings>,
   ) {}
 
   async createPrivate(
@@ -360,18 +372,28 @@ export class ChatService {
 
     const attachmentMime = payload.attachmentMime?.trim() || null;
     if (attachmentUrl) {
-      type = attachmentMime?.startsWith('image/')
-        ? MessageType.IMAGE
-        : MessageType.FILE;
+      if (attachmentMime?.startsWith('image/')) {
+        type = MessageType.IMAGE;
+      } else if (attachmentMime?.startsWith('audio/')) {
+        type = MessageType.AUDIO;
+      } else {
+        type = MessageType.FILE;
+      }
     }
 
     const body =
       rawBody ||
       (type === MessageType.IMAGE
         ? '[Image]'
-        : type === MessageType.FILE
-          ? '[File]'
-          : '');
+        : type === MessageType.AUDIO
+          ? '[Voice note]'
+          : type === MessageType.FILE
+            ? '[File]'
+            : '');
+
+    const mentionUserIds = [
+      ...new Set((payload.mentionUserIds ?? []).filter(Boolean)),
+    ].filter((userId) => userId !== payload.actorId);
 
     const conversation = await this.requireMembership(
       payload.conversationId,
@@ -410,6 +432,13 @@ export class ChatService {
       }
     }
 
+    const activeMemberIds = new Set(
+      conversation.members.filter((m) => !m.leftAt).map((m) => m.userId),
+    );
+    const validMentions = mentionUserIds.filter((userId) =>
+      activeMemberIds.has(userId),
+    );
+
     const saved = await this.messages.save(
       this.messages.create({
         conversationId: conversation.id,
@@ -421,10 +450,16 @@ export class ChatService {
         attachmentMime,
         attachmentName: payload.attachmentName?.trim() || null,
         attachmentSize: payload.attachmentSize ?? null,
+        mentions: validMentions,
+        linkPreview: payload.linkPreview ?? null,
       }),
     );
     conversation.lastMessageAt = saved.createdAt;
     await this.conversations.save(conversation);
+    await this.recordAudit(payload.actorId, 'message.sent', 'conversation', conversation.id, {
+      messageId: saved.id,
+      type,
+    });
     return {
       ...this.toMessageView(saved, conversation.members, replyTo, [], payload.actorId),
       recipientIds: this.recipientIds(conversation),
@@ -1029,6 +1064,202 @@ export class ChatService {
     }));
   }
 
+  async getAnalytics(): Promise<ChatAnalyticsView> {
+    const now = new Date();
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+    const weekAgo = new Date(now);
+    weekAgo.setDate(weekAgo.getDate() - 6);
+    weekAgo.setHours(0, 0, 0, 0);
+
+    const [totalConversations, totalMessages, messagesToday, messagesThisWeek] =
+      await Promise.all([
+        this.conversations.count({ where: { deletedAt: IsNull() } }),
+        this.messages.count({ where: { deletedAt: IsNull() } }),
+        this.messages
+          .createQueryBuilder('m')
+          .where('m.createdAt >= :startOfDay', { startOfDay })
+          .andWhere('m.deletedAt IS NULL')
+          .getCount(),
+        this.messages
+          .createQueryBuilder('m')
+          .where('m.createdAt >= :weekAgo', { weekAgo })
+          .andWhere('m.deletedAt IS NULL')
+          .getCount(),
+      ]);
+
+    const activeConversationsToday = Number(
+      (
+        await this.messages
+          .createQueryBuilder('m')
+          .select('COUNT(DISTINCT m.conversationId)', 'count')
+          .where('m.createdAt >= :startOfDay', { startOfDay })
+          .andWhere('m.deletedAt IS NULL')
+          .getRawOne<{ count: string }>()
+      )?.count ?? 0,
+    );
+
+    const dayRows = await this.messages
+      .createQueryBuilder('m')
+      .select(`to_char(m.createdAt, 'YYYY-MM-DD')`, 'date')
+      .addSelect('COUNT(*)', 'count')
+      .where('m.createdAt >= :weekAgo', { weekAgo })
+      .andWhere('m.deletedAt IS NULL')
+      .groupBy(`to_char(m.createdAt, 'YYYY-MM-DD')`)
+      .orderBy('date', 'ASC')
+      .getRawMany<{ date: string; count: string }>();
+
+    const messagesByDay: { date: string; count: number }[] = [];
+    for (let i = 0; i < 7; i += 1) {
+      const day = new Date(weekAgo);
+      day.setDate(weekAgo.getDate() + i);
+      const key = day.toISOString().slice(0, 10);
+      const row = dayRows.find((item) => item.date === key);
+      messagesByDay.push({ date: key, count: Number(row?.count ?? 0) });
+    }
+
+    const topRows = await this.messages
+      .createQueryBuilder('m')
+      .innerJoin('m.conversation', 'c')
+      .select('m.conversationId', 'conversationId')
+      .addSelect('c.name', 'name')
+      .addSelect('c.type', 'type')
+      .addSelect('COUNT(*)', 'messageCount')
+      .where('m.deletedAt IS NULL')
+      .groupBy('m.conversationId')
+      .addGroupBy('c.name')
+      .addGroupBy('c.type')
+      .orderBy('"messageCount"', 'DESC')
+      .limit(5)
+      .getRawMany<{
+        conversationId: string;
+        name: string | null;
+        type: string;
+        messageCount: string;
+      }>();
+
+    return {
+      totalConversations,
+      totalMessages,
+      messagesToday,
+      messagesThisWeek,
+      activeConversationsToday,
+      messagesByDay,
+      topConversations: topRows.map((row) => ({
+        conversationId: row.conversationId,
+        name: row.name,
+        type: row.type,
+        messageCount: Number(row.messageCount),
+      })),
+    };
+  }
+
+  async listAuditEvents(payload: ListAuditPayload) {
+    const { skip, take } = getSkipTake(payload.page, payload.limit);
+    const [items, total] = await this.auditEvents.findAndCount({
+      order: { createdAt: 'DESC' },
+      skip,
+      take,
+    });
+    return buildPaginatedResult(
+      items.map((item) => this.toAuditView(item)),
+      total,
+      payload.page,
+      payload.limit,
+    );
+  }
+
+  async logAudit(payload: LogAuditPayload): Promise<AuditEventView> {
+    const saved = await this.auditEvents.save(
+      this.auditEvents.create({
+        actorId: payload.actorId,
+        action: payload.action,
+        targetType: payload.targetType ?? null,
+        targetId: payload.targetId ?? null,
+        meta: payload.meta ?? {},
+      }),
+    );
+    return this.toAuditView(saved);
+  }
+
+  async getWorkspaceSettings(): Promise<WorkspaceSettingsView> {
+    let settings = await this.workspaceSettings.findOne({ where: { id: 1 } });
+    if (!settings) {
+      settings = await this.workspaceSettings.save(
+        this.workspaceSettings.create({
+          id: 1,
+          appName: 'Relay',
+          tagline: 'Private team messenger',
+          primaryColor: '#2563eb',
+        }),
+      );
+    }
+    return this.toWorkspaceView(settings);
+  }
+
+  async updateWorkspaceSettings(
+    payload: UpdateWorkspacePayload,
+  ): Promise<WorkspaceSettingsView> {
+    let settings = await this.workspaceSettings.findOne({ where: { id: 1 } });
+    if (!settings) {
+      settings = this.workspaceSettings.create({ id: 1 });
+    }
+    if (payload.appName?.trim()) {
+      settings.appName = payload.appName.trim().slice(0, 80);
+    }
+    if (payload.tagline?.trim()) {
+      settings.tagline = payload.tagline.trim().slice(0, 200);
+    }
+    if (payload.primaryColor?.trim()) {
+      settings.primaryColor = payload.primaryColor.trim().slice(0, 16);
+    }
+    if (payload.logoUrl !== undefined) {
+      settings.logoUrl = payload.logoUrl?.trim() || null;
+    }
+    const saved = await this.workspaceSettings.save(settings);
+    await this.recordAudit(payload.actorId, 'workspace.updated', 'workspace', '1');
+    return this.toWorkspaceView(saved);
+  }
+
+  private async recordAudit(
+    actorId: string,
+    action: string,
+    targetType?: string,
+    targetId?: string,
+    meta?: Record<string, unknown>,
+  ): Promise<void> {
+    await this.auditEvents.save(
+      this.auditEvents.create({
+        actorId,
+        action,
+        targetType: targetType ?? null,
+        targetId: targetId ?? null,
+        meta: meta ?? {},
+      }),
+    );
+  }
+
+  private toAuditView(item: AuditEvent): AuditEventView {
+    return {
+      id: item.id,
+      actorId: item.actorId,
+      action: item.action,
+      targetType: item.targetType,
+      targetId: item.targetId,
+      meta: item.meta ?? {},
+      createdAt: item.createdAt.toISOString(),
+    };
+  }
+
+  private toWorkspaceView(item: WorkspaceSettings): WorkspaceSettingsView {
+    return {
+      appName: item.appName,
+      tagline: item.tagline,
+      primaryColor: item.primaryColor,
+      logoUrl: item.logoUrl,
+    };
+  }
+
   private async isBlockedEitherWay(
     userA: string,
     userB: string,
@@ -1311,6 +1542,11 @@ export class ChatService {
       reactions: deletedForEveryone
         ? []
         : this.buildReactionViews(reactions, actorId),
+      mentions: deletedForEveryone ? [] : (message.mentions ?? []),
+      linkPreview:
+        !deletedForEveryone && message.linkPreview
+          ? message.linkPreview
+          : null,
       editedAt: message.editedAt?.toISOString() ?? null,
       forwarded: Boolean(message.forwardedFromMessageId),
       deletedForEveryone,

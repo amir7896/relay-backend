@@ -6,6 +6,8 @@ import { Message } from '../database/entities/message.entity';
 import { MessageHide } from '../database/entities/message-hide.entity';
 import { MessageReaction } from '../database/entities/message-reaction.entity';
 import { UserBlock } from '../database/entities/user-block.entity';
+import { AuditEvent } from '../database/entities/audit-event.entity';
+import { WorkspaceSettings } from '../database/entities/workspace-settings.entity';
 import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
 
@@ -18,6 +20,8 @@ import { ChatService } from './chat.service';
       MessageHide,
       MessageReaction,
       UserBlock,
+      AuditEvent,
+      WorkspaceSettings,
     ]),
   ],
   controllers: [ChatController],

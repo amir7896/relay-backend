@@ -93,6 +93,26 @@ export class SendMessageDto {
   @IsInt()
   @Min(1)
   attachmentSize?: number;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'User ids mentioned in this message (groups)',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  mentionUserIds?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Open Graph preview card for the first URL in the message',
+  })
+  @IsOptional()
+  linkPreview?: {
+    url: string;
+    title: string;
+    description: string;
+    image: string | null;
+  } | null;
 }
 
 export class EditMessageDto {

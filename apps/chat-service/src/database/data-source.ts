@@ -7,11 +7,14 @@ import { Message } from './entities/message.entity';
 import { MessageHide } from './entities/message-hide.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { UserBlock } from './entities/user-block.entity';
+import { AuditEvent } from './entities/audit-event.entity';
+import { WorkspaceSettings } from './entities/workspace-settings.entity';
 import { CreateChatSchema1730000000000 } from './migrations/1730000000000-CreateChatSchema';
 import { AddChatSeenAndMessageType1730000001000 } from './migrations/1730000001000-AddChatSeenAndMessageType';
 import { AddChatScaleIndexes1730000002000 } from './migrations/1730000002000-AddChatScaleIndexes';
 import { AddChatProductFeatures1730000003000 } from './migrations/1730000003000-AddChatProductFeatures';
 import { AddChatEngagementFeatures1730000005000 } from './migrations/1730000005000-AddChatEngagementFeatures';
+import { AddSellReadyFeatures1730000006000 } from './migrations/1730000006000-AddSellReadyFeatures';
 
 config({
   path: [
@@ -34,6 +37,8 @@ export default new DataSource({
     MessageHide,
     MessageReaction,
     UserBlock,
+    AuditEvent,
+    WorkspaceSettings,
   ],
   migrations: [
     CreateChatSchema1730000000000,
@@ -41,6 +46,7 @@ export default new DataSource({
     AddChatScaleIndexes1730000002000,
     AddChatProductFeatures1730000003000,
     AddChatEngagementFeatures1730000005000,
+    AddSellReadyFeatures1730000006000,
   ],
   synchronize: false,
 });

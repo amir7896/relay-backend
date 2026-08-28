@@ -24,6 +24,7 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RolesGuard } from './auth/guards/roles.guard';
 import { ChatModule } from './chat/chat.module';
 import { HealthModule } from './health/health.module';
+import { AdminModule } from './admin/admin.module';
 import { ProxyModule } from './infrastructure/proxy/proxy.module';
 import { UsersModule } from './users/users.module';
 
@@ -65,6 +66,7 @@ import { UsersModule } from './users/users.module';
     AuthModule,
     UsersModule,
     ChatModule, // HTTP + Socket.IO chat surface
+    AdminModule,
     HealthModule,
   ],
   providers: [

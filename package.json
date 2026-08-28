@@ -21,7 +21,7 @@
     "start:users": "nest start user-service --watch",
     "start:chat": "nest start chat-service --watch",
     "start:dev": "concurrently -n gateway,auth,users,chat -c blue,green,magenta,cyan \"npm run start:gateway\" \"npm run start:auth\" \"npm run start:users\" \"npm run start:chat\"",
-    "start:frontend": "npm --prefix Ms-Frontend run dev",
+    "start:frontend": "npm --prefix ../frontend run dev",
     "start:gateway:prod": "node dist/apps/api-gateway/main",
     "start:auth:prod": "node dist/apps/auth-service/main",
     "start:users:prod": "node dist/apps/user-service/main",

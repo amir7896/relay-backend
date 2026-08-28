@@ -29,6 +29,11 @@ export const CHAT_PATTERNS = {
   BLOCK_USER: 'chat.block_user',
   UNBLOCK_USER: 'chat.unblock_user',
   LIST_BLOCKS: 'chat.list_blocks',
+  GET_ANALYTICS: 'chat.get_analytics',
+  LIST_AUDIT: 'chat.list_audit',
+  LOG_AUDIT: 'chat.log_audit',
+  GET_WORKSPACE: 'chat.get_workspace',
+  UPDATE_WORKSPACE: 'chat.update_workspace',
 } as const;
 
 export interface CreatePrivateChatPayload {
@@ -72,6 +77,8 @@ export interface SendMessagePayload extends ConversationActorPayload {
   attachmentMime?: string;
   attachmentName?: string;
   attachmentSize?: number;
+  mentionUserIds?: string[];
+  linkPreview?: LinkPreviewView | null;
 }
 
 export interface SendMessageResult extends MessageView {
@@ -170,6 +177,13 @@ export interface MessageAttachmentView {
   size: number;
 }
 
+export interface LinkPreviewView {
+  url: string;
+  title: string;
+  description: string;
+  image: string | null;
+}
+
 export interface MessageView {
   id: string;
   conversationId: string;
@@ -178,6 +192,8 @@ export interface MessageView {
   type: MessageType;
   replyTo: MessageReplyView | null;
   attachment: MessageAttachmentView | null;
+  mentions: string[];
+  linkPreview: LinkPreviewView | null;
   reactions: MessageReactionView[];
   editedAt: string | null;
   forwarded: boolean;
@@ -219,4 +235,53 @@ export interface PresenceView {
 export interface BlockView {
   userId: string;
   createdAt: string;
+}
+
+export interface ChatAnalyticsView {
+  totalConversations: number;
+  totalMessages: number;
+  messagesToday: number;
+  messagesThisWeek: number;
+  activeConversationsToday: number;
+  messagesByDay: { date: string; count: number }[];
+  topConversations: { conversationId: string; name: string | null; type: string; messageCount: number }[];
+}
+
+export interface AuditEventView {
+  id: string;
+  actorId: string;
+  action: string;
+  targetType: string | null;
+  targetId: string | null;
+  meta: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface ListAuditPayload {
+  actorId: string;
+  page: number;
+  limit: number;
+}
+
+export interface LogAuditPayload {
+  actorId: string;
+  action: string;
+  targetType?: string;
+  targetId?: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface WorkspaceSettingsView {
+  appName: string;
+  tagline: string;
+  primaryColor: string;
+  logoUrl: string | null;
+}
+
+export interface UpdateWorkspacePayload {
+  actorId: string;
+  appName?: string;
+  tagline?: string;
+  primaryColor?: string;
+  logoUrl?: string | null;
 }

@@ -7,6 +7,8 @@ import { ChatGateway } from './chat.gateway';
 import { ConversationCacheService } from './conversation-cache.service';
 import { PresenceService } from './presence.service';
 import { WsAuthService } from './ws-auth.service';
+import { AiService } from './ai.service';
+import { LinkPreviewService } from './link-preview.service';
 
 @Module({
   imports: [
@@ -24,7 +26,10 @@ import { WsAuthService } from './ws-auth.service';
     WsAuthService,
     PresenceService,
     ConversationCacheService,
+    AiService,
+    LinkPreviewService,
   ],
+  exports: [PresenceService, AiService, LinkPreviewService],
 })
 export class ChatModule {}
 
