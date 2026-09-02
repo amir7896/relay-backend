@@ -14,9 +14,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { extname, resolve } from 'path';
+import { memoryStorage } from 'multer';
 import {
   AuthenticatedUser,
   BadRequestAppException,
@@ -38,8 +36,10 @@ import type {
   UserProfileView,
 } from '@app/contracts';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
+import { StorageService } from '../storage/storage.service';
 import { ChatGateway } from './chat.gateway';
 import { ConversationCacheService } from './conversation-cache.service';
+import { PushService } from './push.service';
 import {
   AddMembersDto,
   BlockUserDto,
@@ -79,7 +79,6 @@ import {
   UpdateGroupDocs,
 } from './swagger/chat.swagger';
 
-const UPLOAD_DIR = resolve(process.cwd(), 'uploads');
 const ALLOWED_IMAGE_MIMES = new Set([
   'image/jpeg',
   'image/png',
@@ -106,12 +105,6 @@ type UploadedImage = {
   buffer: Buffer;
 };
 
-function ensureUploadDir(): void {
-  if (!existsSync(UPLOAD_DIR)) {
-    mkdirSync(UPLOAD_DIR, { recursive: true });
-  }
-}
-
 @ChatDocs()
 @Controller('chat')
 export class ChatController {
@@ -121,6 +114,8 @@ export class ChatController {
     private readonly chatGateway: ChatGateway,
     private readonly conversationCache: ConversationCacheService,
     private readonly ai: AiService,
+    private readonly storage: StorageService,
+    private readonly push: PushService,
   ) {}
 
   @Post('private')
@@ -261,7 +256,54 @@ export class ChatController {
     const { recipientIds, ...data } = result;
     await this.conversationCache.setMemberIds(id, recipientIds);
     this.chatGateway.broadcastMessage(data, recipientIds);
+    void this.push.notifyOfflineRecipients({
+      recipientIds,
+      senderId: user.id,
+      title: 'New Relay message',
+      body: (data.body || 'Attachment').slice(0, 120),
+      conversationId: id,
+    });
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_SENT, data };
+  }
+
+  @Get('push/vapid-public-key')
+  getPushPublicKey() {
+    return {
+      message: 'Push public key',
+      data: { publicKey: this.push.getPublicKey(), enabled: this.push.isEnabled() },
+    };
+  }
+
+  @Post('push/subscribe')
+  @HttpCode(HttpStatus.CREATED)
+  async subscribePush(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body()
+    body: {
+      endpoint: string;
+      keys: { p256dh: string; auth: string };
+    },
+  ) {
+    if (!body?.endpoint || !body?.keys?.p256dh || !body?.keys?.auth) {
+      throw new BadRequestAppException('Invalid push subscription');
+    }
+    await this.push.subscribe(user.id, body);
+    return {
+      message: 'Push subscription saved',
+      data: { subscribed: true },
+    };
+  }
+
+  @Delete('push/subscribe')
+  async unsubscribePush(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: { endpoint?: string } = {},
+  ) {
+    await this.push.unsubscribe(user.id, body.endpoint);
+    return {
+      message: 'Push subscription removed',
+      data: { subscribed: false },
+    };
   }
 
   @Patch('conversations/:id/messages/:messageId')
@@ -357,10 +399,11 @@ export class ChatController {
   @HttpCode(HttpStatus.CREATED)
   @UseInterceptors(
     FileInterceptor('file', {
+      storage: memoryStorage(),
       limits: { fileSize: MAX_UPLOAD_BYTES },
     }),
   )
-  uploadFile(@UploadedFile() file?: UploadedImage) {
+  async uploadFile(@UploadedFile() file?: UploadedImage) {
     if (!file) {
       throw new BadRequestAppException('File is required');
     }
@@ -373,18 +416,22 @@ export class ChatController {
       throw new BadRequestAppException('File must be 5MB or smaller');
     }
 
-    ensureUploadDir();
-    const extension = extname(file.originalname).toLowerCase() || '.bin';
-    const filename = `${randomUUID()}${extension}`;
-    writeFileSync(resolve(UPLOAD_DIR, filename), file.buffer);
+    const uploaded = await this.storage.upload({
+      buffer: file.buffer,
+      originalName: file.originalname,
+      mimeType: file.mimetype,
+      size: file.size,
+    });
 
     return {
       message: CHAT_SUCCESS_MESSAGES.FILE_UPLOADED,
       data: {
-        url: `/uploads/${filename}`,
-        mime: file.mimetype,
-        name: file.originalname,
-        size: file.size,
+        url: uploaded.url,
+        key: uploaded.key,
+        provider: uploaded.provider,
+        mime: uploaded.mime,
+        name: uploaded.name,
+        size: uploaded.size,
       },
     };
   }

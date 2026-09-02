@@ -1,7 +1,5 @@
 import cluster from 'node:cluster';
-import { existsSync, mkdirSync } from 'node:fs';
 import os from 'node:os';
-import { join } from 'node:path';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
@@ -33,14 +31,10 @@ import {
   PresenceSchema,
 } from './chat/swagger/chat.schema';
 import { RedisIoAdapter } from './infrastructure/socket/redis-io.adapter';
+import { StorageService } from './storage/storage.service';
 import { UserProfileSchema } from './users/swagger/users.schema';
 
 loadEnv();
-
-const UPLOADS_ROOT = join(process.cwd(), 'uploads');
-if (!existsSync(UPLOADS_ROOT)) {
-  mkdirSync(UPLOADS_ROOT, { recursive: true });
-}
 
 function gatewayWorkers(): number {
   const raw = Number(process.env.GATEWAY_WORKERS ?? 1);
@@ -76,7 +70,14 @@ async function bootstrap() {
     credentials: true,
   });
 
-  app.use('/uploads', express.static(UPLOADS_ROOT));
+  const storage = app.get(StorageService);
+  const localUploadsRoot = storage.getLocalRoot();
+  if (localUploadsRoot) {
+    app.use('/uploads', express.static(localUploadsRoot));
+    logger.log(`Serving local uploads from ${localUploadsRoot}`);
+  } else {
+    logger.log(`Cloud file storage active (${storage.driver})`);
+  }
 
   const prefix = config.get<string>('GATEWAY_GLOBAL_PREFIX', 'api');
   app.setGlobalPrefix(prefix);

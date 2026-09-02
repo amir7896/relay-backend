@@ -69,7 +69,11 @@ export class SendMessageDto {
   @IsUUID('4')
   replyToMessageId?: string;
 
-  @ApiPropertyOptional({ example: '/uploads/abc.jpg' })
+  @ApiPropertyOptional({
+    example: '/uploads/abc.jpg',
+    description:
+      'Public URL of the attachment (local `/uploads/...`, or absolute S3/Cloudinary URL)',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(500)

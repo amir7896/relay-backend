@@ -229,11 +229,19 @@ If you already have local Postgres, Redis, or RabbitMQ, use those credentials. I
 - `THROTTLE_TTL_SECONDS`
 - `THROTTLE_LIMIT`
 
+**File storage** (gateway — chat images / voice)
+
+- `STORAGE_DRIVER` — `local` (default) | `s3` | `cloudinary`
+- `STORAGE_LOCAL_DIR` — local only (default `uploads`)
+- S3: `STORAGE_S3_REGION`, `STORAGE_S3_BUCKET`, `STORAGE_S3_ACCESS_KEY_ID`, `STORAGE_S3_SECRET_ACCESS_KEY`, optional `STORAGE_S3_ENDPOINT`, `STORAGE_S3_PUBLIC_URL`, `STORAGE_S3_FORCE_PATH_STYLE`, `STORAGE_S3_PREFIX`
+- Cloudinary: `STORAGE_CLOUDINARY_CLOUD_NAME`, `STORAGE_CLOUDINARY_API_KEY`, `STORAGE_CLOUDINARY_API_SECRET`, `STORAGE_CLOUDINARY_FOLDER`
+
 Who reads which keys:
 
-- **API Gateway:** app/runtime gateway keys, JWT, Redis, throttle, CORS, Swagger, RabbitMQ
+- **API Gateway:** app/runtime gateway keys, JWT, Redis, throttle, CORS, Swagger, RabbitMQ, file storage
 - **Auth Service:** JWT, admin keys, Postgres, `AUTH_POSTGRES_DATABASE`, RabbitMQ
 - **User Service:** Postgres, `USER_POSTGRES_DATABASE`, RabbitMQ
+- **Chat Service:** Postgres, `CHAT_POSTGRES_DATABASE`, RabbitMQ
 
 ## 5. Start infrastructure
 

@@ -1,9 +1,11 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
+  Param,
   Patch,
   Post,
   Req,
@@ -14,11 +16,26 @@ import {
   AuthenticatedUser,
   CurrentUser,
   Public,
+  Roles,
+  UserRole,
   AUTH_SUCCESS_MESSAGES,
 } from '@app/common';
 import { AUTH_PATTERNS, USER_PATTERNS } from '@app/contracts';
-import type { AuthResult, AuthUserView } from '@app/contracts';
+import type {
+  AuthResult,
+  AuthUserView,
+  ForgotPasswordResult,
+  InviteView,
+  PublicInviteView,
+  RequestEmailVerificationResult,
+} from '@app/contracts';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
+import {
+  CreateInviteDto,
+  ForgotPasswordDto,
+  ResetPasswordDto,
+  VerifyEmailDto,
+} from './dto/auth-extra.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { LogoutDto } from './dto/logout.dto';
@@ -162,5 +179,102 @@ export class AuthController {
     }
     await this.sessionCache.invalidate(user.id);
     return { message: AUTH_SUCCESS_MESSAGES.PASSWORD_CHANGED, data };
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  async forgotPassword(@Body() dto: ForgotPasswordDto) {
+    const data = await this.proxy.sendAuth<ForgotPasswordResult>(
+      AUTH_PATTERNS.FORGOT_PASSWORD,
+      { email: dto.email },
+    );
+    return { message: AUTH_SUCCESS_MESSAGES.PASSWORD_RESET_SENT, data };
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 8, ttl: 60_000 } })
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    const data = await this.proxy.sendAuth(AUTH_PATTERNS.RESET_PASSWORD, {
+      token: dto.token,
+      password: dto.password,
+    });
+    return { message: AUTH_SUCCESS_MESSAGES.PASSWORD_RESET, data };
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('verify-email')
+  @HttpCode(HttpStatus.OK)
+  async verifyEmail(@Body() dto: VerifyEmailDto) {
+    const data = await this.proxy.sendAuth(AUTH_PATTERNS.VERIFY_EMAIL, {
+      token: dto.token,
+    });
+    return { message: AUTH_SUCCESS_MESSAGES.EMAIL_VERIFIED, data };
+  }
+
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  async resendVerification(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.proxy.sendAuth<RequestEmailVerificationResult>(
+      AUTH_PATTERNS.REQUEST_EMAIL_VERIFICATION,
+      { userId: user.id },
+    );
+    return { message: AUTH_SUCCESS_MESSAGES.VERIFICATION_SENT, data };
+  }
+
+  @Roles(UserRole.ADMIN)
+  @Post('invites')
+  @HttpCode(HttpStatus.CREATED)
+  async createInvite(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateInviteDto,
+  ) {
+    const data = await this.proxy.sendAuth<InviteView>(
+      AUTH_PATTERNS.CREATE_INVITE,
+      {
+        createdByUserId: user.id,
+        email: dto.email,
+        expiresInDays: dto.expiresInDays,
+        maxUses: dto.maxUses,
+      },
+    );
+    return { message: AUTH_SUCCESS_MESSAGES.INVITE_CREATED, data };
+  }
+
+  @Roles(UserRole.ADMIN)
+  @Get('invites')
+  async listInvites() {
+    const data = await this.proxy.sendAuth<InviteView[]>(
+      AUTH_PATTERNS.LIST_INVITES,
+      {},
+    );
+    return { message: AUTH_SUCCESS_MESSAGES.INVITES_FETCHED, data };
+  }
+
+  @Public()
+  @Get('invites/:token')
+  async getInvite(@Param('token') token: string) {
+    const data = await this.proxy.sendAuth<PublicInviteView>(
+      AUTH_PATTERNS.GET_INVITE,
+      { token },
+    );
+    return { message: AUTH_SUCCESS_MESSAGES.INVITE_FETCHED, data };
+  }
+
+  @Roles(UserRole.ADMIN)
+  @Delete('invites/:id')
+  async revokeInvite(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    const data = await this.proxy.sendAuth(AUTH_PATTERNS.REVOKE_INVITE, {
+      inviteId: id,
+      requestedByUserId: user.id,
+    });
+    return { message: AUTH_SUCCESS_MESSAGES.INVITE_REVOKED, data };
   }
 }

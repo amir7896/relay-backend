@@ -26,6 +26,8 @@ export * from './utils/duration.util';
 export * from './utils/hash.util';
 export * from './middleware/request-id.middleware';
 export * from './config/env.validation';
+export * from './mail/mail.module';
+export * from './mail/mail.service';
 export * from './redis/redis.module';
 export * from './rabbitmq/rmq.config';
 export * from './bootstrap/listen-http';

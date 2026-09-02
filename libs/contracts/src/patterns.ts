@@ -7,6 +7,14 @@ export const AUTH_PATTERNS = {
   ME: 'auth.me',
   CHANGE_PASSWORD: 'auth.change_password',
   DEACTIVATE: 'auth.deactivate',
+  FORGOT_PASSWORD: 'auth.forgot_password',
+  RESET_PASSWORD: 'auth.reset_password',
+  REQUEST_EMAIL_VERIFICATION: 'auth.request_email_verification',
+  VERIFY_EMAIL: 'auth.verify_email',
+  CREATE_INVITE: 'auth.create_invite',
+  LIST_INVITES: 'auth.list_invites',
+  GET_INVITE: 'auth.get_invite',
+  REVOKE_INVITE: 'auth.revoke_invite',
 } as const;
 
 export const USER_PATTERNS = {

@@ -9,6 +9,7 @@ import { PresenceService } from './presence.service';
 import { WsAuthService } from './ws-auth.service';
 import { AiService } from './ai.service';
 import { LinkPreviewService } from './link-preview.service';
+import { PushService } from './push.service';
 
 @Module({
   imports: [
@@ -28,8 +29,9 @@ import { LinkPreviewService } from './link-preview.service';
     ConversationCacheService,
     AiService,
     LinkPreviewService,
+    PushService,
   ],
-  exports: [PresenceService, AiService, LinkPreviewService],
+  exports: [PresenceService, AiService, LinkPreviewService, PushService],
 })
 export class ChatModule {}
 

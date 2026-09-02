@@ -5,6 +5,7 @@ import { authEnvSchema } from '@app/common';
 import { createTypeOrmOptions } from '@app/database';
 import { AuthModule } from './auth/auth.module';
 import { AuthUser } from './database/entities/auth-user.entity';
+import { AuthToken } from './database/entities/auth-token.entity';
 import { RefreshToken } from './database/entities/refresh-token.entity';
 
 @Module({
@@ -23,7 +24,7 @@ import { RefreshToken } from './database/entities/refresh-token.entity';
           username: config.getOrThrow<string>('POSTGRES_USER'),
           password: config.getOrThrow<string>('POSTGRES_PASSWORD'),
           database: config.getOrThrow<string>('AUTH_POSTGRES_DATABASE'),
-          entities: [AuthUser, RefreshToken],
+          entities: [AuthUser, RefreshToken, AuthToken],
           poolMax: config.get<number>('POSTGRES_POOL_MAX', 20),
           poolMin: config.get<number>('POSTGRES_POOL_MIN', 2),
         }),

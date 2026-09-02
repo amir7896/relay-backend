@@ -26,6 +26,7 @@ import { ChatModule } from './chat/chat.module';
 import { HealthModule } from './health/health.module';
 import { AdminModule } from './admin/admin.module';
 import { ProxyModule } from './infrastructure/proxy/proxy.module';
+import { StorageModule } from './storage/storage.module';
 import { UsersModule } from './users/users.module';
 
 @Module({
@@ -62,6 +63,7 @@ import { UsersModule } from './users/users.module';
         ],
       }),
     }),
+    StorageModule,
     ProxyModule,
     AuthModule,
     UsersModule,

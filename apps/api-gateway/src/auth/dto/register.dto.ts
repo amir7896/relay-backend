@@ -1,8 +1,9 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
   IsEmail,
   IsNotEmpty,
+  IsOptional,
   IsString,
   Matches,
   MaxLength,
@@ -44,4 +45,12 @@ export class RegisterDto {
   @IsNotEmpty({ message: 'lastName is required' })
   @MaxLength(80)
   lastName!: string;
+
+  @ApiPropertyOptional({
+    description: 'Workspace invite token from /invite/:token',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  inviteToken?: string;
 }

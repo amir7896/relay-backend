@@ -41,8 +41,70 @@ export const gatewayEnvSchema = Joi.object({
   GATEWAY_WORKERS: Joi.number().integer().min(0).default(1),
   AUTH_VALIDATE_CACHE_SECONDS: Joi.number().integer().min(1).max(60).default(15),
   CORS_ORIGIN: Joi.string().default('*'),
+  STORAGE_DRIVER: Joi.string()
+    .valid('local', 's3', 'cloudinary')
+    .default('local'),
+  STORAGE_LOCAL_DIR: Joi.string().default('uploads'),
+  STORAGE_S3_REGION: Joi.when('STORAGE_DRIVER', {
+    is: 's3',
+    then: Joi.string().required(),
+    otherwise: Joi.string().optional().allow(''),
+  }),
+  STORAGE_S3_BUCKET: Joi.when('STORAGE_DRIVER', {
+    is: 's3',
+    then: Joi.string().required(),
+    otherwise: Joi.string().optional().allow(''),
+  }),
+  STORAGE_S3_ACCESS_KEY_ID: Joi.when('STORAGE_DRIVER', {
+    is: 's3',
+    then: Joi.string().required(),
+    otherwise: Joi.string().optional().allow(''),
+  }),
+  STORAGE_S3_SECRET_ACCESS_KEY: Joi.when('STORAGE_DRIVER', {
+    is: 's3',
+    then: Joi.string().required(),
+    otherwise: Joi.string().optional().allow(''),
+  }),
+  STORAGE_S3_ENDPOINT: Joi.string().optional().allow(''),
+  STORAGE_S3_PUBLIC_URL: Joi.string().optional().allow(''),
+  STORAGE_S3_FORCE_PATH_STYLE: Joi.boolean().default(false),
+  STORAGE_S3_PREFIX: Joi.string().default('relay'),
+  STORAGE_CLOUDINARY_CLOUD_NAME: Joi.when('STORAGE_DRIVER', {
+    is: 'cloudinary',
+    then: Joi.string().required(),
+    otherwise: Joi.string().optional().allow(''),
+  }),
+  STORAGE_CLOUDINARY_API_KEY: Joi.when('STORAGE_DRIVER', {
+    is: 'cloudinary',
+    then: Joi.string().required(),
+    otherwise: Joi.string().optional().allow(''),
+  }),
+  STORAGE_CLOUDINARY_API_SECRET: Joi.when('STORAGE_DRIVER', {
+    is: 'cloudinary',
+    then: Joi.string().required(),
+    otherwise: Joi.string().optional().allow(''),
+  }),
+  STORAGE_CLOUDINARY_FOLDER: Joi.string().default('relay'),
+  APP_PUBLIC_URL: Joi.string().uri().optional().allow(''),
+  FRONTEND_URL: Joi.string().uri().optional().allow(''),
+  VAPID_PUBLIC_KEY: Joi.string().optional().allow(''),
+  VAPID_PRIVATE_KEY: Joi.string().optional().allow(''),
+  VAPID_SUBJECT: Joi.string().default('mailto:admin@relay.local'),
   ...rabbitMqSchema,
 });
+
+const mailSchema = {
+  APP_PUBLIC_URL: Joi.string().uri().optional().allow(''),
+  FRONTEND_URL: Joi.string().uri().optional().allow(''),
+  SMTP_HOST: Joi.string().optional().allow(''),
+  SMTP_PORT: Joi.number().port().default(587),
+  SMTP_SECURE: Joi.boolean().default(false),
+  SMTP_USER: Joi.string().optional().allow(''),
+  SMTP_PASS: Joi.string().optional().allow(''),
+  SMTP_FROM: Joi.string().optional().allow(''),
+  EMAIL_VERIFY_TTL_HOURS: Joi.number().integer().min(1).max(168).default(48),
+  PASSWORD_RESET_TTL_HOURS: Joi.number().integer().min(1).max(48).default(2),
+};
 
 export const authEnvSchema = Joi.object({
   NODE_ENV: Joi.string()
@@ -56,6 +118,7 @@ export const authEnvSchema = Joi.object({
   JWT_REFRESH_EXPIRES_IN: Joi.string().default('7d'),
   ADMIN_EMAIL: Joi.string().email().optional(),
   ADMIN_PASSWORD: Joi.string().min(8).optional(),
+  ...mailSchema,
   ...postgresSchema,
   ...rabbitMqSchema,
 });

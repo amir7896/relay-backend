@@ -5,26 +5,39 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomUUID } from 'crypto';
 import { QueryFailedError, Repository } from 'typeorm';
 import {
+  MailService,
   UserRole,
   hashPassword,
   parseDurationMs,
   verifyPassword,
+  RpcErrors,
 } from '@app/common';
-import { RpcErrors } from '@app/common';
 import {
   AuthResult,
   AuthUserView,
   ChangePasswordPayload,
+  CreateInvitePayload,
   DeactivatePayload,
+  ForgotPasswordPayload,
+  ForgotPasswordResult,
+  GetInvitePayload,
+  InviteView,
   LoginPayload,
   LogoutPayload,
+  PublicInviteView,
   RefreshPayload,
   RegisterPayload,
+  RequestEmailVerificationPayload,
+  RequestEmailVerificationResult,
+  ResetPasswordPayload,
+  RevokeInvitePayload,
   TokenPair,
   ValidatePayload,
+  VerifyEmailPayload,
 } from '@app/contracts';
 import { AuthUser } from '../database/entities/auth-user.entity';
 import { RefreshToken } from '../database/entities/refresh-token.entity';
+import { AuthTokenService } from './auth-token.service';
 
 @Injectable()
 export class AuthService implements OnModuleInit {
@@ -37,6 +50,8 @@ export class AuthService implements OnModuleInit {
     private readonly refreshTokens: Repository<RefreshToken>,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly authTokens: AuthTokenService,
+    private readonly mail: MailService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -50,17 +65,42 @@ export class AuthService implements OnModuleInit {
       return RpcErrors.conflict('An account with this email already exists');
     }
 
+    let inviteId: string | null = null;
+    let emailVerified = false;
+    if (payload.inviteToken) {
+      const invite = await this.authTokens.assertInviteForRegister(
+        payload.inviteToken,
+        email,
+      );
+      inviteId = invite.id;
+      emailVerified = Boolean(invite.email && invite.email === email);
+    }
+
     const user = this.users.create({
       email,
       password: await hashPassword(payload.password),
       role: UserRole.USER,
       isActive: true,
-      isEmailVerified: false,
+      isEmailVerified: emailVerified,
     });
 
     try {
       const saved = await this.users.save(user);
+      if (inviteId) {
+        await this.authTokens.consumeInvite(inviteId);
+      }
       const tokens = await this.issueTokens(saved);
+      if (!saved.isEmailVerified) {
+        void this.authTokens
+          .requestEmailVerification(saved.id)
+          .catch((error: unknown) => {
+            this.logger.warn(
+              `Could not send verification email: ${
+                error instanceof Error ? error.message : 'unknown'
+              }`,
+            );
+          });
+      }
       return { user: this.toView(saved), tokens };
     } catch (error) {
       if (this.isUniqueViolation(error)) {
@@ -206,6 +246,73 @@ export class AuthService implements OnModuleInit {
     );
 
     return { changed: true };
+  }
+
+  async forgotPassword(
+    payload: ForgotPasswordPayload,
+  ): Promise<ForgotPasswordResult> {
+    return this.authTokens.forgotPassword(payload.email);
+  }
+
+  async resetPassword(
+    payload: ResetPasswordPayload,
+  ): Promise<{ reset: boolean }> {
+    const result = await this.authTokens.resetPassword(
+      payload.token,
+      await hashPassword(payload.password),
+    );
+    await this.refreshTokens.update(
+      { userId: result.userId, revoked: false },
+      { revoked: true },
+    );
+    return { reset: true };
+  }
+
+  async requestEmailVerification(
+    payload: RequestEmailVerificationPayload,
+  ): Promise<RequestEmailVerificationResult> {
+    return this.authTokens.requestEmailVerification(payload.userId);
+  }
+
+  async verifyEmail(
+    payload: VerifyEmailPayload,
+  ): Promise<{ verified: boolean }> {
+    return this.authTokens.verifyEmail(payload.token);
+  }
+
+  async createInvite(payload: CreateInvitePayload): Promise<InviteView> {
+    const invite = await this.authTokens.createInvite(payload);
+    if (invite.email && invite.inviteUrl.includes('/invite/')) {
+      void this.mail
+        .send({
+          to: invite.email,
+          subject: 'You are invited to Relay',
+          text: `Join Relay with this invite link:\n${invite.inviteUrl}\n\nThe link expires on ${invite.expiresAt}.`,
+          html: `<p>You are invited to Relay.</p><p><a href="${invite.inviteUrl}">Accept invite</a></p><p>Expires: ${invite.expiresAt}</p>`,
+        })
+        .catch((error: unknown) => {
+          this.logger.warn(
+            `Could not email invite: ${
+              error instanceof Error ? error.message : 'unknown'
+            }`,
+          );
+        });
+    }
+    return invite;
+  }
+
+  async listInvites(): Promise<InviteView[]> {
+    return this.authTokens.listInvites();
+  }
+
+  async getInvite(payload: GetInvitePayload): Promise<PublicInviteView> {
+    return this.authTokens.getInvite(payload.token);
+  }
+
+  async revokeInvite(
+    payload: RevokeInvitePayload,
+  ): Promise<{ revoked: boolean }> {
+    return this.authTokens.revokeInvite(payload.inviteId);
   }
 
   async deactivate(

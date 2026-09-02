@@ -24,6 +24,14 @@ export const AUTH_SUCCESS_MESSAGES = {
   TOKEN_REFRESHED: 'Access token refreshed successfully',
   PROFILE_FETCHED: 'Profile retrieved successfully',
   PASSWORD_CHANGED: 'Password changed successfully',
+  PASSWORD_RESET_SENT: 'If that email exists, a reset link was sent',
+  PASSWORD_RESET: 'Password reset successfully',
+  VERIFICATION_SENT: 'Verification email sent',
+  EMAIL_VERIFIED: 'Email verified successfully',
+  INVITE_CREATED: 'Invite created successfully',
+  INVITES_FETCHED: 'Invites retrieved successfully',
+  INVITE_FETCHED: 'Invite retrieved successfully',
+  INVITE_REVOKED: 'Invite revoked successfully',
 } as const;
 
 export const USER_SUCCESS_MESSAGES = {
