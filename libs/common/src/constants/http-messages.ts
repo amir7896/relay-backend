@@ -53,6 +53,7 @@ export const CHAT_SUCCESS_MESSAGES = {
   CONVERSATION_FETCHED: 'Conversation retrieved successfully',
   MESSAGES_FETCHED: 'Messages retrieved successfully',
   MESSAGES_SEARCHED: 'Messages searched successfully',
+  MEDIA_FETCHED: 'Media retrieved successfully',
   MESSAGE_SENT: 'Message sent successfully',
   MESSAGE_EDITED: 'Message edited successfully',
   MESSAGE_REACTED: 'Reaction updated successfully',

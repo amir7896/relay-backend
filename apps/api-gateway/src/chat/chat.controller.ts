@@ -10,9 +10,12 @@ import {
   Patch,
   Post,
   Query,
+  Res,
+  StreamableFile,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import {
@@ -30,6 +33,7 @@ import type {
   BlockView,
   ConversationView,
   DeleteMessageResult,
+  MessageView,
   PresenceView,
   SeenResultView,
   SendMessageResult,
@@ -50,6 +54,7 @@ import {
   DeleteMessageDto,
   EditMessageDto,
   ForwardMessageDto,
+  ListMediaQueryDto,
   MarkSeenDto,
   MuteConversationDto,
   PinConversationDto,
@@ -95,11 +100,93 @@ const ALLOWED_AUDIO_MIMES = new Set([
   // Some browsers label audio-only MediaRecorder output as video/webm
   'video/webm',
 ]);
+const ALLOWED_FILE_MIMES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/rtf',
+  'text/rtf',
+  'text/plain',
+  'text/csv',
+  'application/json',
+  'application/zip',
+  'application/x-zip-compressed',
+  'application/vnd.rar',
+  'application/x-rar-compressed',
+  'application/vnd.oasis.opendocument.text',
+  'application/vnd.oasis.opendocument.spreadsheet',
+  'application/vnd.oasis.opendocument.presentation',
+]);
 const ALLOWED_UPLOAD_MIMES = new Set([
   ...ALLOWED_IMAGE_MIMES,
   ...ALLOWED_AUDIO_MIMES,
+  ...ALLOWED_FILE_MIMES,
 ]);
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+/** Images/voice stay small; documents may be larger (Cloudinary free tier ~10MB raw). */
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+const FILE_EXT_MIME: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx':
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx':
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx':
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.rtf': 'application/rtf',
+  '.txt': 'text/plain',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+  '.zip': 'application/zip',
+  '.rar': 'application/vnd.rar',
+  '.odt': 'application/vnd.oasis.opendocument.text',
+  '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
+  '.odp': 'application/vnd.oasis.opendocument.presentation',
+};
+
+function normalizeUploadMime(
+  mimeType: string,
+  originalName: string,
+): string | null {
+  if (mimeType === 'video/webm') {
+    return 'audio/webm';
+  }
+  if (ALLOWED_UPLOAD_MIMES.has(mimeType)) {
+    return mimeType;
+  }
+  // Some browsers send empty or generic mime for documents
+  if (!mimeType || mimeType === 'application/octet-stream') {
+    const ext = originalName.includes('.')
+      ? `.${originalName.split('.').pop()!.toLowerCase()}`
+      : '';
+    const guessed = FILE_EXT_MIME[ext];
+    if (guessed && ALLOWED_FILE_MIMES.has(guessed)) {
+      return guessed;
+    }
+  }
+  return null;
+}
+
+function resolveAttachmentContentType(
+  mime: string | null | undefined,
+  filename: string,
+): string {
+  const cleaned = (mime ?? '').trim();
+  if (cleaned && cleaned !== 'application/octet-stream') {
+    return cleaned;
+  }
+  const ext = filename.includes('.')
+    ? `.${filename.split('.').pop()!.toLowerCase()}`
+    : '';
+  return FILE_EXT_MIME[ext] ?? 'application/octet-stream';
+}
 
 type UploadedImage = {
   originalname: string;
@@ -218,6 +305,72 @@ export class ChatController {
       limit: query.limit,
     });
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGES_SEARCHED, data };
+  }
+
+  @Get('conversations/:id/media')
+  async listMedia(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Query() query: ListMediaQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_MEDIA, {
+      actorId: user.id,
+      conversationId: id,
+      page: query.page,
+      limit: query.limit,
+      kind: query.kind,
+    });
+    return { message: CHAT_SUCCESS_MESSAGES.MEDIA_FETCHED, data };
+  }
+
+  @Get('conversations/:id/messages/:messageId/download')
+  async downloadAttachment(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('messageId', ParseUuidPipe) messageId: string,
+    @Query('disposition') disposition: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const message = await this.proxy.sendChat<MessageView>(
+      CHAT_PATTERNS.GET_MESSAGE,
+      {
+        actorId: user.id,
+        conversationId: id,
+        messageId,
+      },
+    );
+    if (!message.attachment?.url || message.deletedForEveryone) {
+      throw new NotFoundAppException('Attachment not found');
+    }
+
+    const filename = (
+      message.attachment.name ||
+      `relay-${messageId}`
+    ).replace(/[\\/:*?"<>|]+/g, '_');
+    const inline = disposition === 'inline';
+    const contentType = resolveAttachmentContentType(
+      message.attachment.mime,
+      filename,
+    );
+
+    try {
+      const buffer = await this.storage.downloadBuffer(message.attachment.url);
+      res.setHeader('Content-Type', contentType);
+      res.setHeader(
+        'Content-Disposition',
+        `${inline ? 'inline' : 'attachment'}; filename="${filename.replace(/"/g, '')}"`,
+      );
+      res.setHeader('Cache-Control', 'private, max-age=60');
+      // Allow the SPA to open this blob in a new tab / iframe
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      return new StreamableFile(buffer);
+    } catch {
+      // Last resort: redirect to a signed Cloudinary URL (bypasses public 401)
+      const signed = this.storage.resolveDownloadUrl(message.attachment.url, {
+        filename,
+      });
+      return res.redirect(signed);
+    }
   }
 
   @Get('conversations/:id/messages')
@@ -463,17 +616,15 @@ export class ChatController {
     if (!file) {
       throw new BadRequestAppException('File is required');
     }
-    if (!ALLOWED_UPLOAD_MIMES.has(file.mimetype)) {
+    const mimeType = normalizeUploadMime(file.mimetype, file.originalname);
+    if (!mimeType) {
       throw new BadRequestException(
-        'Only jpeg, png, gif, webp images and webm/ogg/mp3/mp4/wav audio are allowed',
+        'Only images (jpeg/png/gif/webp), audio (webm/ogg/mp3/mp4/wav), and common documents (pdf/doc/xls/ppt/txt/csv/zip/…) are allowed',
       );
     }
     if (file.size > MAX_UPLOAD_BYTES) {
-      throw new BadRequestAppException('File must be 5MB or smaller');
+      throw new BadRequestAppException('File must be 10MB or smaller');
     }
-
-    const mimeType =
-      file.mimetype === 'video/webm' ? 'audio/webm' : file.mimetype;
 
     const uploaded = await this.storage.upload({
       buffer: file.buffer,

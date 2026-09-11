@@ -76,7 +76,7 @@ export class SendMessageDto {
   })
   @IsOptional()
   @IsString()
-  @MaxLength(500)
+  @MaxLength(1000)
   attachmentUrl?: string;
 
   @ApiPropertyOptional({ example: 'image/jpeg' })
@@ -238,4 +238,15 @@ export class SearchMessagesQueryDto extends ChatPageQueryDto {
   @IsNotEmpty()
   @MaxLength(200)
   q!: string;
+}
+
+export class ListMediaQueryDto extends ChatPageQueryDto {
+  @ApiPropertyOptional({
+    enum: ['all', 'image', 'file', 'audio'],
+    default: 'all',
+    description: 'Filter media by kind',
+  })
+  @IsOptional()
+  @IsIn(['all', 'image', 'file', 'audio'])
+  kind: 'all' | 'image' | 'file' | 'audio' = 'all';
 }

@@ -12,6 +12,8 @@ export const CHAT_PATTERNS = {
   GET_CONVERSATION: 'chat.get_conversation',
   LIST_MESSAGES: 'chat.list_messages',
   SEARCH_MESSAGES: 'chat.search_messages',
+  LIST_MEDIA: 'chat.list_media',
+  GET_MESSAGE: 'chat.get_message',
   SEND_MESSAGE: 'chat.send_message',
   EDIT_MESSAGE: 'chat.edit_message',
   REACT_MESSAGE: 'chat.react_message',
@@ -68,6 +70,18 @@ export interface SearchMessagesPayload extends ConversationActorPayload {
   query: string;
   page: number;
   limit: number;
+}
+
+export type MediaKindFilter = 'all' | 'image' | 'file' | 'audio';
+
+export interface ListMediaPayload extends ConversationActorPayload {
+  page: number;
+  limit: number;
+  kind?: MediaKindFilter;
+}
+
+export interface GetMessagePayload extends ConversationActorPayload {
+  messageId: string;
 }
 
 export interface SendMessagePayload extends ConversationActorPayload {

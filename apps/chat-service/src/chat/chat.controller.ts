@@ -12,6 +12,8 @@ import type {
   ForwardMessagePayload,
   ListConversationsPayload,
   ListMessagesPayload,
+  ListMediaPayload,
+  GetMessagePayload,
   MarkSeenPayload,
   MuteConversationPayload,
   PinConversationPayload,
@@ -59,6 +61,16 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.SEARCH_MESSAGES)
   searchMessages(@Payload() payload: SearchMessagesPayload) {
     return this.chatService.searchMessages(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_MEDIA)
+  listMedia(@Payload() payload: ListMediaPayload) {
+    return this.chatService.listMedia(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.GET_MESSAGE)
+  getMessage(@Payload() payload: GetMessagePayload) {
+    return this.chatService.getMessage(payload);
   }
 
   @MessagePattern(CHAT_PATTERNS.SEND_MESSAGE)

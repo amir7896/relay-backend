@@ -27,7 +27,9 @@ import type {
   ForwardMessagePayload,
   ListAuditPayload,
   ListConversationsPayload,
+  ListMediaPayload,
   ListMessagesPayload,
+  GetMessagePayload,
   LogAuditPayload,
   MarkSeenPayload,
   MessageReactionView,
@@ -356,6 +358,118 @@ export class ChatService {
       total,
       payload.page,
       payload.limit,
+    );
+  }
+
+  async listMedia(payload: ListMediaPayload) {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const kind = payload.kind ?? 'all';
+    const { skip, take } = getSkipTake(payload.page, payload.limit);
+    const qb = this.messages
+      .createQueryBuilder('m')
+      .where('m.conversationId = :conversationId', {
+        conversationId: payload.conversationId,
+      })
+      .andWhere('m.attachmentUrl IS NOT NULL')
+      .andWhere("m.attachmentUrl <> ''")
+      .andWhere('m.deletedForEveryoneAt IS NULL')
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM message_hides mh
+          WHERE mh."messageId" = m.id AND mh."userId" = :actorId
+        )`,
+        { actorId: payload.actorId },
+      );
+
+    if (kind === 'image') {
+      qb.andWhere(
+        `(m.type = :imageType OR m.attachmentMime ILIKE 'image/%')`,
+        { imageType: MessageType.IMAGE },
+      );
+    } else if (kind === 'audio') {
+      qb.andWhere(
+        `(m.type = :audioType OR m.attachmentMime ILIKE 'audio/%' OR m.attachmentMime = 'video/webm')`,
+        { audioType: MessageType.AUDIO },
+      );
+    } else if (kind === 'file') {
+      qb.andWhere(
+        `(
+          m.type = :fileType
+          OR (
+            m.type NOT IN (:...excludeTypes)
+            AND (m.attachmentMime IS NULL OR (
+              m.attachmentMime NOT ILIKE 'image/%'
+              AND m.attachmentMime NOT ILIKE 'audio/%'
+              AND m.attachmentMime <> 'video/webm'
+            ))
+          )
+        )`,
+        {
+          fileType: MessageType.FILE,
+          excludeTypes: [MessageType.IMAGE, MessageType.AUDIO],
+        },
+      );
+    }
+
+    const [items, total] = await qb
+      .orderBy('m.createdAt', 'DESC')
+      .skip(skip)
+      .take(take)
+      .getManyAndCount();
+
+    const replyMap = await this.loadReplyParents(items);
+    const reactionsByMessage = await this.loadReactionsByMessageIds(
+      items.map((item) => item.id),
+    );
+    return buildPaginatedResult(
+      items.map((item) =>
+        this.toMessageView(
+          item,
+          conversation.members,
+          replyMap.get(item.replyToMessageId ?? '') ?? null,
+          reactionsByMessage.get(item.id) ?? [],
+          payload.actorId,
+        ),
+      ),
+      total,
+      payload.page,
+      payload.limit,
+    );
+  }
+
+  async getMessage(payload: GetMessagePayload) {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const message = await this.messages.findOne({
+      where: {
+        id: payload.messageId,
+        conversationId: payload.conversationId,
+      },
+    });
+    if (!message) {
+      return RpcErrors.notFound('Message not found');
+    }
+    const hidden = await this.messageHides.findOne({
+      where: { messageId: message.id, userId: payload.actorId },
+    });
+    if (hidden) {
+      return RpcErrors.notFound('Message not found');
+    }
+    const replyMap = await this.loadReplyParents([message]);
+    const reactionsByMessage = await this.loadReactionsByMessageIds([
+      message.id,
+    ]);
+    return this.toMessageView(
+      message,
+      conversation.members,
+      replyMap.get(message.replyToMessageId ?? '') ?? null,
+      reactionsByMessage.get(message.id) ?? [],
+      payload.actorId,
     );
   }
 
@@ -1629,13 +1743,14 @@ export class ChatService {
       const replyBody = replyDeleted
         ? ''
         : replyTo.body?.trim() ||
-          (replyTo.attachmentMime?.startsWith('image/')
+          (replyTo.attachmentMime?.startsWith('image/') ||
+          replyTo.type === MessageType.IMAGE
             ? 'Photo'
             : replyTo.attachmentMime?.startsWith('audio/') ||
                 replyTo.type === MessageType.AUDIO
               ? 'Voice message'
-              : replyTo.attachmentUrl
-                ? 'Attachment'
+              : replyTo.type === MessageType.FILE || replyTo.attachmentUrl
+                ? replyTo.attachmentName?.trim() || 'File'
                 : replyTo.type === MessageType.CALL
                   ? 'Call'
                   : '');
