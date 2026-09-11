@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Repository } from 'typeorm';
+import { In, IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import {
   ALLOWED_REACTIONS,
   ConversationMemberRole,
@@ -37,12 +37,19 @@ import type {
   MessageView,
   MuteConversationPayload,
   PinConversationPayload,
+  PinMessagePayload,
   ReactMessagePayload,
   RemoveMemberPayload,
+  GlobalSearchHitView,
+  GlobalSearchMessagesPayload,
+  CancelScheduledMessagePayload,
+  ScheduleMessagePayload,
+  ScheduledMessageView,
   SearchMessagesPayload,
   SeenResultView,
   SendMessagePayload,
   SendMessageResult,
+  SetDisappearingPayload,
   SetMemberRolePayload,
   UpdateGroupPayload,
   UpdateWorkspacePayload,
@@ -53,6 +60,7 @@ import { ConversationMember } from '../database/entities/conversation-member.ent
 import { Message } from '../database/entities/message.entity';
 import { MessageHide } from '../database/entities/message-hide.entity';
 import { MessageReaction } from '../database/entities/message-reaction.entity';
+import { ScheduledMessage } from '../database/entities/scheduled-message.entity';
 import { UserBlock } from '../database/entities/user-block.entity';
 import { AuditEvent } from '../database/entities/audit-event.entity';
 import { WorkspaceSettings } from '../database/entities/workspace-settings.entity';
@@ -61,9 +69,19 @@ const MAX_GROUP_MEMBERS = 50;
 const DELETE_FOR_EVERYONE_WINDOW_MS = 0; // 0 = no time limit (sender can always delete for everyone)
 
 const EDIT_WINDOW_MS = 15 * 60 * 1000;
+const SCHEDULE_MIN_DELAY_MS = 60 * 1000;
+const SCHEDULE_MAX_AHEAD_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_PENDING_SCHEDULED_PER_CHAT = 20;
+const DISAPPEARING_DURATIONS = new Set([
+  0, 30, 60, 3600, 86_400, 604_800, 7_776_000,
+]);
 
 export function privatePairKey(userA: string, userB: string): string {
   return [userA, userB].sort().join(':');
+}
+
+function escapeIlikePattern(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
 }
 
 @Injectable()
@@ -79,6 +97,8 @@ export class ChatService {
     private readonly messageHides: Repository<MessageHide>,
     @InjectRepository(MessageReaction)
     private readonly messageReactions: Repository<MessageReaction>,
+    @InjectRepository(ScheduledMessage)
+    private readonly scheduledMessages: Repository<ScheduledMessage>,
     @InjectRepository(UserBlock)
     private readonly userBlocks: Repository<UserBlock>,
     @InjectRepository(AuditEvent)
@@ -327,7 +347,9 @@ export class ChatService {
       .where('m.conversationId = :conversationId', {
         conversationId: payload.conversationId,
       })
-      .andWhere('m.body ILIKE :pattern', { pattern: `%${query}%` })
+      .andWhere(`m.body ILIKE :pattern ESCAPE '\\'`, {
+        pattern: `%${escapeIlikePattern(query)}%`,
+      })
       .andWhere('m.deletedForEveryoneAt IS NULL')
       .andWhere(
         `NOT EXISTS (
@@ -355,6 +377,103 @@ export class ChatService {
           payload.actorId,
         ),
       ),
+      total,
+      payload.page,
+      payload.limit,
+    );
+  }
+
+  async searchGlobal(payload: GlobalSearchMessagesPayload) {
+    const query = payload.query.trim();
+    if (!query) {
+      return RpcErrors.badRequest('Search query is required');
+    }
+    if (query.length < 2) {
+      return buildPaginatedResult<GlobalSearchHitView>(
+        [],
+        0,
+        payload.page,
+        payload.limit,
+      );
+    }
+
+    const memberships = await this.members.find({
+      where: { userId: payload.actorId, leftAt: IsNull() },
+      select: { conversationId: true },
+    });
+    const conversationIds = memberships.map((item) => item.conversationId);
+    if (conversationIds.length === 0) {
+      return buildPaginatedResult<GlobalSearchHitView>(
+        [],
+        0,
+        payload.page,
+        payload.limit,
+      );
+    }
+
+    const { skip, take } = getSkipTake(payload.page, payload.limit);
+    const [items, total] = await this.messages
+      .createQueryBuilder('m')
+      .where('m.conversationId IN (:...conversationIds)', { conversationIds })
+      .andWhere(`m.body ILIKE :pattern ESCAPE '\\'`, {
+        pattern: `%${escapeIlikePattern(query)}%`,
+      })
+      .andWhere('m.deletedForEveryoneAt IS NULL')
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM message_hides mh
+          WHERE mh."messageId" = m.id AND mh."userId" = :actorId
+        )`,
+        { actorId: payload.actorId },
+      )
+      .orderBy('m.createdAt', 'DESC')
+      .skip(skip)
+      .take(take)
+      .getManyAndCount();
+
+    const uniqueConversationIds = [
+      ...new Set(items.map((item) => item.conversationId)),
+    ];
+    const conversations =
+      uniqueConversationIds.length === 0
+        ? []
+        : await this.conversations.find({
+            where: { id: In(uniqueConversationIds) },
+            relations: { members: true },
+          });
+    const conversationById = new Map(
+      conversations.map((item) => [item.id, item] as const),
+    );
+
+    const replyMap = await this.loadReplyParents(items);
+    const reactionsByMessage = await this.loadReactionsByMessageIds(
+      items.map((item) => item.id),
+    );
+
+    return buildPaginatedResult(
+      items.map((item): GlobalSearchHitView => {
+        const conversation = conversationById.get(item.conversationId);
+        const activeMembers = (conversation?.members ?? []).filter(
+          (member) => !member.leftAt,
+        );
+        return {
+          message: this.toMessageView(
+            item,
+            activeMembers,
+            replyMap.get(item.replyToMessageId ?? '') ?? null,
+            reactionsByMessage.get(item.id) ?? [],
+            payload.actorId,
+          ),
+          conversation: {
+            id: conversation?.id ?? item.conversationId,
+            type: conversation?.type ?? ConversationType.PRIVATE,
+            name: conversation?.name ?? null,
+            members: activeMembers.map((member) => ({
+              userId: member.userId,
+            })),
+          },
+        };
+      }),
       total,
       payload.page,
       payload.limit,
@@ -611,6 +730,12 @@ export class ChatService {
         attachmentSize: payload.attachmentSize ?? null,
         mentions: validMentions,
         linkPreview: payload.linkPreview ?? null,
+        expiresAt:
+          conversation.disappearingDurationSeconds > 0
+            ? new Date(
+                Date.now() + conversation.disappearingDurationSeconds * 1000,
+              )
+            : null,
       }),
     );
     conversation.lastMessageAt = saved.createdAt;
@@ -740,6 +865,337 @@ export class ChatService {
     };
   }
 
+  async pinMessage(payload: PinMessagePayload): Promise<SendMessageResult> {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const message = await this.messages.findOne({
+      where: {
+        id: payload.messageId,
+        conversationId: conversation.id,
+      },
+    });
+    if (!message) {
+      return RpcErrors.notFound('Message');
+    }
+    if (message.deletedForEveryoneAt) {
+      return RpcErrors.badRequest('Cannot pin a deleted message');
+    }
+    if (message.type === MessageType.CALL) {
+      return RpcErrors.badRequest('Cannot pin call history messages');
+    }
+
+    if (payload.pinned) {
+      if (!message.pinnedAt) {
+        const currentlyPinned = await this.messages
+          .createQueryBuilder('m')
+          .where('m.conversationId = :conversationId', {
+            conversationId: conversation.id,
+          })
+          .andWhere('m.pinnedAt IS NOT NULL')
+          .andWhere('m.deletedForEveryoneAt IS NULL')
+          .getCount();
+        if (currentlyPinned >= 3) {
+          return RpcErrors.badRequest(
+            'You can pin up to 3 messages in a chat. Unpin one first.',
+          );
+        }
+        message.pinnedAt = new Date();
+        message.pinnedByUserId = payload.actorId;
+        await this.messages.save(message);
+      }
+    } else if (message.pinnedAt) {
+      message.pinnedAt = null;
+      message.pinnedByUserId = null;
+      await this.messages.save(message);
+    }
+
+    const replyTo = message.replyToMessageId
+      ? await this.messages.findOne({ where: { id: message.replyToMessageId } })
+      : null;
+    const reactions = await this.messageReactions.find({
+      where: { messageId: message.id },
+    });
+
+    return {
+      ...this.toMessageView(
+        message,
+        conversation.members,
+        replyTo,
+        reactions,
+        payload.actorId,
+      ),
+      recipientIds: this.recipientIds(conversation),
+    };
+  }
+
+  async listPinnedMessages(payload: ConversationActorPayload) {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const items = await this.messages
+      .createQueryBuilder('m')
+      .where('m.conversationId = :conversationId', {
+        conversationId: payload.conversationId,
+      })
+      .andWhere('m.pinnedAt IS NOT NULL')
+      .andWhere('m.deletedForEveryoneAt IS NULL')
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM message_hides mh
+          WHERE mh."messageId" = m.id AND mh."userId" = :actorId
+        )`,
+        { actorId: payload.actorId },
+      )
+      .orderBy('m.pinnedAt', 'DESC')
+      .take(10)
+      .getMany();
+
+    const replyMap = await this.loadReplyParents(items);
+    const reactionsByMessage = await this.loadReactionsByMessageIds(
+      items.map((item) => item.id),
+    );
+    return items.map((item) =>
+      this.toMessageView(
+        item,
+        conversation.members,
+        replyMap.get(item.replyToMessageId ?? '') ?? null,
+        reactionsByMessage.get(item.id) ?? [],
+        payload.actorId,
+      ),
+    );
+  }
+
+  async scheduleMessage(
+    payload: ScheduleMessagePayload,
+  ): Promise<ScheduledMessageView> {
+    const attachmentUrl = payload.attachmentUrl?.trim() || null;
+    const rawBody = (payload.body ?? '').trim();
+    if (!rawBody && !attachmentUrl) {
+      return RpcErrors.badRequest('Message body or attachment is required');
+    }
+
+    let type = payload.type ?? MessageType.TEXT;
+    if (!Object.values(MessageType).includes(type)) {
+      return RpcErrors.badRequest('Unsupported message type');
+    }
+    if (type === MessageType.CALL) {
+      return RpcErrors.badRequest('Call messages cannot be scheduled');
+    }
+
+    const scheduledFor = new Date(payload.scheduledFor);
+    if (Number.isNaN(scheduledFor.getTime())) {
+      return RpcErrors.badRequest('Invalid scheduled time');
+    }
+    const now = Date.now();
+    if (scheduledFor.getTime() < now + SCHEDULE_MIN_DELAY_MS) {
+      return RpcErrors.badRequest(
+        'Schedule at least 1 minute in the future',
+      );
+    }
+    if (scheduledFor.getTime() > now + SCHEDULE_MAX_AHEAD_MS) {
+      return RpcErrors.badRequest(
+        'Schedule time cannot be more than 30 days ahead',
+      );
+    }
+
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+
+    if (conversation.type === ConversationType.PRIVATE) {
+      const other = conversation.members.find(
+        (member) => member.userId !== payload.actorId,
+      );
+      if (
+        other &&
+        (await this.isBlockedEitherWay(payload.actorId, other.userId))
+      ) {
+        return RpcErrors.forbidden('You cannot message this user');
+      }
+    }
+
+    const pendingCount = await this.scheduledMessages.count({
+      where: {
+        conversationId: conversation.id,
+        senderId: payload.actorId,
+        status: 'pending',
+      },
+    });
+    if (pendingCount >= MAX_PENDING_SCHEDULED_PER_CHAT) {
+      return RpcErrors.badRequest(
+        'You can have up to 20 scheduled messages in a chat',
+      );
+    }
+
+    const attachmentMimeRaw = payload.attachmentMime?.trim() || null;
+    const attachmentMime =
+      attachmentMimeRaw === 'video/webm' && payload.type === MessageType.AUDIO
+        ? 'audio/webm'
+        : attachmentMimeRaw;
+    if (attachmentUrl) {
+      if (attachmentMime?.startsWith('image/')) {
+        type = MessageType.IMAGE;
+      } else if (
+        attachmentMime?.startsWith('audio/') ||
+        payload.type === MessageType.AUDIO ||
+        attachmentMime === 'video/webm'
+      ) {
+        type = MessageType.AUDIO;
+      } else {
+        type = MessageType.FILE;
+      }
+    }
+
+    const body =
+      rawBody ||
+      (type === MessageType.IMAGE
+        ? '[Image]'
+        : type === MessageType.AUDIO
+          ? '[Voice note]'
+          : type === MessageType.FILE
+            ? '[File]'
+            : '');
+
+    if (payload.replyToMessageId) {
+      const replyTo = await this.messages.findOne({
+        where: {
+          id: payload.replyToMessageId,
+          conversationId: conversation.id,
+        },
+      });
+      if (!replyTo || replyTo.deletedForEveryoneAt) {
+        return RpcErrors.badRequest(
+          'Reply target must be a message in this conversation',
+        );
+      }
+    }
+
+    const activeMemberIds = new Set(
+      conversation.members.filter((m) => !m.leftAt).map((m) => m.userId),
+    );
+    const validMentions = [
+      ...new Set((payload.mentionUserIds ?? []).filter(Boolean)),
+    ].filter(
+      (userId) => userId !== payload.actorId && activeMemberIds.has(userId),
+    );
+
+    const saved = await this.scheduledMessages.save(
+      this.scheduledMessages.create({
+        conversationId: conversation.id,
+        senderId: payload.actorId,
+        body,
+        type,
+        replyToMessageId: payload.replyToMessageId ?? null,
+        attachmentUrl,
+        attachmentMime,
+        attachmentName: payload.attachmentName?.trim() || null,
+        attachmentSize: payload.attachmentSize ?? null,
+        mentions: validMentions,
+        linkPreview: payload.linkPreview ?? null,
+        scheduledFor,
+        status: 'pending',
+      }),
+    );
+
+    await this.recordAudit(
+      payload.actorId,
+      'message.scheduled',
+      'conversation',
+      conversation.id,
+      { scheduledMessageId: saved.id, scheduledFor: saved.scheduledFor },
+    );
+
+    return this.toScheduledMessageView(saved);
+  }
+
+  async listScheduledMessages(payload: ConversationActorPayload) {
+    await this.requireMembership(payload.conversationId, payload.actorId);
+    const items = await this.scheduledMessages.find({
+      where: {
+        conversationId: payload.conversationId,
+        senderId: payload.actorId,
+        status: 'pending',
+      },
+      order: { scheduledFor: 'ASC' },
+      take: 50,
+    });
+    return items.map((item) => this.toScheduledMessageView(item));
+  }
+
+  async cancelScheduledMessage(payload: CancelScheduledMessagePayload) {
+    await this.requireMembership(payload.conversationId, payload.actorId);
+    const item = await this.scheduledMessages.findOne({
+      where: {
+        id: payload.scheduledMessageId,
+        conversationId: payload.conversationId,
+        senderId: payload.actorId,
+      },
+    });
+    if (!item) {
+      return RpcErrors.notFound('Scheduled message');
+    }
+    if (item.status !== 'pending') {
+      return RpcErrors.badRequest('Only pending scheduled messages can be cancelled');
+    }
+    item.status = 'cancelled';
+    item.cancelledAt = new Date();
+    await this.scheduledMessages.save(item);
+    return this.toScheduledMessageView(item);
+  }
+
+  async dispatchDueScheduled(): Promise<SendMessageResult[]> {
+    const due = await this.scheduledMessages.find({
+      where: {
+        status: 'pending',
+        scheduledFor: LessThanOrEqual(new Date()),
+      },
+      order: { scheduledFor: 'ASC' },
+      take: 25,
+    });
+
+    const delivered: SendMessageResult[] = [];
+    for (const row of due) {
+      const claimed = await this.scheduledMessages.update(
+        { id: row.id, status: 'pending' },
+        { status: 'sending' },
+      );
+      if (!claimed.affected) {
+        continue;
+      }
+
+      try {
+        const result = await this.sendMessage({
+          actorId: row.senderId,
+          conversationId: row.conversationId,
+          body: row.body,
+          type: row.type,
+          replyToMessageId: row.replyToMessageId ?? undefined,
+          attachmentUrl: row.attachmentUrl ?? undefined,
+          attachmentMime: row.attachmentMime ?? undefined,
+          attachmentName: row.attachmentName ?? undefined,
+          attachmentSize: row.attachmentSize ?? undefined,
+          mentionUserIds: row.mentions ?? [],
+          linkPreview: row.linkPreview,
+        });
+        row.status = 'sent';
+        row.sentMessageId = result.id;
+        row.error = null;
+        await this.scheduledMessages.save(row);
+        delivered.push(result);
+      } catch (error) {
+        row.status = 'failed';
+        row.error =
+          error instanceof Error ? error.message.slice(0, 500) : 'Send failed';
+        await this.scheduledMessages.save(row);
+      }
+    }
+    return delivered;
+  }
+
   async forwardMessage(
     payload: ForwardMessagePayload,
   ): Promise<SendMessageResult> {
@@ -785,6 +1241,13 @@ export class ChatService {
         attachmentName: source.attachmentName,
         attachmentSize: source.attachmentSize,
         forwardedFromMessageId: source.id,
+        expiresAt:
+          toConversation.disappearingDurationSeconds > 0 &&
+          source.type !== MessageType.CALL
+            ? new Date(
+                Date.now() + toConversation.disappearingDurationSeconds * 1000,
+              )
+            : null,
       }),
     );
     toConversation.lastMessageAt = saved.createdAt;
@@ -883,6 +1346,98 @@ export class ChatService {
     return this.getConversation(payload);
   }
 
+  async setDisappearingMessages(
+    payload: SetDisappearingPayload,
+  ): Promise<ConversationView> {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    if (!DISAPPEARING_DURATIONS.has(payload.durationSeconds)) {
+      return RpcErrors.badRequest('Unsupported disappearing duration');
+    }
+
+    if (conversation.type === ConversationType.GROUP) {
+      const actor = conversation.members.find(
+        (member) => member.userId === payload.actorId && !member.leftAt,
+      );
+      if (
+        !actor ||
+        (actor.role !== ConversationMemberRole.OWNER &&
+          actor.role !== ConversationMemberRole.ADMIN)
+      ) {
+        return RpcErrors.forbidden(
+          'Only group owners and admins can change disappearing messages',
+        );
+      }
+    }
+
+    conversation.disappearingDurationSeconds = payload.durationSeconds;
+    await this.conversations.save(conversation);
+    await this.recordAudit(
+      payload.actorId,
+      'conversation.disappearing_updated',
+      'conversation',
+      conversation.id,
+      { durationSeconds: payload.durationSeconds },
+    );
+    return this.getConversation(payload);
+  }
+
+  async expireDueMessages(): Promise<DeleteMessageResult[]> {
+    const due = await this.messages.find({
+      where: {
+        expiresAt: LessThanOrEqual(new Date()),
+        deletedForEveryoneAt: IsNull(),
+      },
+      order: { expiresAt: 'ASC' },
+      take: 40,
+    });
+
+    const expired: DeleteMessageResult[] = [];
+    for (const message of due) {
+      const conversation = await this.conversations.findOne({
+        where: { id: message.conversationId },
+        relations: { members: true },
+      });
+      if (!conversation) {
+        message.expiresAt = null;
+        await this.messages.save(message);
+        continue;
+      }
+
+      const removedAttachmentUrl = message.attachmentUrl;
+      message.deletedForEveryoneAt = new Date();
+      message.attachmentUrl = null;
+      message.attachmentMime = null;
+      message.attachmentName = null;
+      message.attachmentSize = null;
+      message.pinnedAt = null;
+      message.pinnedByUserId = null;
+      message.expiresAt = null;
+      await this.messages.save(message);
+
+      const replyTo = message.replyToMessageId
+        ? await this.messages.findOne({
+            where: { id: message.replyToMessageId },
+          })
+        : null;
+      expired.push({
+        message: this.toMessageView(
+          message,
+          conversation.members,
+          replyTo,
+          [],
+          message.senderId,
+        ),
+        forEveryone: true,
+        recipientIds: this.recipientIds(conversation),
+        removedAttachmentUrl,
+      });
+    }
+    return expired;
+  }
+
   async deleteMessage(
     payload: DeleteMessagePayload,
   ): Promise<DeleteMessageResult> {
@@ -943,6 +1498,8 @@ export class ChatService {
       message.attachmentMime = null;
       message.attachmentName = null;
       message.attachmentSize = null;
+      message.pinnedAt = null;
+      message.pinnedByUserId = null;
       await this.messages.save(message);
       const replyTo = message.replyToMessageId
         ? await this.messages.findOne({
@@ -1704,6 +2261,7 @@ export class ChatService {
       lastReadAt: actor?.lastReadAt?.toISOString() ?? null,
       muted: Boolean(actor?.mutedAt),
       pinned: Boolean(actor?.pinnedAt),
+      disappearingDurationSeconds: conversation.disappearingDurationSeconds ?? 0,
       unreadCount,
       members: activeMembers.map((member) => ({
         userId: member.userId,
@@ -1790,10 +2348,51 @@ export class ChatService {
           ? message.linkPreview
           : null,
       editedAt: message.editedAt?.toISOString() ?? null,
+      pinned: Boolean(message.pinnedAt) && !deletedForEveryone,
+      pinnedAt:
+        !deletedForEveryone && message.pinnedAt
+          ? message.pinnedAt.toISOString()
+          : null,
+      pinnedByUserId:
+        !deletedForEveryone && message.pinnedAt
+          ? message.pinnedByUserId ?? null
+          : null,
       forwarded: Boolean(message.forwardedFromMessageId),
       deletedForEveryone,
       seenBy,
+      expiresAt:
+        !deletedForEveryone && message.expiresAt
+          ? message.expiresAt.toISOString()
+          : null,
       createdAt: message.createdAt.toISOString(),
+    };
+  }
+
+  private toScheduledMessageView(item: ScheduledMessage): ScheduledMessageView {
+    const hasAttachment = Boolean(item.attachmentUrl);
+    return {
+      id: item.id,
+      conversationId: item.conversationId,
+      senderId: item.senderId,
+      body: item.body,
+      type: item.type ?? MessageType.TEXT,
+      replyToMessageId: item.replyToMessageId,
+      attachment:
+        hasAttachment && item.attachmentUrl
+          ? {
+              url: item.attachmentUrl,
+              mime: item.attachmentMime ?? '',
+              name: item.attachmentName ?? '',
+              size: item.attachmentSize ?? 0,
+            }
+          : null,
+      mentions: item.mentions ?? [],
+      linkPreview: item.linkPreview ?? null,
+      scheduledFor: item.scheduledFor.toISOString(),
+      status: item.status,
+      sentMessageId: item.sentMessageId,
+      error: item.error,
+      createdAt: item.createdAt.toISOString(),
     };
   }
 }

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { AuthModule } from '../auth/auth.module';
+import { StorageModule } from '../storage/storage.module';
 import { ChatController } from './chat.controller';
 import { ChatGateway } from './chat.gateway';
 import { ConversationCacheService } from './conversation-cache.service';
@@ -11,10 +12,13 @@ import { AiService } from './ai.service';
 import { CallSessionService } from './call-session.service';
 import { LinkPreviewService } from './link-preview.service';
 import { PushService } from './push.service';
+import { ScheduledMessageDispatcher } from './scheduled-message.dispatcher';
+import { DisappearingMessageDispatcher } from './disappearing-message.dispatcher';
 
 @Module({
   imports: [
     AuthModule,
+    StorageModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
@@ -32,6 +36,8 @@ import { PushService } from './push.service';
     AiService,
     LinkPreviewService,
     PushService,
+    ScheduledMessageDispatcher,
+    DisappearingMessageDispatcher,
   ],
   exports: [PresenceService, AiService, LinkPreviewService, PushService],
 })

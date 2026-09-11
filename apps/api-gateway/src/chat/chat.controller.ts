@@ -58,9 +58,12 @@ import {
   MarkSeenDto,
   MuteConversationDto,
   PinConversationDto,
+  PinMessageDto,
   ReactMessageDto,
+  ScheduleMessageDto,
   SearchMessagesQueryDto,
   SendMessageDto,
+  SetDisappearingDto,
   SetMemberRoleDto,
   TypingDto,
   UpdateGroupDto,
@@ -266,6 +269,20 @@ export class ChatController {
     await this.presence.attachToConversations(data.items);
     await this.applyLastSeenPrivacy(data.items);
     return { message: CHAT_SUCCESS_MESSAGES.CONVERSATIONS_FETCHED, data };
+  }
+
+  @Get('search')
+  async searchGlobal(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: SearchMessagesQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.SEARCH_GLOBAL, {
+      actorId: user.id,
+      query: query.q,
+      page: query.page,
+      limit: query.limit,
+    });
+    return { message: CHAT_SUCCESS_MESSAGES.GLOBAL_SEARCHED, data };
   }
 
   @Get('presence/:userId')
@@ -556,6 +573,98 @@ export class ChatController {
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_REACTED, data };
   }
 
+  @Post('conversations/:id/messages/:messageId/pin')
+  async pinMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('messageId', ParseUuidPipe) messageId: string,
+    @Body() dto: PinMessageDto,
+  ) {
+    const result = await this.proxy.sendChat<SendMessageResult>(
+      CHAT_PATTERNS.PIN_MESSAGE,
+      {
+        actorId: user.id,
+        conversationId: id,
+        messageId,
+        pinned: dto.pinned,
+      },
+    );
+    const { recipientIds, ...data } = result;
+    await this.conversationCache.setMemberIds(id, recipientIds);
+    this.chatGateway.broadcastMessage(data, recipientIds);
+    return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_PINNED, data };
+  }
+
+  @Get('conversations/:id/pinned-messages')
+  async listPinnedMessages(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_PINNED_MESSAGES, {
+      actorId: user.id,
+      conversationId: id,
+    });
+    return { message: CHAT_SUCCESS_MESSAGES.PINNED_MESSAGES_FETCHED, data };
+  }
+
+  @Post('conversations/:id/scheduled-messages')
+  @HttpCode(HttpStatus.CREATED)
+  async scheduleMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: ScheduleMessageDto,
+  ) {
+    if (dto.type === 'call') {
+      throw new BadRequestException(
+        'Call history messages cannot be scheduled',
+      );
+    }
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.SCHEDULE_MESSAGE, {
+      actorId: user.id,
+      conversationId: id,
+      body: dto.body,
+      type: dto.type,
+      replyToMessageId: dto.replyToMessageId,
+      attachmentUrl: dto.attachmentUrl,
+      attachmentMime: dto.attachmentMime,
+      attachmentName: dto.attachmentName,
+      attachmentSize: dto.attachmentSize,
+      mentionUserIds: dto.mentionUserIds,
+      linkPreview: dto.linkPreview ?? null,
+      scheduledFor: dto.scheduledFor,
+    });
+    return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_SCHEDULED, data };
+  }
+
+  @Get('conversations/:id/scheduled-messages')
+  async listScheduledMessages(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.LIST_SCHEDULED_MESSAGES,
+      { actorId: user.id, conversationId: id },
+    );
+    return { message: CHAT_SUCCESS_MESSAGES.SCHEDULED_MESSAGES_FETCHED, data };
+  }
+
+  @Delete('conversations/:id/scheduled-messages/:scheduledMessageId')
+  async cancelScheduledMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('scheduledMessageId', ParseUuidPipe) scheduledMessageId: string,
+  ) {
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.CANCEL_SCHEDULED_MESSAGE,
+      {
+        actorId: user.id,
+        conversationId: id,
+        scheduledMessageId,
+      },
+    );
+    return { message: CHAT_SUCCESS_MESSAGES.SCHEDULED_MESSAGE_CANCELLED, data };
+  }
+
   @Post('conversations/:id/messages/:messageId/forward')
   @HttpCode(HttpStatus.CREATED)
   async forwardMessage(
@@ -715,6 +824,28 @@ export class ChatController {
     await this.presence.attachToConversations([data]);
     await this.applyLastSeenPrivacy([data]);
     return { message: CHAT_SUCCESS_MESSAGES.CONVERSATION_PINNED, data };
+  }
+
+  @Post('conversations/:id/disappearing')
+  async setDisappearing(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: SetDisappearingDto,
+  ) {
+    const data = await this.proxy.sendChat<ConversationView>(
+      CHAT_PATTERNS.SET_DISAPPEARING,
+      {
+        actorId: user.id,
+        conversationId: id,
+        durationSeconds: dto.durationSeconds,
+      },
+    );
+    await this.presence.attachToConversations([data]);
+    await this.applyLastSeenPrivacy([data]);
+    const memberIds = data.members.map((member) => member.userId);
+    await this.conversationCache.setMemberIds(id, memberIds);
+    this.chatGateway.broadcastConversationUpdated(data, memberIds);
+    return { message: CHAT_SUCCESS_MESSAGES.DISAPPEARING_UPDATED, data };
   }
 
   @Post('conversations/:id/typing')

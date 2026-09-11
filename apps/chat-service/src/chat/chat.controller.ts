@@ -17,10 +17,15 @@ import type {
   MarkSeenPayload,
   MuteConversationPayload,
   PinConversationPayload,
+  PinMessagePayload,
   ReactMessagePayload,
   RemoveMemberPayload,
+  CancelScheduledMessagePayload,
+  ScheduleMessagePayload,
   SearchMessagesPayload,
+  GlobalSearchMessagesPayload,
   SendMessagePayload,
+  SetDisappearingPayload,
   SetMemberRolePayload,
   ListAuditPayload,
   LogAuditPayload,
@@ -63,6 +68,11 @@ export class ChatController {
     return this.chatService.searchMessages(payload);
   }
 
+  @MessagePattern(CHAT_PATTERNS.SEARCH_GLOBAL)
+  searchGlobal(@Payload() payload: GlobalSearchMessagesPayload) {
+    return this.chatService.searchGlobal(payload);
+  }
+
   @MessagePattern(CHAT_PATTERNS.LIST_MEDIA)
   listMedia(@Payload() payload: ListMediaPayload) {
     return this.chatService.listMedia(payload);
@@ -88,6 +98,36 @@ export class ChatController {
     return this.chatService.reactMessage(payload);
   }
 
+  @MessagePattern(CHAT_PATTERNS.PIN_MESSAGE)
+  pinMessage(@Payload() payload: PinMessagePayload) {
+    return this.chatService.pinMessage(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_PINNED_MESSAGES)
+  listPinnedMessages(@Payload() payload: ConversationActorPayload) {
+    return this.chatService.listPinnedMessages(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.SCHEDULE_MESSAGE)
+  scheduleMessage(@Payload() payload: ScheduleMessagePayload) {
+    return this.chatService.scheduleMessage(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_SCHEDULED_MESSAGES)
+  listScheduledMessages(@Payload() payload: ConversationActorPayload) {
+    return this.chatService.listScheduledMessages(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CANCEL_SCHEDULED_MESSAGE)
+  cancelScheduledMessage(@Payload() payload: CancelScheduledMessagePayload) {
+    return this.chatService.cancelScheduledMessage(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.DISPATCH_DUE_SCHEDULED)
+  dispatchDueScheduled() {
+    return this.chatService.dispatchDueScheduled();
+  }
+
   @MessagePattern(CHAT_PATTERNS.FORWARD_MESSAGE)
   forwardMessage(@Payload() payload: ForwardMessagePayload) {
     return this.chatService.forwardMessage(payload);
@@ -106,6 +146,16 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.PIN_CONVERSATION)
   pinConversation(@Payload() payload: PinConversationPayload) {
     return this.chatService.pinConversation(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.SET_DISAPPEARING)
+  setDisappearing(@Payload() payload: SetDisappearingPayload) {
+    return this.chatService.setDisappearingMessages(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.EXPIRE_DUE_MESSAGES)
+  expireDueMessages() {
+    return this.chatService.expireDueMessages();
   }
 
   @MessagePattern(CHAT_PATTERNS.DELETE_MESSAGE)

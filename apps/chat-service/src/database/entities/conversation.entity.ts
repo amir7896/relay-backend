@@ -38,6 +38,10 @@ export class Conversation {
   @Column({ type: 'timestamptz', nullable: true })
   lastMessageAt!: Date | null;
 
+  /** 0 = off. New messages expire after this many seconds. */
+  @Column({ type: 'int', default: 0 })
+  disappearingDurationSeconds!: number;
+
   @OneToMany(() => ConversationMember, (member) => member.conversation)
   members!: ConversationMember[];
 

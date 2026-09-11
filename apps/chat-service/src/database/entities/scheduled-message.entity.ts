@@ -2,29 +2,28 @@ import { MessageType } from '@app/common';
 import {
   Column,
   CreateDateColumn,
-  DeleteDateColumn,
   Entity,
   Index,
-  JoinColumn,
-  ManyToOne,
   PrimaryGeneratedColumn,
+  UpdateDateColumn,
 } from 'typeorm';
-import { Conversation } from './conversation.entity';
 
-@Entity({ name: 'messages' })
-export class Message {
+export type ScheduledMessageStatus =
+  | 'pending'
+  | 'sending'
+  | 'sent'
+  | 'cancelled'
+  | 'failed';
+
+@Entity({ name: 'scheduled_messages' })
+@Index('IDX_scheduled_messages_due', ['status', 'scheduledFor'])
+export class ScheduledMessage {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
   @Index()
   @Column({ type: 'uuid' })
   conversationId!: string;
-
-  @ManyToOne(() => Conversation, (conversation) => conversation.messages, {
-    onDelete: 'CASCADE',
-  })
-  @JoinColumn({ name: 'conversationId' })
-  conversation!: Conversation;
 
   @Index()
   @Column({ type: 'uuid' })
@@ -40,22 +39,8 @@ export class Message {
   })
   type!: MessageType;
 
-  @Index()
   @Column({ type: 'uuid', nullable: true })
   replyToMessageId!: string | null;
-
-  @Column({ type: 'timestamptz', nullable: true })
-  deletedForEveryoneAt!: Date | null;
-
-  @Column({ type: 'timestamptz', nullable: true })
-  editedAt!: Date | null;
-
-  @Index()
-  @Column({ type: 'timestamptz', nullable: true })
-  pinnedAt!: Date | null;
-
-  @Column({ type: 'uuid', nullable: true })
-  pinnedByUserId!: string | null;
 
   @Column({ type: 'varchar', length: 500, nullable: true })
   attachmentUrl!: string | null;
@@ -69,9 +54,6 @@ export class Message {
   @Column({ type: 'int', nullable: true })
   attachmentSize!: number | null;
 
-  @Column({ type: 'uuid', nullable: true })
-  forwardedFromMessageId!: string | null;
-
   @Column({ type: 'jsonb', default: [] })
   mentions!: string[];
 
@@ -84,12 +66,24 @@ export class Message {
   } | null;
 
   @Index()
+  @Column({ type: 'timestamptz' })
+  scheduledFor!: Date;
+
+  @Column({ type: 'varchar', length: 20, default: 'pending' })
+  status!: ScheduledMessageStatus;
+
+  @Column({ type: 'uuid', nullable: true })
+  sentMessageId!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  error!: string | null;
+
   @Column({ type: 'timestamptz', nullable: true })
-  expiresAt!: Date | null;
+  cancelledAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 
-  @DeleteDateColumn({ type: 'timestamptz', nullable: true })
-  deletedAt!: Date | null;
+  @UpdateDateColumn({ type: 'timestamptz' })
+  updatedAt!: Date;
 }
