@@ -84,7 +84,7 @@ export const gatewayEnvSchema = Joi.object({
     then: Joi.string().required(),
     otherwise: Joi.string().optional().allow(''),
   }),
-  STORAGE_CLOUDINARY_FOLDER: Joi.string().default('relay'),
+  STORAGE_CLOUDINARY_FOLDER: Joi.string().allow('').default('relay'),
   APP_PUBLIC_URL: Joi.string().uri().optional().allow(''),
   FRONTEND_URL: Joi.string().uri().optional().allow(''),
   VAPID_PUBLIC_KEY: Joi.string().optional().allow(''),

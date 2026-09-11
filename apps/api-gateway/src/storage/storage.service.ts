@@ -36,6 +36,21 @@ export class StorageService {
     return this.adapter.upload(file);
   }
 
+  async deleteByUrl(url: string): Promise<void> {
+    if (!url || !this.adapter.deleteByUrl) {
+      return;
+    }
+    try {
+      await this.adapter.deleteByUrl(url);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to delete storage object for ${url}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   private createAdapter(driver: StorageDriver): ObjectStorage {
     if (driver === 's3') {
       return new S3Storage({

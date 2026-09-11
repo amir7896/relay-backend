@@ -123,6 +123,8 @@ export interface DeleteMessageResult {
   message: MessageView;
   forEveryone: boolean;
   recipientIds: string[];
+  /** Public URL of attachment removed on delete-for-everyone (for storage cleanup) */
+  removedAttachmentUrl?: string | null;
 }
 
 export interface AddMembersPayload extends ConversationActorPayload {

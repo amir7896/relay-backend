@@ -91,6 +91,8 @@ const ALLOWED_AUDIO_MIMES = new Set([
   'audio/mpeg',
   'audio/mp4',
   'audio/wav',
+  // Some browsers label audio-only MediaRecorder output as video/webm
+  'video/webm',
 ]);
 const ALLOWED_UPLOAD_MIMES = new Set([
   ...ALLOWED_IMAGE_MIMES,
@@ -403,7 +405,10 @@ export class ChatController {
       limits: { fileSize: MAX_UPLOAD_BYTES },
     }),
   )
-  async uploadFile(@UploadedFile() file?: UploadedImage) {
+  async uploadFile(
+    @CurrentUser() user: AuthenticatedUser,
+    @UploadedFile() file?: UploadedImage,
+  ) {
     if (!file) {
       throw new BadRequestAppException('File is required');
     }
@@ -416,11 +421,15 @@ export class ChatController {
       throw new BadRequestAppException('File must be 5MB or smaller');
     }
 
+    const mimeType =
+      file.mimetype === 'video/webm' ? 'audio/webm' : file.mimetype;
+
     const uploaded = await this.storage.upload({
       buffer: file.buffer,
       originalName: file.originalname,
-      mimeType: file.mimetype,
+      mimeType,
       size: file.size,
+      userName: user.email,
     });
 
     return {
@@ -429,7 +438,7 @@ export class ChatController {
         url: uploaded.url,
         key: uploaded.key,
         provider: uploaded.provider,
-        mime: uploaded.mime,
+        mime: mimeType,
         name: uploaded.name,
         size: uploaded.size,
       },
@@ -458,6 +467,9 @@ export class ChatController {
         result.message,
         result.recipientIds,
       );
+      if (result.removedAttachmentUrl) {
+        await this.storage.deleteByUrl(result.removedAttachmentUrl);
+      }
     }
     return {
       message: CHAT_SUCCESS_MESSAGES.MESSAGE_DELETED,
