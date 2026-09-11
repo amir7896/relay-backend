@@ -146,6 +146,11 @@ export class ChatController {
     return this.chatService.listBlocks(payload);
   }
 
+  @MessagePattern(CHAT_PATTERNS.PREPARE_VOICE_CALL)
+  prepareVoiceCall(@Payload() payload: ConversationActorPayload) {
+    return this.chatService.prepareVoiceCall(payload);
+  }
+
   @MessagePattern(CHAT_PATTERNS.GET_ANALYTICS)
   getAnalytics() {
     return this.chatService.getAnalytics();

@@ -14,6 +14,8 @@ export enum MessageType {
   IMAGE = 'image',
   FILE = 'file',
   AUDIO = 'audio',
+  /** System call history line (JSON body). */
+  CALL = 'call',
 }
 
 export enum PresenceStatus {

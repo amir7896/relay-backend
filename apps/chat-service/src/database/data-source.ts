@@ -15,6 +15,7 @@ import { AddChatScaleIndexes1730000002000 } from './migrations/1730000002000-Add
 import { AddChatProductFeatures1730000003000 } from './migrations/1730000003000-AddChatProductFeatures';
 import { AddChatEngagementFeatures1730000005000 } from './migrations/1730000005000-AddChatEngagementFeatures';
 import { AddSellReadyFeatures1730000006000 } from './migrations/1730000006000-AddSellReadyFeatures';
+import { AddCallMessageType1730000007000 } from './migrations/1730000007000-AddCallMessageType';
 
 config({
   path: [
@@ -47,6 +48,7 @@ export default new DataSource({
     AddChatProductFeatures1730000003000,
     AddChatEngagementFeatures1730000005000,
     AddSellReadyFeatures1730000006000,
+    AddCallMessageType1730000007000,
   ],
   synchronize: false,
 });

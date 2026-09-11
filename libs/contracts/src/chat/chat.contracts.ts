@@ -29,6 +29,7 @@ export const CHAT_PATTERNS = {
   BLOCK_USER: 'chat.block_user',
   UNBLOCK_USER: 'chat.unblock_user',
   LIST_BLOCKS: 'chat.list_blocks',
+  PREPARE_VOICE_CALL: 'chat.prepare_voice_call',
   GET_ANALYTICS: 'chat.get_analytics',
   LIST_AUDIT: 'chat.list_audit',
   LOG_AUDIT: 'chat.log_audit',
@@ -79,6 +80,8 @@ export interface SendMessagePayload extends ConversationActorPayload {
   attachmentSize?: number;
   mentionUserIds?: string[];
   linkPreview?: LinkPreviewView | null;
+  /** Only the call gateway may set this when writing CALL history. */
+  systemCall?: boolean;
 }
 
 export interface SendMessageResult extends MessageView {
@@ -163,6 +166,7 @@ export interface MessageReplyView {
   id: string;
   senderId: string;
   body: string;
+  type?: string;
   deletedForEveryone: boolean;
 }
 
@@ -237,6 +241,15 @@ export interface PresenceView {
 export interface BlockView {
   userId: string;
   createdAt: string;
+}
+
+export interface PrepareVoiceCallResult {
+  conversationId: string;
+  kind: 'private' | 'group';
+  /** Other members who can be invited (excludes actor; excludes blocked for private). */
+  peerIds: string[];
+  /** Full member list including actor. */
+  memberIds: string[];
 }
 
 export interface ChatAnalyticsView {
