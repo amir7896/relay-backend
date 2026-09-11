@@ -31,4 +31,20 @@ export class LocalStorage implements ObjectStorage {
   getRoot(): string {
     return this.root;
   }
+
+  async deleteByUrl(url: string): Promise<void> {
+    if (!url.startsWith('/uploads/')) {
+      return;
+    }
+    const name = url.replace(/^\/uploads\//, '').split(/[/?#]/)[0];
+    if (!name || name.includes('..')) {
+      return;
+    }
+    const { unlink } = await import('node:fs/promises');
+    try {
+      await unlink(join(this.root, name));
+    } catch {
+      // File may already be gone
+    }
+  }
 }

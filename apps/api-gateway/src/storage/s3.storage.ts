@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
 import {
+  DeleteObjectCommand,
   PutObjectCommand,
   S3Client,
   type S3ClientConfig,
@@ -52,7 +53,18 @@ export class S3Storage implements ObjectStorage {
 
   async upload(file: UploadInput): Promise<UploadResult> {
     const extension = extname(file.originalName).toLowerCase() || '.bin';
-    const key = `${this.prefix}/${randomUUID()}${extension}`;
+    const isAudio =
+      file.mimeType.startsWith('audio/') || file.mimeType === 'video/webm';
+    const isImage = file.mimeType.startsWith('image/');
+    const user = (file.userName || 'user')
+      .trim()
+      .toLowerCase()
+      .split('@')[0]
+      .replace(/[^a-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 48) || 'user';
+    const mediaFolder = isAudio ? 'voiceNotes' : isImage ? 'images' : 'files';
+    const key = `${this.prefix}/${user}/${mediaFolder}/${randomUUID()}${extension}`;
 
     await this.client.send(
       new PutObjectCommand({
@@ -72,6 +84,38 @@ export class S3Storage implements ObjectStorage {
       name: file.originalName,
       size: file.size,
     };
+  }
+
+  async deleteByUrl(url: string): Promise<void> {
+    const key = this.keyFromUrl(url);
+    if (!key) {
+      return;
+    }
+    await this.client.send(
+      new DeleteObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      }),
+    );
+  }
+
+  private keyFromUrl(url: string): string | null {
+    try {
+      if (this.publicUrl && url.startsWith(`${this.publicUrl}/`)) {
+        return decodeURIComponent(url.slice(this.publicUrl.length + 1));
+      }
+      const parsed = new URL(url);
+      const path = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+      if (path.startsWith(`${this.bucket}/`)) {
+        return path.slice(this.bucket.length + 1);
+      }
+      if (path.startsWith(`${this.prefix}/`)) {
+        return path;
+      }
+      return path || null;
+    } catch {
+      return null;
+    }
   }
 
   private buildPublicUrl(key: string): string {

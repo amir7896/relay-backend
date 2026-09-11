@@ -159,7 +159,7 @@ export class DeleteMessageDto {
   @ApiPropertyOptional({
     example: false,
     description:
-      'When true, delete for everyone (sender only, within 60 minutes)',
+      'When true, delete for everyone (sender only). Receiver delete uses forEveryone=false (hide for me only).',
   })
   @IsOptional()
   @IsBoolean()

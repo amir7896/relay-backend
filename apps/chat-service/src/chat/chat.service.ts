@@ -56,7 +56,8 @@ import { AuditEvent } from '../database/entities/audit-event.entity';
 import { WorkspaceSettings } from '../database/entities/workspace-settings.entity';
 
 const MAX_GROUP_MEMBERS = 50;
-const DELETE_FOR_EVERYONE_WINDOW_MS = 60 * 60 * 1000;
+const DELETE_FOR_EVERYONE_WINDOW_MS = 0; // 0 = no time limit (sender can always delete for everyone)
+
 const EDIT_WINDOW_MS = 15 * 60 * 1000;
 
 export function privatePairKey(userA: string, userB: string): string {
@@ -370,11 +371,19 @@ export class ChatService {
       return RpcErrors.badRequest('Unsupported message type');
     }
 
-    const attachmentMime = payload.attachmentMime?.trim() || null;
+    const attachmentMimeRaw = payload.attachmentMime?.trim() || null;
+    const attachmentMime =
+      attachmentMimeRaw === 'video/webm' && payload.type === MessageType.AUDIO
+        ? 'audio/webm'
+        : attachmentMimeRaw;
     if (attachmentUrl) {
       if (attachmentMime?.startsWith('image/')) {
         type = MessageType.IMAGE;
-      } else if (attachmentMime?.startsWith('audio/')) {
+      } else if (
+        attachmentMime?.startsWith('audio/') ||
+        payload.type === MessageType.AUDIO ||
+        attachmentMime === 'video/webm'
+      ) {
         type = MessageType.AUDIO;
       } else {
         type = MessageType.FILE;
@@ -769,12 +778,21 @@ export class ChatService {
         };
       }
       const ageMs = Date.now() - message.createdAt.getTime();
-      if (ageMs > DELETE_FOR_EVERYONE_WINDOW_MS) {
+      if (
+        DELETE_FOR_EVERYONE_WINDOW_MS > 0 &&
+        ageMs > DELETE_FOR_EVERYONE_WINDOW_MS
+      ) {
         return RpcErrors.badRequest(
-          'Messages can only be deleted for everyone within 60 minutes',
+          'Messages can only be deleted for everyone within the allowed time window',
         );
       }
+      const removedAttachmentUrl = message.attachmentUrl;
       message.deletedForEveryoneAt = new Date();
+      // Clear attachment metadata so the media URL is no longer served
+      message.attachmentUrl = null;
+      message.attachmentMime = null;
+      message.attachmentName = null;
+      message.attachmentSize = null;
       await this.messages.save(message);
       const replyTo = message.replyToMessageId
         ? await this.messages.findOne({
@@ -794,6 +812,7 @@ export class ChatService {
         ),
         forEveryone: true,
         recipientIds: this.recipientIds(conversation),
+        removedAttachmentUrl,
       };
     }
 
