@@ -38,6 +38,7 @@ import type {
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
 import { StorageService } from '../storage/storage.service';
 import { ChatGateway } from './chat.gateway';
+import { CallSessionService } from './call-session.service';
 import { ConversationCacheService } from './conversation-cache.service';
 import { PushService } from './push.service';
 import {
@@ -118,6 +119,7 @@ export class ChatController {
     private readonly ai: AiService,
     private readonly storage: StorageService,
     private readonly push: PushService,
+    private readonly calls: CallSessionService,
   ) {}
 
   @Post('private')
@@ -154,6 +156,9 @@ export class ChatController {
       { actorId: user.id, name: dto.name, memberIds: dto.memberIds },
     );
     await this.presence.attachToConversations([data]);
+    const memberIds = data.members.map((member) => member.userId);
+    await this.conversationCache.setMemberIds(data.id, memberIds);
+    this.chatGateway.broadcastConversationUpdated(data, memberIds);
     return { message: CHAT_SUCCESS_MESSAGES.GROUP_CREATED, data };
   }
 
@@ -239,6 +244,11 @@ export class ChatController {
     @Param('id', ParseUuidPipe) id: string,
     @Body() dto: SendMessageDto,
   ) {
+    if (dto.type === 'call') {
+      throw new BadRequestException(
+        'Call history messages are system-generated only',
+      );
+    }
     const result = await this.proxy.sendChat<SendMessageResult>(
       CHAT_PATTERNS.SEND_MESSAGE,
       {
@@ -273,6 +283,47 @@ export class ChatController {
     return {
       message: 'Push public key',
       data: { publicKey: this.push.getPublicKey(), enabled: this.push.isEnabled() },
+    };
+  }
+
+  /** ICE servers for WebRTC voice calls (STUN always; TURN only if configured). */
+  @Get('webrtc-config')
+  getWebRtcConfig(@CurrentUser() _user: AuthenticatedUser) {
+    return {
+      message: 'WebRTC config',
+      data: {
+        iceServers: this.chatGateway.getIceServers(),
+      },
+    };
+  }
+
+  /** Ongoing group call lobby for rejoin (WhatsApp-style Join). */
+  @Get('conversations/:id/active-call')
+  async getActiveCall(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    // Ensure membership
+    await this.proxy.sendChat(CHAT_PATTERNS.GET_CONVERSATION, {
+      actorId: user.id,
+      conversationId: id,
+    });
+    const session = await this.calls.getByConversation(id);
+    if (!session || session.kind !== 'group' || session.joinedIds.length === 0) {
+      return {
+        message: 'No active call',
+        data: null,
+      };
+    }
+    if (!session.memberIds.includes(user.id)) {
+      return {
+        message: 'No active call',
+        data: null,
+      };
+    }
+    return {
+      message: 'Active call',
+      data: this.calls.toLobby(session, true),
     };
   }
 
@@ -576,7 +627,10 @@ export class ChatController {
       },
     );
     await this.presence.attachToConversations([data]);
-    await this.conversationCache.invalidate(id);
+    const memberIds = data.members.map((member) => member.userId);
+    await this.conversationCache.setMemberIds(id, memberIds);
+    // Fan-out so newly added users see the group in their inbox without refresh
+    this.chatGateway.broadcastConversationUpdated(data, memberIds);
     return { message: CHAT_SUCCESS_MESSAGES.MEMBERS_ADDED, data };
   }
 
@@ -598,6 +652,8 @@ export class ChatController {
     );
     await this.presence.attachToConversations([data]);
     await this.applyLastSeenPrivacy([data]);
+    const memberIds = data.members.map((member) => member.userId);
+    this.chatGateway.broadcastConversationUpdated(data, memberIds);
     return { message: CHAT_SUCCESS_MESSAGES.MEMBER_ROLE_UPDATED, data };
   }
 
@@ -613,7 +669,11 @@ export class ChatController {
       { actorId: user.id, conversationId: id, memberId: userId },
     );
     await this.presence.attachToConversations([data]);
-    await this.conversationCache.invalidate(id);
+    const memberIds = data.members.map((member) => member.userId);
+    await this.conversationCache.setMemberIds(id, memberIds);
+    this.chatGateway.broadcastConversationUpdated(data, memberIds);
+    this.chatGateway.broadcastRemovedFromGroup(id, [userId]);
+    void this.chatGateway.evictUsersFromConversation(id, [userId]);
     return { message: CHAT_SUCCESS_MESSAGES.MEMBER_REMOVED, data };
   }
 
@@ -623,11 +683,44 @@ export class ChatController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUuidPipe) id: string,
   ) {
-    const data = await this.proxy.sendChat(CHAT_PATTERNS.LEAVE, {
-      actorId: user.id,
-      conversationId: id,
-    });
-    await this.conversationCache.invalidate(id);
+    const previousIds =
+      (await this.conversationCache.getMemberIds(id)) ??
+      (
+        await this.proxy.sendChat<ConversationView>(
+          CHAT_PATTERNS.GET_CONVERSATION,
+          { actorId: user.id, conversationId: id },
+        )
+      ).members.map((member) => member.userId);
+
+    const data = await this.proxy.sendChat<{ left: boolean }>(
+      CHAT_PATTERNS.LEAVE,
+      {
+        actorId: user.id,
+        conversationId: id,
+      },
+    );
+
+    const remainingIds = previousIds.filter((memberId) => memberId !== user.id);
+    await this.conversationCache.setMemberIds(id, remainingIds);
+    this.chatGateway.broadcastRemovedFromGroup(id, [user.id]);
+    void this.chatGateway.evictUsersFromConversation(id, [user.id]);
+
+    if (remainingIds[0]) {
+      try {
+        const conversation = await this.proxy.sendChat<ConversationView>(
+          CHAT_PATTERNS.GET_CONVERSATION,
+          { actorId: remainingIds[0], conversationId: id },
+        );
+        await this.presence.attachToConversations([conversation]);
+        this.chatGateway.broadcastConversationUpdated(
+          conversation,
+          remainingIds,
+        );
+      } catch {
+        // Remaining members will refresh on next open
+      }
+    }
+
     return { message: CHAT_SUCCESS_MESSAGES.LEFT, data };
   }
 
@@ -647,6 +740,8 @@ export class ChatController {
       },
     );
     await this.presence.attachToConversations([data]);
+    const memberIds = data.members.map((member) => member.userId);
+    this.chatGateway.broadcastConversationUpdated(data, memberIds);
     return { message: CHAT_SUCCESS_MESSAGES.GROUP_UPDATED, data };
   }
 

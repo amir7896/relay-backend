@@ -63,11 +63,19 @@ async function bootstrap() {
   );
   app.use(compression());
 
-  const origin = config.get<string>('CORS_ORIGIN', '*');
+  // Allow any browser / tunnel origin (ngrok, Cloudflare, LAN, etc.)
   app.enableCors({
-    origin:
-      origin === '*' ? true : origin.split(',').map((item) => item.trim()),
+    origin: true,
     credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'Accept',
+      'X-Request-Id',
+      'ngrok-skip-browser-warning',
+    ],
+    exposedHeaders: ['X-Request-Id'],
   });
 
   const storage = app.get(StorageService);

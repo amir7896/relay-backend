@@ -371,6 +371,42 @@ export class ChatService {
       return RpcErrors.badRequest('Unsupported message type');
     }
 
+    // Call history lines are system-only (gateway records after hangup/timeout).
+    // Clients must not forge MessageType.CALL via HTTP/WS.
+    if (type === MessageType.CALL) {
+      if (!payload.systemCall) {
+        return RpcErrors.badRequest('Call history messages are system-generated only');
+      }
+      if (!rawBody) {
+        return RpcErrors.badRequest('Call message body is required');
+      }
+      const conversation = await this.requireMembership(
+        payload.conversationId,
+        payload.actorId,
+      );
+      const saved = await this.messages.save(
+        this.messages.create({
+          conversationId: conversation.id,
+          senderId: payload.actorId,
+          body: rawBody,
+          type: MessageType.CALL,
+          replyToMessageId: null,
+          attachmentUrl: null,
+          attachmentMime: null,
+          attachmentName: null,
+          attachmentSize: null,
+          mentions: [],
+          linkPreview: null,
+        }),
+      );
+      conversation.lastMessageAt = saved.createdAt;
+      await this.conversations.save(conversation);
+      return {
+        ...this.toMessageView(saved, conversation.members, null, [], payload.actorId),
+        recipientIds: this.recipientIds(conversation),
+      };
+    }
+
     const attachmentMimeRaw = payload.attachmentMime?.trim() || null;
     const attachmentMime =
       attachmentMimeRaw === 'video/webm' && payload.type === MessageType.AUDIO
@@ -1083,6 +1119,64 @@ export class ChatService {
     }));
   }
 
+  /** Validates membership + blocks before WebRTC signaling starts (private or group). */
+  async prepareVoiceCall(
+    payload: ConversationActorPayload,
+  ): Promise<{
+    conversationId: string;
+    kind: 'private' | 'group';
+    peerIds: string[];
+    memberIds: string[];
+  }> {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const activeMembers = conversation.members.filter((member) => !member.leftAt);
+    if (activeMembers.length < 2) {
+      return RpcErrors.badRequest('Not enough participants for a call');
+    }
+
+    const MAX_GROUP_CALL = 8;
+    if (
+      conversation.type === ConversationType.GROUP &&
+      activeMembers.length > MAX_GROUP_CALL
+    ) {
+      return RpcErrors.badRequest(
+        `Group calls support up to ${MAX_GROUP_CALL} participants`,
+      );
+    }
+
+    const memberIds = activeMembers.map((member) => member.userId);
+    const peerIds: string[] = [];
+
+    for (const member of activeMembers) {
+      if (member.userId === payload.actorId) {
+        continue;
+      }
+      if (await this.isBlockedEitherWay(payload.actorId, member.userId)) {
+        if (conversation.type === ConversationType.PRIVATE) {
+          return RpcErrors.forbidden('You cannot call this user');
+        }
+        continue;
+      }
+      peerIds.push(member.userId);
+    }
+
+    if (peerIds.length === 0) {
+      return RpcErrors.badRequest('No participants available to call');
+    }
+
+    return {
+      conversationId: conversation.id,
+      kind:
+        conversation.type === ConversationType.GROUP ? 'group' : 'private',
+      peerIds,
+      // Include every active member so lobby / active-call auth matches the group
+      memberIds,
+    };
+  }
+
   async getAnalytics(): Promise<ChatAnalyticsView> {
     const now = new Date();
     const startOfDay = new Date(now);
@@ -1532,10 +1626,24 @@ export class ChatService {
     let replyToView: MessageReplyView | null = null;
     if (replyTo) {
       const replyDeleted = Boolean(replyTo.deletedForEveryoneAt);
+      const replyBody = replyDeleted
+        ? ''
+        : replyTo.body?.trim() ||
+          (replyTo.attachmentMime?.startsWith('image/')
+            ? 'Photo'
+            : replyTo.attachmentMime?.startsWith('audio/') ||
+                replyTo.type === MessageType.AUDIO
+              ? 'Voice message'
+              : replyTo.attachmentUrl
+                ? 'Attachment'
+                : replyTo.type === MessageType.CALL
+                  ? 'Call'
+                  : '');
       replyToView = {
         id: replyTo.id,
         senderId: replyTo.senderId,
-        body: replyDeleted ? '' : replyTo.body,
+        body: replyBody,
+        type: replyTo.type ?? MessageType.TEXT,
         deletedForEveryone: replyDeleted,
       };
     }

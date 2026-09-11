@@ -94,9 +94,50 @@ export class PushService {
     );
   }
 
+  /**
+   * Incoming call push — sent even if the user still has a socket (tab may be
+   * backgrounded / muted by autoplay policy).
+   */
+  async notifyCallInvite(input: {
+    recipientIds: string[];
+    senderId: string;
+    title: string;
+    body: string;
+    conversationId: string;
+    callId: string;
+    media: 'audio' | 'video';
+    kind: 'private' | 'group';
+  }): Promise<void> {
+    if (!this.enabled) return;
+
+    await Promise.all(
+      input.recipientIds
+        .filter((id) => id !== input.senderId)
+        .map((userId) =>
+          this.sendToUser(userId, {
+            title: input.title,
+            body: input.body,
+            conversationId: input.conversationId,
+            type: 'call',
+            callId: input.callId,
+            media: input.media,
+            kind: input.kind,
+          }),
+        ),
+    );
+  }
+
   private async sendToUser(
     userId: string,
-    payload: { title: string; body: string; conversationId: string },
+    payload: {
+      title: string;
+      body: string;
+      conversationId: string;
+      type?: string;
+      callId?: string;
+      media?: string;
+      kind?: string;
+    },
   ): Promise<void> {
     const subs = await this.readAll(userId);
     if (subs.length === 0) return;

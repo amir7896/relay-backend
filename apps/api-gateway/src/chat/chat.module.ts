@@ -8,6 +8,7 @@ import { ConversationCacheService } from './conversation-cache.service';
 import { PresenceService } from './presence.service';
 import { WsAuthService } from './ws-auth.service';
 import { AiService } from './ai.service';
+import { CallSessionService } from './call-session.service';
 import { LinkPreviewService } from './link-preview.service';
 import { PushService } from './push.service';
 
@@ -27,6 +28,7 @@ import { PushService } from './push.service';
     WsAuthService,
     PresenceService,
     ConversationCacheService,
+    CallSessionService,
     AiService,
     LinkPreviewService,
     PushService,
