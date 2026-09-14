@@ -5,6 +5,7 @@ import { UserProfile } from './entities/user-profile.entity';
 import { CreateUserSchema1710000000001 } from './migrations/1710000000001-CreateUserSchema';
 import { UserPartialUniqueUserId1720000000001 } from './migrations/1720000000001-UserPartialUniqueUserId';
 import { AddShowLastSeenPrivacy1730000004000 } from './migrations/1730000004000-AddShowLastSeenPrivacy';
+import { WidenAvatarUrl1740000000001 } from './migrations/1740000000001-WidenAvatarUrl';
 
 config({
   path: [
@@ -25,6 +26,7 @@ export default new DataSource({
     CreateUserSchema1710000000001,
     UserPartialUniqueUserId1720000000001,
     AddShowLastSeenPrivacy1730000004000,
+    WidenAvatarUrl1740000000001,
   ],
   synchronize: false,
 });

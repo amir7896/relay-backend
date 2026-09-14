@@ -301,6 +301,8 @@ export interface MessageView {
   forwarded: boolean;
   deletedForEveryone: boolean;
   seenBy: string[];
+  /** Sent while peer was blocked — single tick, hidden from recipient. */
+  undelivered: boolean;
   expiresAt: string | null;
   createdAt: string;
 }
@@ -316,6 +318,10 @@ export interface ConversationView {
   muted: boolean;
   pinned: boolean;
   disappearingDurationSeconds: number;
+  /** Private chat: current user blocked the peer. */
+  blockedByMe: boolean;
+  /** Private chat: peer blocked the current user. */
+  blockedMe: boolean;
   unreadCount: number;
   members: ConversationMemberView[];
   createdAt: string;

@@ -2,6 +2,7 @@ import { applyDecorators } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiBody,
+  ApiConsumes,
   ApiOperation,
   ApiParam,
   ApiTags,
@@ -51,6 +52,32 @@ export const UpdateMyProfileDocs = () =>
     ApiBody({ type: UpdateProfileDto }),
     ApiWrappedResponse(UserProfileSchema, {
       description: 'User updated successfully',
+    }),
+  );
+
+export const UploadMyAvatarDocs = () =>
+  applyDecorators(
+    ApiOperation({
+      summary: 'Upload profile photo',
+      description:
+        'Uploads the image to Cloudinary under `relay/profilePictures/` and saves the URL on the user profile.',
+    }),
+    ApiConsumes('multipart/form-data'),
+    ApiBody({
+      schema: {
+        type: 'object',
+        required: ['file'],
+        properties: {
+          file: {
+            type: 'string',
+            format: 'binary',
+            description: 'JPEG, PNG, GIF, or WebP (max 10MB)',
+          },
+        },
+      },
+    }),
+    ApiWrappedResponse(UserProfileSchema, {
+      description: 'Profile photo updated successfully',
     }),
   );
 

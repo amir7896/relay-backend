@@ -34,15 +34,25 @@ export class CloudinaryStorage implements ObjectStorage {
     const user = storageUserName(file.userName);
     const id = randomUUID();
 
-    // Voice: relay/{userName}/voiceNotes/{uuid}
-    // Images: relay/{userName}/images/{uuid}
-    // Docs:   relay/{userName}/files/{uuid}.ext  (raw public IDs should include extension)
-    const mediaFolder = isAudio ? 'voiceNotes' : isImage ? 'images' : 'files';
-    const publicId = isImage || isAudio
-      ? [this.rootFolder, user, mediaFolder, id].filter(Boolean).join('/')
-      : [this.rootFolder, user, mediaFolder, extension ? `${id}.${extension}` : id]
-          .filter(Boolean)
-          .join('/');
+    // Avatars: relay/profilePictures/{uuid}
+    // Voice:   relay/{userName}/voiceNotes/{uuid}
+    // Images:  relay/{userName}/images/{uuid}
+    // Docs:    relay/{userName}/files/{uuid}.ext  (raw public IDs should include extension)
+    let publicId: string;
+    if (file.purpose === 'avatar') {
+      if (!isImage) {
+        throw new Error('Profile pictures must be image files');
+      }
+      publicId = [this.rootFolder, 'profilePictures', id].filter(Boolean).join('/');
+    } else {
+      const mediaFolder = isAudio ? 'voiceNotes' : isImage ? 'images' : 'files';
+      publicId =
+        isImage || isAudio
+          ? [this.rootFolder, user, mediaFolder, id].filter(Boolean).join('/')
+          : [this.rootFolder, user, mediaFolder, extension ? `${id}.${extension}` : id]
+              .filter(Boolean)
+              .join('/');
+    }
 
     // Cloudinary: audio → video resource; documents → raw.
     const resourceType = isAudio ? 'video' : isImage ? 'image' : 'raw';

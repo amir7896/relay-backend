@@ -39,6 +39,7 @@ export const USER_SUCCESS_MESSAGES = {
   USER_FETCHED: 'User retrieved successfully',
   USERS_FETCHED: 'Users retrieved successfully',
   USER_UPDATED: 'User updated successfully',
+  AVATAR_UPDATED: 'Profile photo updated successfully',
   USER_DELETED: 'User deleted successfully',
 } as const;
 

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -7,12 +8,17 @@ import {
   HttpStatus,
   Param,
   Patch,
+  Post,
   Query,
+  UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { CacheInterceptor, CacheTTL } from '@nestjs/cache-manager';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import {
   AuthenticatedUser,
+  BadRequestAppException,
   CurrentUser,
   PaginationQueryDto,
   ParseUuidPipe,
@@ -23,6 +29,7 @@ import {
 import { AUTH_PATTERNS, USER_PATTERNS } from '@app/contracts';
 import type { UserProfileView } from '@app/contracts';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
+import { StorageService } from '../storage/storage.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import {
   DeleteUserDocs,
@@ -32,13 +39,32 @@ import {
   ListUsersDocs,
   UpdateMyProfileDocs,
   UpdateUserDocs,
+  UploadMyAvatarDocs,
   UsersDocs,
 } from './swagger/users.swagger';
+
+const MAX_AVATAR_BYTES = 10 * 1024 * 1024;
+const AVATAR_MIMES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+]);
+
+type UploadedAvatar = {
+  originalname: string;
+  mimetype: string;
+  size: number;
+  buffer: Buffer;
+};
 
 @UsersDocs()
 @Controller('users')
 export class UsersController {
-  constructor(private readonly proxy: MicroserviceProxy) {}
+  constructor(
+    private readonly proxy: MicroserviceProxy,
+    private readonly storage: StorageService,
+  ) {}
 
   @Get()
   @Roles(UserRole.ADMIN)
@@ -84,6 +110,15 @@ export class UsersController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: UpdateProfileDto,
   ) {
+    let previousAvatar: string | null = null;
+    if (dto.avatar !== undefined) {
+      const current = await this.proxy.sendUser<UserProfileView>(
+        USER_PATTERNS.FIND_BY_USER_ID,
+        { userId: user.id },
+      );
+      previousAvatar = current.avatar;
+    }
+
     const data = await this.proxy.sendUser<UserProfileView>(
       USER_PATTERNS.UPDATE,
       {
@@ -91,7 +126,79 @@ export class UsersController {
         ...dto,
       },
     );
+
+    if (
+      previousAvatar &&
+      (!data.avatar || data.avatar !== previousAvatar)
+    ) {
+      void this.storage.deleteByUrl(previousAvatar);
+    }
+
     return { message: USER_SUCCESS_MESSAGES.USER_UPDATED, data };
+  }
+
+  @Post('me/avatar')
+  @HttpCode(HttpStatus.OK)
+  @UploadMyAvatarDocs()
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: MAX_AVATAR_BYTES },
+    }),
+  )
+  async uploadAvatar(
+    @CurrentUser() user: AuthenticatedUser,
+    @UploadedFile() file?: UploadedAvatar,
+  ) {
+    if (!file) {
+      throw new BadRequestAppException('File is required');
+    }
+    if (!AVATAR_MIMES.has(file.mimetype)) {
+      throw new BadRequestException(
+        'Only JPEG, PNG, GIF, or WebP images are allowed',
+      );
+    }
+    if (file.size > MAX_AVATAR_BYTES) {
+      throw new BadRequestAppException('Image must be 10MB or smaller');
+    }
+
+    const current = await this.proxy.sendUser<UserProfileView>(
+      USER_PATTERNS.FIND_BY_USER_ID,
+      { userId: user.id },
+    );
+
+    const uploaded = await this.storage.upload({
+      buffer: file.buffer,
+      originalName: file.originalname,
+      mimeType: file.mimetype,
+      size: file.size,
+      userName: user.email,
+      purpose: 'avatar',
+    });
+
+    const data = await this.proxy.sendUser<UserProfileView>(
+      USER_PATTERNS.UPDATE,
+      {
+        userId: user.id,
+        avatar: uploaded.url,
+      },
+    );
+
+    if (current.avatar && current.avatar !== uploaded.url) {
+      void this.storage.deleteByUrl(current.avatar);
+    }
+
+    return {
+      message: USER_SUCCESS_MESSAGES.AVATAR_UPDATED,
+      data: {
+        ...data,
+        upload: {
+          url: uploaded.url,
+          key: uploaded.key,
+          provider: uploaded.provider,
+        },
+      },
+    };
   }
 
   @Get(':id')

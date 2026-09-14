@@ -87,6 +87,10 @@ export class Message {
   @Column({ type: 'timestamptz', nullable: true })
   expiresAt!: Date | null;
 
+  /** True when sender blocked the peer — visible only to sender, never delivered. */
+  @Column({ type: 'boolean', default: false })
+  undelivered!: boolean;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

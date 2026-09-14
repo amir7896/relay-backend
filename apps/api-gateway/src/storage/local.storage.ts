@@ -16,7 +16,17 @@ export class LocalStorage implements ObjectStorage {
 
   async upload(file: UploadInput): Promise<UploadResult> {
     const extension = extname(file.originalName).toLowerCase() || '.bin';
-    const key = `${randomUUID()}${extension}`;
+    const folder =
+      file.purpose === 'avatar' ? 'profilePictures' : '';
+    if (folder) {
+      const dir = join(this.root, folder);
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true });
+      }
+    }
+    const key = folder
+      ? `${folder}/${randomUUID()}${extension}`
+      : `${randomUUID()}${extension}`;
     writeFileSync(join(this.root, key), file.buffer);
     return {
       url: `/uploads/${key}`,
@@ -36,13 +46,13 @@ export class LocalStorage implements ObjectStorage {
     if (!url.startsWith('/uploads/')) {
       return;
     }
-    const name = url.replace(/^\/uploads\//, '').split(/[/?#]/)[0];
-    if (!name || name.includes('..')) {
+    const key = url.replace(/^\/uploads\//, '').split(/[?#]/)[0];
+    if (!key || key.includes('..')) {
       return;
     }
     const { unlink } = await import('node:fs/promises');
     try {
-      await unlink(join(this.root, name));
+      await unlink(join(this.root, key));
     } catch {
       // File may already be gone
     }

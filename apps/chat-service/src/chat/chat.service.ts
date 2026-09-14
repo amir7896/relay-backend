@@ -116,10 +116,6 @@ export class ChatService {
       );
     }
 
-    if (await this.isBlockedEitherWay(payload.actorId, payload.otherUserId)) {
-      return RpcErrors.forbidden('You cannot start a chat with this user');
-    }
-
     const pairKey = privatePairKey(payload.actorId, payload.otherUserId);
     const existing = await this.conversations.findOne({
       where: { pairKey, type: ConversationType.PRIVATE },
@@ -130,7 +126,14 @@ export class ChatService {
         existing,
         payload.actorId,
         await this.unreadCountFor(payload.actorId, existing.id),
+        null,
+        await this.blockFlagsForConversation(existing, payload.actorId),
       );
+    }
+
+    // Only the blocked party is barred from starting a new private chat.
+    if (await this.hasBlock(payload.otherUserId, payload.actorId)) {
+      return RpcErrors.forbidden('You cannot start a chat with this user');
     }
 
     const saved = await this.conversations.manager.transaction(
@@ -162,7 +165,13 @@ export class ChatService {
       },
     );
 
-    return this.toConversationView(saved, payload.actorId);
+    return this.toConversationView(
+      saved,
+      payload.actorId,
+      0,
+      null,
+      await this.blockFlagsForConversation(saved, payload.actorId),
+    );
   }
 
   async createGroup(
@@ -258,6 +267,11 @@ export class ChatService {
     );
     const latest = await this.latestMessagesByConversation(
       pageItems.map((item) => item.id),
+      payload.actorId,
+    );
+    const blockFlags = await this.blockFlagsForConversations(
+      pageItems,
+      payload.actorId,
     );
     return buildPaginatedResult(
       pageItems.map((item) =>
@@ -266,6 +280,7 @@ export class ChatService {
           payload.actorId,
           unread.get(item.id) ?? 0,
           latest.get(item.id) ?? null,
+          blockFlags.get(item.id) ?? { blockedByMe: false, blockedMe: false },
         ),
       ),
       total,
@@ -285,6 +300,8 @@ export class ChatService {
       conversation,
       payload.actorId,
       await this.unreadCountFor(payload.actorId, conversation.id),
+      null,
+      await this.blockFlagsForConversation(conversation, payload.actorId),
     );
   }
 
@@ -306,6 +323,9 @@ export class ChatService {
         )`,
         { actorId: payload.actorId },
       )
+      .andWhere('(m.undelivered = false OR m.senderId = :actorId)', {
+        actorId: payload.actorId,
+      })
       .orderBy('m.createdAt', 'DESC')
       .skip(skip)
       .take(take)
@@ -358,6 +378,9 @@ export class ChatService {
         )`,
         { actorId: payload.actorId },
       )
+      .andWhere('(m.undelivered = false OR m.senderId = :actorId)', {
+        actorId: payload.actorId,
+      })
       .orderBy('m.createdAt', 'DESC')
       .skip(skip)
       .take(take)
@@ -426,6 +449,9 @@ export class ChatService {
         )`,
         { actorId: payload.actorId },
       )
+      .andWhere('(m.undelivered = false OR m.senderId = :actorId)', {
+        actorId: payload.actorId,
+      })
       .orderBy('m.createdAt', 'DESC')
       .skip(skip)
       .take(take)
@@ -501,7 +527,10 @@ export class ChatService {
           WHERE mh."messageId" = m.id AND mh."userId" = :actorId
         )`,
         { actorId: payload.actorId },
-      );
+      )
+      .andWhere('(m.undelivered = false OR m.senderId = :actorId)', {
+        actorId: payload.actorId,
+      });
 
     if (kind === 'image') {
       qb.andWhere(
@@ -678,16 +707,12 @@ export class ChatService {
       payload.actorId,
     );
 
-    if (conversation.type === ConversationType.PRIVATE) {
-      const other = conversation.members.find(
-        (member) => member.userId !== payload.actorId,
-      );
-      if (
-        other &&
-        (await this.isBlockedEitherWay(payload.actorId, other.userId))
-      ) {
-        return RpcErrors.forbidden('You cannot message this user');
-      }
+    const delivery = await this.resolvePrivateDelivery(
+      conversation,
+      payload.actorId,
+    );
+    if (delivery.forbidden) {
+      return RpcErrors.forbidden('You cannot message this user');
     }
 
     let replyTo: Message | null = null;
@@ -730,6 +755,7 @@ export class ChatService {
         attachmentSize: payload.attachmentSize ?? null,
         mentions: validMentions,
         linkPreview: payload.linkPreview ?? null,
+        undelivered: delivery.undelivered,
         expiresAt:
           conversation.disappearingDurationSeconds > 0
             ? new Date(
@@ -743,10 +769,11 @@ export class ChatService {
     await this.recordAudit(payload.actorId, 'message.sent', 'conversation', conversation.id, {
       messageId: saved.id,
       type,
+      undelivered: delivery.undelivered,
     });
     return {
       ...this.toMessageView(saved, conversation.members, replyTo, [], payload.actorId),
-      recipientIds: this.recipientIds(conversation),
+      recipientIds: delivery.recipientIds,
     };
   }
 
@@ -1007,13 +1034,11 @@ export class ChatService {
     );
 
     if (conversation.type === ConversationType.PRIVATE) {
-      const other = conversation.members.find(
-        (member) => member.userId !== payload.actorId,
+      const delivery = await this.resolvePrivateDelivery(
+        conversation,
+        payload.actorId,
       );
-      if (
-        other &&
-        (await this.isBlockedEitherWay(payload.actorId, other.userId))
-      ) {
+      if (delivery.forbidden) {
         return RpcErrors.forbidden('You cannot message this user');
       }
     }
@@ -1219,15 +1244,46 @@ export class ChatService {
     }
 
     if (toConversation.type === ConversationType.PRIVATE) {
-      const other = toConversation.members.find(
-        (member) => member.userId !== payload.actorId,
+      const delivery = await this.resolvePrivateDelivery(
+        toConversation,
+        payload.actorId,
       );
-      if (
-        other &&
-        (await this.isBlockedEitherWay(payload.actorId, other.userId))
-      ) {
+      if (delivery.forbidden) {
         return RpcErrors.forbidden('You cannot message this user');
       }
+      const saved = await this.messages.save(
+        this.messages.create({
+          conversationId: toConversation.id,
+          senderId: payload.actorId,
+          body: source.body,
+          type: source.type,
+          attachmentUrl: source.attachmentUrl,
+          attachmentMime: source.attachmentMime,
+          attachmentName: source.attachmentName,
+          attachmentSize: source.attachmentSize,
+          forwardedFromMessageId: source.id,
+          undelivered: delivery.undelivered,
+          expiresAt:
+            toConversation.disappearingDurationSeconds > 0 &&
+            source.type !== MessageType.CALL
+              ? new Date(
+                  Date.now() + toConversation.disappearingDurationSeconds * 1000,
+                )
+              : null,
+        }),
+      );
+      toConversation.lastMessageAt = saved.createdAt;
+      await this.conversations.save(toConversation);
+      return {
+        ...this.toMessageView(
+          saved,
+          toConversation.members,
+          null,
+          [],
+          payload.actorId,
+        ),
+        recipientIds: delivery.recipientIds,
+      };
     }
 
     const saved = await this.messages.save(
@@ -2057,6 +2113,132 @@ export class ChatService {
     return count > 0;
   }
 
+  private async hasBlock(blockerId: string, blockedId: string): Promise<boolean> {
+    const count = await this.userBlocks.count({
+      where: { blockerId, blockedId },
+    });
+    return count > 0;
+  }
+
+  private async resolvePrivateDelivery(
+    conversation: Conversation,
+    actorId: string,
+  ): Promise<{
+    forbidden: boolean;
+    undelivered: boolean;
+    recipientIds: string[];
+  }> {
+    if (conversation.type !== ConversationType.PRIVATE) {
+      return {
+        forbidden: false,
+        undelivered: false,
+        recipientIds: this.recipientIds(conversation),
+      };
+    }
+    const other = (conversation.members ?? []).find(
+      (member) => member.userId !== actorId && !member.leftAt,
+    );
+    if (!other) {
+      return {
+        forbidden: false,
+        undelivered: false,
+        recipientIds: this.recipientIds(conversation),
+      };
+    }
+    const [blockedByMe, blockedMe] = await Promise.all([
+      this.hasBlock(actorId, other.userId),
+      this.hasBlock(other.userId, actorId),
+    ]);
+    if (blockedMe) {
+      return { forbidden: true, undelivered: false, recipientIds: [] };
+    }
+    if (blockedByMe) {
+      return {
+        forbidden: false,
+        undelivered: true,
+        recipientIds: [actorId],
+      };
+    }
+    return {
+      forbidden: false,
+      undelivered: false,
+      recipientIds: this.recipientIds(conversation),
+    };
+  }
+
+  private async blockFlagsForConversation(
+    conversation: Conversation,
+    actorId: string,
+  ): Promise<{ blockedByMe: boolean; blockedMe: boolean }> {
+    if (conversation.type !== ConversationType.PRIVATE) {
+      return { blockedByMe: false, blockedMe: false };
+    }
+    const other = (conversation.members ?? []).find(
+      (member) => member.userId !== actorId && !member.leftAt,
+    );
+    if (!other) {
+      return { blockedByMe: false, blockedMe: false };
+    }
+    const [blockedByMe, blockedMe] = await Promise.all([
+      this.hasBlock(actorId, other.userId),
+      this.hasBlock(other.userId, actorId),
+    ]);
+    return { blockedByMe, blockedMe };
+  }
+
+  private async blockFlagsForConversations(
+    conversations: Conversation[],
+    actorId: string,
+  ): Promise<Map<string, { blockedByMe: boolean; blockedMe: boolean }>> {
+    const map = new Map<string, { blockedByMe: boolean; blockedMe: boolean }>();
+    const privatePeers = conversations
+      .filter((item) => item.type === ConversationType.PRIVATE)
+      .map((item) => {
+        const other = (item.members ?? []).find(
+          (member) => member.userId !== actorId && !member.leftAt,
+        );
+        return other ? ({ conversationId: item.id, otherUserId: other.userId } as const) : null;
+      })
+      .filter((item): item is { conversationId: string; otherUserId: string } =>
+        Boolean(item),
+      );
+
+    for (const item of conversations) {
+      map.set(item.id, { blockedByMe: false, blockedMe: false });
+    }
+
+    if (privatePeers.length === 0) {
+      return map;
+    }
+
+    const peerIds = [...new Set(privatePeers.map((item) => item.otherUserId))];
+    const blocks = await this.userBlocks.find({
+      where: [
+        { blockerId: actorId, blockedId: In(peerIds) },
+        { blockerId: In(peerIds), blockedId: actorId },
+      ],
+    });
+
+    const blockedByMe = new Set(
+      blocks
+        .filter((block) => block.blockerId === actorId)
+        .map((block) => block.blockedId),
+    );
+    const blockedMe = new Set(
+      blocks
+        .filter((block) => block.blockedId === actorId)
+        .map((block) => block.blockerId),
+    );
+
+    for (const peer of privatePeers) {
+      map.set(peer.conversationId, {
+        blockedByMe: blockedByMe.has(peer.otherUserId),
+        blockedMe: blockedMe.has(peer.otherUserId),
+      });
+    }
+    return map;
+  }
+
   private async loadReplyParents(
     messages: Message[],
   ): Promise<Map<string, Message>> {
@@ -2193,6 +2375,7 @@ export class ChatService {
       .andWhere('m.senderId != :actorId', { actorId })
       .andWhere('(cm.lastReadAt IS NULL OR m.createdAt > cm.lastReadAt)')
       .andWhere('m.deletedForEveryoneAt IS NULL')
+      .andWhere('(m.undelivered = false OR m.senderId = :actorId)', { actorId })
       .andWhere(
         `NOT EXISTS (
           SELECT 1 FROM message_hides mh
@@ -2210,6 +2393,7 @@ export class ChatService {
 
   private async latestMessagesByConversation(
     conversationIds: string[],
+    actorId: string,
   ): Promise<Map<string, Message>> {
     const latest = new Map<string, Message>();
     if (conversationIds.length === 0) {
@@ -2218,10 +2402,12 @@ export class ChatService {
 
     // Prefer a non-deleted-for-everyone preview when available; otherwise keep
     // the newest row so toMessageView can render a deleted placeholder.
+    // Undelivered (blocked) messages are only visible to the sender.
     const rows = await this.messages
       .createQueryBuilder('m')
       .distinctOn(['m.conversationId'])
       .where('m.conversationId IN (:...conversationIds)', { conversationIds })
+      .andWhere('(m.undelivered = false OR m.senderId = :actorId)', { actorId })
       .orderBy('m.conversationId')
       .addOrderBy('CASE WHEN m.deletedForEveryoneAt IS NULL THEN 0 ELSE 1 END')
       .addOrderBy('m.createdAt', 'DESC')
@@ -2244,6 +2430,10 @@ export class ChatService {
     actorId: string,
     unreadCount = 0,
     lastMessage: Message | null = null,
+    blockFlags: { blockedByMe: boolean; blockedMe: boolean } = {
+      blockedByMe: false,
+      blockedMe: false,
+    },
   ): ConversationView {
     const activeMembers = (conversation.members ?? []).filter(
       (member) => !member.leftAt,
@@ -2262,6 +2452,8 @@ export class ChatService {
       muted: Boolean(actor?.mutedAt),
       pinned: Boolean(actor?.pinnedAt),
       disappearingDurationSeconds: conversation.disappearingDurationSeconds ?? 0,
+      blockedByMe: blockFlags.blockedByMe,
+      blockedMe: blockFlags.blockedMe,
       unreadCount,
       members: activeMembers.map((member) => ({
         userId: member.userId,
@@ -2285,15 +2477,18 @@ export class ChatService {
     actorId?: string,
   ): MessageView {
     const deletedForEveryone = Boolean(message.deletedForEveryoneAt);
-    const seenBy = members
-      .filter(
-        (member) =>
-          !member.leftAt &&
-          member.userId !== message.senderId &&
-          member.lastReadAt != null &&
-          member.lastReadAt >= message.createdAt,
-      )
-      .map((member) => member.userId);
+    const undelivered = Boolean(message.undelivered);
+    const seenBy = undelivered
+      ? []
+      : members
+          .filter(
+            (member) =>
+              !member.leftAt &&
+              member.userId !== message.senderId &&
+              member.lastReadAt != null &&
+              member.lastReadAt >= message.createdAt,
+          )
+          .map((member) => member.userId);
 
     let replyToView: MessageReplyView | null = null;
     if (replyTo) {
@@ -2360,6 +2555,7 @@ export class ChatService {
       forwarded: Boolean(message.forwardedFromMessageId),
       deletedForEveryone,
       seenBy,
+      undelivered,
       expiresAt:
         !deletedForEveryone && message.expiresAt
           ? message.expiresAt.toISOString()
