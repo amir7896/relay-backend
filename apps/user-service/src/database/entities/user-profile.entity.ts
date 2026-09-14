@@ -36,7 +36,7 @@ export class UserProfile {
   @Column({ type: 'varchar', length: 500, nullable: true })
   bio!: string | null;
 
-  @Column({ type: 'varchar', length: 500, nullable: true })
+  @Column({ type: 'varchar', length: 1024, nullable: true })
   avatar!: string | null;
 
   @Column({ type: 'date', nullable: true })

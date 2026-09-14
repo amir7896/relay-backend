@@ -5,8 +5,10 @@ export type UploadInput = {
   originalName: string;
   mimeType: string;
   size: number;
-  /** Used to build Cloudinary path relay/{userName}/voiceNotes/ */
+  /** Used to build Cloudinary path relay/{userName}/files|images|voiceNotes/ */
   userName?: string;
+  /** Profile avatars go to relay/profilePictures/ */
+  purpose?: 'chat' | 'avatar';
 };
 
 export type UploadResult = {
@@ -23,6 +25,16 @@ export interface ObjectStorage {
   upload(file: UploadInput): Promise<UploadResult>;
   /** Best-effort delete of a previously uploaded object by its public URL */
   deleteByUrl?(url: string): Promise<void>;
+  /**
+   * Resolve a URL the client can fetch (signed Cloudinary URL when public CDN is blocked).
+   * Returns null when the original public URL should be used as-is.
+   */
+  resolveDownloadUrl?(
+    url: string,
+    options?: { filename?: string; expiresInSeconds?: number },
+  ): string | null;
+  /** Server-side fetch of the object bytes (used by authenticated download proxy). */
+  downloadBuffer?(url: string): Promise<Buffer>;
 }
 
 /** Safe Cloudinary / S3 path segment from email or display name */

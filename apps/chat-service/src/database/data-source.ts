@@ -16,6 +16,12 @@ import { AddChatProductFeatures1730000003000 } from './migrations/1730000003000-
 import { AddChatEngagementFeatures1730000005000 } from './migrations/1730000005000-AddChatEngagementFeatures';
 import { AddSellReadyFeatures1730000006000 } from './migrations/1730000006000-AddSellReadyFeatures';
 import { AddCallMessageType1730000007000 } from './migrations/1730000007000-AddCallMessageType';
+import { AddMessagePins1730000008000 } from './migrations/1730000008000-AddMessagePins';
+import { AddScheduledMessages1730000009000 } from './migrations/1730000009000-AddScheduledMessages';
+import { AddDisappearingMessages1730000010000 } from './migrations/1730000010000-AddDisappearingMessages';
+import { AddUndeliveredMessages1730000011000 } from './migrations/1730000011000-AddUndeliveredMessages';
+
+import { ScheduledMessage } from './entities/scheduled-message.entity';
 
 config({
   path: [
@@ -40,6 +46,7 @@ export default new DataSource({
     UserBlock,
     AuditEvent,
     WorkspaceSettings,
+    ScheduledMessage,
   ],
   migrations: [
     CreateChatSchema1730000000000,
@@ -49,6 +56,10 @@ export default new DataSource({
     AddChatEngagementFeatures1730000005000,
     AddSellReadyFeatures1730000006000,
     AddCallMessageType1730000007000,
+    AddMessagePins1730000008000,
+    AddScheduledMessages1730000009000,
+    AddDisappearingMessages1730000010000,
+    AddUndeliveredMessages1730000011000,
   ],
   synchronize: false,
 });

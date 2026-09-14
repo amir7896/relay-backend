@@ -32,17 +32,30 @@ export class CloudinaryStorage implements ObjectStorage {
       file.mimeType.startsWith('audio/') || file.mimeType === 'video/webm';
     const isImage = file.mimeType.startsWith('image/');
     const user = storageUserName(file.userName);
+    const id = randomUUID();
 
-    // Voice: relay/{userName}/voiceNotes/{uuid}
-    // Images: relay/{userName}/images/{uuid}
-    // Other:  relay/{userName}/files/{uuid}
-    const mediaFolder = isAudio ? 'voiceNotes' : isImage ? 'images' : 'files';
-    const publicId = [this.rootFolder, user, mediaFolder, randomUUID()]
-      .filter(Boolean)
-      .join('/');
+    // Avatars: relay/profilePictures/{uuid}
+    // Voice:   relay/{userName}/voiceNotes/{uuid}
+    // Images:  relay/{userName}/images/{uuid}
+    // Docs:    relay/{userName}/files/{uuid}.ext  (raw public IDs should include extension)
+    let publicId: string;
+    if (file.purpose === 'avatar') {
+      if (!isImage) {
+        throw new Error('Profile pictures must be image files');
+      }
+      publicId = [this.rootFolder, 'profilePictures', id].filter(Boolean).join('/');
+    } else {
+      const mediaFolder = isAudio ? 'voiceNotes' : isImage ? 'images' : 'files';
+      publicId =
+        isImage || isAudio
+          ? [this.rootFolder, user, mediaFolder, id].filter(Boolean).join('/')
+          : [this.rootFolder, user, mediaFolder, extension ? `${id}.${extension}` : id]
+              .filter(Boolean)
+              .join('/');
+    }
 
-    // Cloudinary stores audio under the "video" resource type.
-    const resourceType = isAudio ? 'video' : isImage ? 'image' : 'auto';
+    // Cloudinary: audio → video resource; documents → raw.
+    const resourceType = isAudio ? 'video' : isImage ? 'image' : 'raw';
 
     const result = await new Promise<{
       secure_url: string;
@@ -53,8 +66,11 @@ export class CloudinaryStorage implements ObjectStorage {
           {
             public_id: publicId,
             resource_type: resourceType,
+            type: 'upload',
+            access_mode: 'public',
             folder: undefined,
-            format: extension || undefined,
+            // Only set format for image/video; raw already has extension in public_id
+            format: isImage || isAudio ? extension || undefined : undefined,
           },
           (error, uploaded) => {
             if (error || !uploaded?.secure_url) {
@@ -80,6 +96,83 @@ export class CloudinaryStorage implements ObjectStorage {
     };
   }
 
+  resolveDownloadUrl(
+    url: string,
+    options?: { filename?: string; expiresInSeconds?: number },
+  ): string | null {
+    const parsed = this.parseCloudinaryUrl(url);
+    if (!parsed) {
+      return null;
+    }
+
+    const expiresAt =
+      Math.floor(Date.now() / 1000) +
+      Math.max(60, options?.expiresInSeconds ?? 60 * 60);
+
+    // Signed / private download URLs bypass Cloudinary "restricted media" 401s
+    // (e.g. PDF/ZIP delivery disabled in Security settings).
+    return cloudinary.utils.private_download_url(
+      parsed.publicId,
+      parsed.format || '',
+      {
+        resource_type: parsed.resourceType,
+        type: 'upload',
+        expires_at: expiresAt,
+        attachment: true,
+      },
+    );
+  }
+
+  async downloadBuffer(url: string): Promise<Buffer> {
+    const parsed = this.parseCloudinaryUrl(url);
+    const candidates: string[] = [];
+
+    if (parsed) {
+      const publicIds =
+        parsed.resourceType === 'raw'
+          ? Array.from(
+              new Set([
+                parsed.publicId,
+                parsed.publicId.replace(/\.[^/.]+$/, ''),
+                parsed.format
+                  ? `${parsed.publicId.replace(/\.[^/.]+$/, '')}.${parsed.format}`
+                  : '',
+              ].filter(Boolean)),
+            )
+          : [parsed.publicId];
+
+      const expiresAt = Math.floor(Date.now() / 1000) + 60 * 60;
+      for (const publicId of publicIds) {
+        candidates.push(
+          cloudinary.utils.private_download_url(publicId, parsed.format || '', {
+            resource_type: parsed.resourceType,
+            type: 'upload',
+            expires_at: expiresAt,
+            attachment: true,
+          }),
+        );
+      }
+    }
+
+    candidates.push(url);
+
+    let lastError: Error | null = null;
+    for (const candidate of candidates) {
+      try {
+        const response = await fetch(candidate);
+        if (response.ok) {
+          return Buffer.from(await response.arrayBuffer());
+        }
+        lastError = new Error(`Cloudinary download failed (${response.status})`);
+      } catch (error) {
+        lastError =
+          error instanceof Error ? error : new Error(String(error));
+      }
+    }
+
+    throw lastError ?? new Error('Cloudinary download failed');
+  }
+
   async deleteByUrl(url: string): Promise<void> {
     const parsed = this.parseCloudinaryUrl(url);
     if (!parsed) {
@@ -94,6 +187,7 @@ export class CloudinaryStorage implements ObjectStorage {
   private parseCloudinaryUrl(url: string): {
     publicId: string;
     resourceType: 'image' | 'video' | 'raw';
+    format: string;
   } | null {
     try {
       const parsed = new URL(url);
@@ -109,11 +203,16 @@ export class CloudinaryStorage implements ObjectStorage {
         return null;
       }
       const resourceType = match[1] as 'image' | 'video' | 'raw';
-      const publicId = decodeURIComponent(match[2]).replace(/\.[^/.]+$/, '');
+      const rest = decodeURIComponent(match[2]);
+      const formatMatch = rest.match(/\.([^./]+)$/);
+      const format = formatMatch?.[1] ?? '';
+      // Raw public IDs usually include the extension; image/video usually do not.
+      const publicId =
+        resourceType === 'raw' ? rest : rest.replace(/\.[^/.]+$/, '');
       if (!publicId) {
         return null;
       }
-      return { publicId, resourceType };
+      return { publicId, resourceType, format };
     } catch {
       return null;
     }

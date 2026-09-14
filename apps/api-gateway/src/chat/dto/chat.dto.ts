@@ -5,6 +5,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsDateString,
   IsEnum,
   IsIn,
   IsInt,
@@ -76,7 +77,7 @@ export class SendMessageDto {
   })
   @IsOptional()
   @IsString()
-  @MaxLength(500)
+  @MaxLength(1000)
   attachmentUrl?: string;
 
   @ApiPropertyOptional({ example: 'image/jpeg' })
@@ -153,6 +154,34 @@ export class PinConversationDto {
   @ApiProperty({ example: true })
   @IsBoolean()
   pinned!: boolean;
+}
+
+export class SetDisappearingDto {
+  @ApiProperty({
+    example: 86400,
+    description:
+      'Seconds until new messages disappear. 0 = off. Allowed: 0, 30, 60, 3600, 86400, 604800, 7776000',
+    enum: [0, 30, 60, 3600, 86400, 604800, 7776000],
+  })
+  @Type(() => Number)
+  @IsInt()
+  @IsIn([0, 30, 60, 3600, 86400, 604800, 7776000])
+  durationSeconds!: number;
+}
+
+export class PinMessageDto {
+  @ApiProperty({ example: true })
+  @IsBoolean()
+  pinned!: boolean;
+}
+
+export class ScheduleMessageDto extends SendMessageDto {
+  @ApiProperty({
+    example: '2026-09-12T18:30:00.000Z',
+    description: 'ISO timestamp when the message should be sent (min 1 minute ahead)',
+  })
+  @IsDateString()
+  scheduledFor!: string;
 }
 
 export class DeleteMessageDto {
@@ -238,4 +267,15 @@ export class SearchMessagesQueryDto extends ChatPageQueryDto {
   @IsNotEmpty()
   @MaxLength(200)
   q!: string;
+}
+
+export class ListMediaQueryDto extends ChatPageQueryDto {
+  @ApiPropertyOptional({
+    enum: ['all', 'image', 'file', 'audio'],
+    default: 'all',
+    description: 'Filter media by kind',
+  })
+  @IsOptional()
+  @IsIn(['all', 'image', 'file', 'audio'])
+  kind: 'all' | 'image' | 'file' | 'audio' = 'all';
 }

@@ -4,7 +4,6 @@ import {
   IsDateString,
   IsOptional,
   IsString,
-  IsUrl,
   MaxLength,
 } from 'class-validator';
 
@@ -33,10 +32,13 @@ export class UpdateProfileDto {
   @MaxLength(500)
   bio?: string;
 
-  @ApiPropertyOptional({ example: 'https://cdn.example.com/avatar.png' })
+  @ApiPropertyOptional({
+    example: 'https://res.cloudinary.com/demo/image/upload/relay/profilePictures/abc',
+    description: 'Cloudinary (or upload) URL for the profile photo',
+  })
   @IsOptional()
-  @IsUrl({}, { message: 'avatar must be a valid URL' })
-  @MaxLength(500)
+  @IsString()
+  @MaxLength(1024)
   avatar?: string;
 
   @ApiPropertyOptional({ example: '1994-04-12' })

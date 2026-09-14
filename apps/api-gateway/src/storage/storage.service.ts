@@ -51,6 +51,29 @@ export class StorageService {
     }
   }
 
+  resolveDownloadUrl(
+    url: string,
+    options?: { filename?: string; expiresInSeconds?: number },
+  ): string {
+    if (!url) {
+      return url;
+    }
+    return (
+      this.adapter.resolveDownloadUrl?.(url, options) ?? url
+    );
+  }
+
+  async downloadBuffer(url: string): Promise<Buffer> {
+    if (this.adapter.downloadBuffer) {
+      return this.adapter.downloadBuffer(url);
+    }
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Download failed (${response.status})`);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  }
+
   private createAdapter(driver: StorageDriver): ObjectStorage {
     if (driver === 's3') {
       return new S3Storage({

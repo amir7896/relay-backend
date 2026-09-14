@@ -110,7 +110,10 @@ export class UsersService {
     profile.lastName = payload.lastName?.trim() ?? profile.lastName;
     profile.phone = payload.phone ?? profile.phone;
     profile.bio = payload.bio ?? profile.bio;
-    profile.avatar = payload.avatar ?? profile.avatar;
+    if (payload.avatar !== undefined) {
+      const next = payload.avatar?.trim() || null;
+      profile.avatar = next;
+    }
     profile.dateOfBirth = payload.dateOfBirth ?? profile.dateOfBirth;
     if (typeof payload.showLastSeen === 'boolean') {
       profile.showLastSeen = payload.showLastSeen;

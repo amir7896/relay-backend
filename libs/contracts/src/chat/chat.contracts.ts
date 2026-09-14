@@ -12,13 +12,24 @@ export const CHAT_PATTERNS = {
   GET_CONVERSATION: 'chat.get_conversation',
   LIST_MESSAGES: 'chat.list_messages',
   SEARCH_MESSAGES: 'chat.search_messages',
+  SEARCH_GLOBAL: 'chat.search_global',
+  LIST_MEDIA: 'chat.list_media',
+  GET_MESSAGE: 'chat.get_message',
   SEND_MESSAGE: 'chat.send_message',
   EDIT_MESSAGE: 'chat.edit_message',
   REACT_MESSAGE: 'chat.react_message',
+  PIN_MESSAGE: 'chat.pin_message',
+  LIST_PINNED_MESSAGES: 'chat.list_pinned_messages',
+  SCHEDULE_MESSAGE: 'chat.schedule_message',
+  LIST_SCHEDULED_MESSAGES: 'chat.list_scheduled_messages',
+  CANCEL_SCHEDULED_MESSAGE: 'chat.cancel_scheduled_message',
+  DISPATCH_DUE_SCHEDULED: 'chat.dispatch_due_scheduled',
   FORWARD_MESSAGE: 'chat.forward_message',
   MARK_SEEN: 'chat.mark_seen',
   MUTE_CONVERSATION: 'chat.mute_conversation',
   PIN_CONVERSATION: 'chat.pin_conversation',
+  SET_DISAPPEARING: 'chat.set_disappearing',
+  EXPIRE_DUE_MESSAGES: 'chat.expire_due_messages',
   DELETE_MESSAGE: 'chat.delete_message',
   ADD_MEMBERS: 'chat.add_members',
   REMOVE_MEMBER: 'chat.remove_member',
@@ -70,6 +81,37 @@ export interface SearchMessagesPayload extends ConversationActorPayload {
   limit: number;
 }
 
+export interface GlobalSearchMessagesPayload {
+  actorId: string;
+  query: string;
+  page: number;
+  limit: number;
+}
+
+export interface GlobalSearchConversationView {
+  id: string;
+  type: ConversationType;
+  name: string | null;
+  members: Array<{ userId: string }>;
+}
+
+export interface GlobalSearchHitView {
+  message: MessageView;
+  conversation: GlobalSearchConversationView;
+}
+
+export type MediaKindFilter = 'all' | 'image' | 'file' | 'audio';
+
+export interface ListMediaPayload extends ConversationActorPayload {
+  page: number;
+  limit: number;
+  kind?: MediaKindFilter;
+}
+
+export interface GetMessagePayload extends ConversationActorPayload {
+  messageId: string;
+}
+
 export interface SendMessagePayload extends ConversationActorPayload {
   body?: string;
   type?: MessageType;
@@ -98,6 +140,52 @@ export interface ReactMessagePayload extends ConversationActorPayload {
   emoji: string;
 }
 
+export interface PinMessagePayload extends ConversationActorPayload {
+  messageId: string;
+  pinned: boolean;
+}
+
+export interface ScheduleMessagePayload extends ConversationActorPayload {
+  body?: string;
+  type?: MessageType;
+  replyToMessageId?: string;
+  attachmentUrl?: string;
+  attachmentMime?: string;
+  attachmentName?: string;
+  attachmentSize?: number;
+  mentionUserIds?: string[];
+  linkPreview?: LinkPreviewView | null;
+  scheduledFor: string;
+}
+
+export interface CancelScheduledMessagePayload extends ConversationActorPayload {
+  scheduledMessageId: string;
+}
+
+export type ScheduledMessageStatus =
+  | 'pending'
+  | 'sending'
+  | 'sent'
+  | 'cancelled'
+  | 'failed';
+
+export interface ScheduledMessageView {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  body: string;
+  type: MessageType;
+  replyToMessageId: string | null;
+  attachment: MessageAttachmentView | null;
+  mentions: string[];
+  linkPreview: LinkPreviewView | null;
+  scheduledFor: string;
+  status: ScheduledMessageStatus;
+  sentMessageId: string | null;
+  error: string | null;
+  createdAt: string;
+}
+
 export interface ForwardMessagePayload {
   actorId: string;
   messageId: string;
@@ -115,6 +203,11 @@ export interface MuteConversationPayload extends ConversationActorPayload {
 
 export interface PinConversationPayload extends ConversationActorPayload {
   pinned: boolean;
+}
+
+export interface SetDisappearingPayload extends ConversationActorPayload {
+  /** 0 = off. Allowed: 0, 30, 60, 3600, 86400, 604800, 7776000 */
+  durationSeconds: number;
 }
 
 export interface DeleteMessagePayload extends ConversationActorPayload {
@@ -202,9 +295,15 @@ export interface MessageView {
   linkPreview: LinkPreviewView | null;
   reactions: MessageReactionView[];
   editedAt: string | null;
+  pinned: boolean;
+  pinnedAt: string | null;
+  pinnedByUserId: string | null;
   forwarded: boolean;
   deletedForEveryone: boolean;
   seenBy: string[];
+  /** Sent while peer was blocked — single tick, hidden from recipient. */
+  undelivered: boolean;
+  expiresAt: string | null;
   createdAt: string;
 }
 
@@ -218,6 +317,11 @@ export interface ConversationView {
   lastReadAt: string | null;
   muted: boolean;
   pinned: boolean;
+  disappearingDurationSeconds: number;
+  /** Private chat: current user blocked the peer. */
+  blockedByMe: boolean;
+  /** Private chat: peer blocked the current user. */
+  blockedMe: boolean;
   unreadCount: number;
   members: ConversationMemberView[];
   createdAt: string;
