@@ -28,6 +28,9 @@ import { AdminModule } from './admin/admin.module';
 import { ProxyModule } from './infrastructure/proxy/proxy.module';
 import { StorageModule } from './storage/storage.module';
 import { UsersModule } from './users/users.module';
+import { OrganizationsModule } from './organizations/organizations.module';
+import { OrganizationGuard } from './organizations/organization.guard';
+import { OrganizationInterceptor } from './organizations/organization.interceptor';
 
 @Module({
   imports: [
@@ -66,6 +69,7 @@ import { UsersModule } from './users/users.module';
     StorageModule,
     ProxyModule,
     AuthModule,
+    OrganizationsModule,
     UsersModule,
     ChatModule, // HTTP + Socket.IO chat surface
     AdminModule,
@@ -75,11 +79,13 @@ import { UsersModule } from './users/users.module';
     { provide: APP_PIPE, useFactory: createValidationPipe },
     { provide: APP_FILTER, useClass: HttpExceptionFilter },
     { provide: APP_FILTER, useClass: RpcToHttpExceptionFilter },
+    { provide: APP_INTERCEPTOR, useClass: OrganizationInterceptor },
     { provide: APP_INTERCEPTOR, useClass: TransformInterceptor },
     { provide: APP_INTERCEPTOR, useClass: TimeoutInterceptor },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: APP_GUARD, useClass: OrganizationGuard },
   ],
 })
 export class AppModule implements NestModule {

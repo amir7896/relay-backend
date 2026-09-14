@@ -8,6 +8,7 @@ import type {
   UpdateProfilePayload,
   UserProfileView,
 } from '@app/contracts';
+import { requireOrganizationId } from '@app/database';
 import { UserProfile } from '../database/entities/user-profile.entity';
 
 const ALLOWED_SORT = new Set([
@@ -26,14 +27,16 @@ export class UsersService {
   ) {}
 
   async createProfile(payload: CreateProfilePayload): Promise<UserProfileView> {
+    const organizationId = requireOrganizationId();
     const existing = await this.profiles.findOne({
-      where: { userId: payload.userId },
+      where: { organizationId, userId: payload.userId },
     });
     if (existing) {
       return this.toView(existing);
     }
 
     const profile = this.profiles.create({
+      organizationId,
       userId: payload.userId,
       email: payload.email.toLowerCase().trim(),
       firstName: payload.firstName.trim(),
@@ -46,7 +49,7 @@ export class UsersService {
     } catch (error) {
       if (error instanceof QueryFailedError) {
         const existingAfterConflict = await this.profiles.findOne({
-          where: { userId: payload.userId },
+          where: { organizationId, userId: payload.userId },
         });
         if (existingAfterConflict) {
           return this.toView(existingAfterConflict);
@@ -57,6 +60,7 @@ export class UsersService {
   }
 
   async findAll(query: FindUsersPayload) {
+    const organizationId = requireOrganizationId();
     const { skip, take } = getSkipTake(query.page, query.limit);
     const sortBy = ALLOWED_SORT.has(query.sortBy) ? query.sortBy : 'createdAt';
     const order = { [sortBy]: query.order } as FindOptionsOrder<UserProfile>;
@@ -64,11 +68,11 @@ export class UsersService {
     const [items, total] = await this.profiles.findAndCount({
       where: query.search
         ? [
-            { firstName: ILike(`%${query.search}%`) },
-            { lastName: ILike(`%${query.search}%`) },
-            { email: ILike(`%${query.search}%`) },
+            { organizationId, firstName: ILike(`%${query.search}%`) },
+            { organizationId, lastName: ILike(`%${query.search}%`) },
+            { organizationId, email: ILike(`%${query.search}%`) },
           ]
-        : undefined,
+        : { organizationId },
       order,
       skip,
       take,
@@ -83,7 +87,9 @@ export class UsersService {
   }
 
   async findOne(id: string): Promise<UserProfileView> {
-    const profile = await this.profiles.findOne({ where: { id } });
+    const profile = await this.profiles.findOne({
+      where: { id, organizationId: requireOrganizationId() },
+    });
     if (!profile) {
       return RpcErrors.notFound('User');
     }
@@ -91,7 +97,9 @@ export class UsersService {
   }
 
   async findByUserId(userId: string): Promise<UserProfileView> {
-    const profile = await this.profiles.findOne({ where: { userId } });
+    const profile = await this.profiles.findOne({
+      where: { userId, organizationId: requireOrganizationId() },
+    });
     if (!profile) {
       return RpcErrors.notFound('User profile');
     }
@@ -100,7 +108,10 @@ export class UsersService {
 
   async update(payload: UpdateProfilePayload): Promise<UserProfileView> {
     const profile = await this.profiles.findOne({
-      where: { userId: payload.userId },
+      where: {
+        userId: payload.userId,
+        organizationId: requireOrganizationId(),
+      },
     });
     if (!profile) {
       return RpcErrors.notFound('User profile');
@@ -124,7 +135,9 @@ export class UsersService {
   }
 
   async remove(userId: string): Promise<{ deleted: boolean }> {
-    const profile = await this.profiles.findOne({ where: { userId } });
+    const profile = await this.profiles.findOne({
+      where: { userId, organizationId: requireOrganizationId() },
+    });
     if (!profile) {
       return RpcErrors.notFound('User profile');
     }
@@ -132,10 +145,16 @@ export class UsersService {
     return { deleted: true };
   }
 
+  async purgeByOrganization(organizationId: string): Promise<{ deleted: number }> {
+    const result = await this.profiles.delete({ organizationId });
+    return { deleted: result.affected ?? 0 };
+  }
+
   private toView(profile: UserProfile): UserProfileView {
     return {
       id: profile.id,
       userId: profile.userId,
+      organizationId: profile.organizationId,
       email: profile.email,
       firstName: profile.firstName,
       lastName: profile.lastName,

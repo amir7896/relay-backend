@@ -77,25 +77,92 @@ export class AiService {
   async smartReplies(
     actorId: string,
     conversationId: string,
-  ): Promise<{ replies: string[] }> {
+  ): Promise<{ replies: string[]; poweredByAi: boolean }> {
     const history = await this.proxy.sendChat<PaginatedResult<MessageView>>(
       CHAT_PATTERNS.LIST_MESSAGES,
       { actorId, conversationId, page: 1, limit: 12 },
     );
     const lastIncoming = [...history.items].find(
-      (message) => message.senderId !== actorId && !message.deletedForEveryone,
+      (message) =>
+        message.senderId !== actorId &&
+        !message.deletedForEveryone &&
+        Boolean(message.body?.trim()),
     );
-    const text = lastIncoming?.body?.toLowerCase() ?? '';
+    if (!lastIncoming) {
+      return { replies: [], poweredByAi: false };
+    }
 
-    if (text.includes('?')) {
-      return { replies: ['Yes, sounds good', 'Let me check', 'Not sure yet'] };
+    const text = lastIncoming.body.trim();
+    const apiKey = this.config.get<string>('OPENAI_API_KEY')?.trim();
+    if (apiKey) {
+      try {
+        const response = await fetch(
+          'https://api.openai.com/v1/chat/completions',
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: this.config.get<string>('OPENAI_MODEL', 'gpt-4o-mini'),
+              temperature: 0.6,
+              messages: [
+                {
+                  role: 'system',
+                  content:
+                    'Suggest exactly 3 short chat reply options for a team messenger. Return JSON only: {"replies":["...","...","..."]}. Each reply max 40 characters. No numbering or quotes inside replies.',
+                },
+                { role: 'user', content: `Incoming message:\n${text.slice(0, 500)}` },
+              ],
+            }),
+          },
+        );
+        if (response.ok) {
+          const payload = (await response.json()) as {
+            choices?: { message?: { content?: string } }[];
+          };
+          const raw = payload.choices?.[0]?.message?.content?.trim() ?? '';
+          const jsonMatch = raw.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]) as { replies?: unknown };
+            const replies = (Array.isArray(parsed.replies) ? parsed.replies : [])
+              .filter((item): item is string => typeof item === 'string')
+              .map((item) => item.trim())
+              .filter(Boolean)
+              .slice(0, 3);
+            if (replies.length > 0) {
+              return { replies, poweredByAi: true };
+            }
+          }
+        }
+      } catch {
+        // fall through to heuristic replies
+      }
     }
-    if (text.includes('thanks') || text.includes('thank you')) {
-      return { replies: ['You’re welcome!', 'Anytime', 'Happy to help'] };
+
+    const lower = text.toLowerCase();
+    if (lower.includes('?')) {
+      return {
+        replies: ['Yes, sounds good', 'Let me check', 'Not sure yet'],
+        poweredByAi: false,
+      };
     }
-    if (text.includes('meet') || text.includes('call')) {
-      return { replies: ['Works for me', 'What time?', 'Can we do async?'] };
+    if (lower.includes('thanks') || lower.includes('thank you')) {
+      return {
+        replies: ["You're welcome!", 'Anytime', 'Happy to help'],
+        poweredByAi: false,
+      };
     }
-    return { replies: ['On it 👍', 'Got it', 'Will follow up'] };
+    if (lower.includes('meet') || lower.includes('call')) {
+      return {
+        replies: ['Works for me', 'What time?', 'Can we do async?'],
+        poweredByAi: false,
+      };
+    }
+    return {
+      replies: ['On it', 'Got it', 'Will follow up'],
+      poweredByAi: false,
+    };
   }
 }

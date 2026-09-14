@@ -52,20 +52,57 @@ export class MailService {
 
   async send(input: SendMailInput): Promise<{ delivered: boolean; previewUrl?: string }> {
     if (!this.transporter) {
+      this.logger.warn(
+        `Email NOT sent (SMTP not configured) | to=${input.to} | subject="${input.subject}"`,
+      );
       this.logger.log(
-        `[mail:dev] to=${input.to} subject=${input.subject}\n${input.text}`,
+        `[mail:dev] body preview:\n${input.text}`,
       );
       return { delivered: false, previewUrl: this.extractUrl(input.text) };
     }
 
-    await this.transporter.sendMail({
-      from: this.fromAddress,
-      to: input.to,
-      subject: input.subject,
-      text: input.text,
-      html: input.html,
-    });
-    return { delivered: true };
+    this.logger.log(
+      `Sending email | to=${input.to} | from=${this.fromAddress} | subject="${input.subject}"`,
+    );
+
+    try {
+      const info = await this.transporter.sendMail({
+        from: this.fromAddress,
+        to: input.to,
+        subject: input.subject,
+        text: input.text,
+        html: input.html,
+      });
+
+      const messageId = info.messageId ?? 'n/a';
+      const accepted = Array.isArray(info.accepted)
+        ? info.accepted.join(', ')
+        : String(info.accepted ?? '');
+      const rejected = Array.isArray(info.rejected)
+        ? info.rejected.join(', ')
+        : String(info.rejected ?? '');
+      const response =
+        typeof info.response === 'string' ? info.response : undefined;
+
+      if (rejected) {
+        this.logger.warn(
+          `Email rejected by SMTP | to=${input.to} | messageId=${messageId} | rejected=${rejected} | response=${response ?? 'n/a'}`,
+        );
+        return { delivered: false, previewUrl: this.extractUrl(input.text) };
+      }
+
+      this.logger.log(
+        `Email SENT successfully | to=${input.to} | messageId=${messageId} | accepted=${accepted || 'n/a'}${response ? ` | smtp=${response}` : ''}`,
+      );
+      return { delivered: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Email FAILED to send | to=${input.to} | subject="${input.subject}" | error=${message}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      return { delivered: false, previewUrl: this.extractUrl(input.text) };
+    }
   }
 
   private extractUrl(text: string): string | undefined {

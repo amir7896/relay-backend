@@ -74,20 +74,35 @@ export class PushService {
     title: string;
     body: string;
     conversationId: string;
+    /** User ids @mentioned in this message — still notify when muted. */
+    mentionUserIds?: string[];
+    /** User ids who muted this conversation. */
+    mutedRecipientIds?: string[];
   }): Promise<void> {
     if (!this.enabled) return;
+
+    const mentioned = new Set(input.mentionUserIds ?? []);
+    const muted = new Set(input.mutedRecipientIds ?? []);
 
     await Promise.all(
       input.recipientIds
         .filter((id) => id !== input.senderId)
         .map(async (userId) => {
+          const isMentioned = mentioned.has(userId);
+          if (muted.has(userId) && !isMentioned) {
+            return;
+          }
           const presence = await this.presence.getPresence(userId);
           if (presence.status !== PresenceStatus.OFFLINE) {
             return;
           }
           await this.sendToUser(userId, {
-            title: input.title,
-            body: input.body,
+            title: isMentioned
+              ? `${input.title} · mentioned you`
+              : input.title,
+            body: isMentioned
+              ? `Mention: ${input.body}`.slice(0, 120)
+              : input.body,
             conversationId: input.conversationId,
           });
         }),

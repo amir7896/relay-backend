@@ -40,10 +40,10 @@ export class CreateGroupChatDto {
   @ApiProperty({
     type: [String],
     example: ['7c9e6679-7425-40de-944b-e07fc1f90ae7'],
-    description: 'Account ids of other members',
+    description: 'Account ids of other members (optional for channels)',
   })
   @IsArray()
-  @ArrayMinSize(1)
+  @ArrayMinSize(0)
   @ArrayMaxSize(49)
   @IsUUID('4', { each: true })
   memberIds!: string[];
@@ -242,6 +242,42 @@ export class UpdateGroupDto {
   @IsNotEmpty()
   @MaxLength(120)
   name!: string;
+}
+
+export class CreatePollDto {
+  @ApiProperty({ example: 'Where should we go for lunch?' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(240)
+  question!: string;
+
+  @ApiProperty({
+    type: [String],
+    example: ['Cafe', 'Office', 'Takeout'],
+  })
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(6)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  options!: string[];
+
+  @ApiPropertyOptional({ default: false })
+  @IsOptional()
+  @IsBoolean()
+  allowMultiple?: boolean;
+}
+
+export class VotePollDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID('4')
+  optionId!: string;
+}
+
+export class SaveBookmarkDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID('4')
+  messageId!: string;
 }
 
 export class ChatPageQueryDto {

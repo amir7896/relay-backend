@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
 import { In, IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import {
   ALLOWED_REACTIONS,
@@ -20,12 +21,14 @@ import type {
   ConversationActorPayload,
   ConversationView,
   CreateGroupChatPayload,
+  CreatePollPayload,
   CreatePrivateChatPayload,
   DeleteMessagePayload,
   DeleteMessageResult,
   EditMessagePayload,
   ForwardMessagePayload,
   ListAuditPayload,
+  ListBookmarksPayload,
   ListConversationsPayload,
   ListMediaPayload,
   ListMessagesPayload,
@@ -38,11 +41,15 @@ import type {
   MuteConversationPayload,
   PinConversationPayload,
   PinMessagePayload,
+  PollView,
   ReactMessagePayload,
+  RemoveBookmarkPayload,
   RemoveMemberPayload,
   GlobalSearchHitView,
   GlobalSearchMessagesPayload,
   CancelScheduledMessagePayload,
+  SaveBookmarkPayload,
+  BookmarkView,
   ScheduleMessagePayload,
   ScheduledMessageView,
   SearchMessagesPayload,
@@ -53,13 +60,16 @@ import type {
   SetMemberRolePayload,
   UpdateGroupPayload,
   UpdateWorkspacePayload,
+  VotePollPayload,
   WorkspaceSettingsView,
 } from '@app/contracts';
+import { requireOrganizationId, runWithOrganization } from '@app/database';
 import { Conversation } from '../database/entities/conversation.entity';
 import { ConversationMember } from '../database/entities/conversation-member.entity';
 import { Message } from '../database/entities/message.entity';
 import { MessageHide } from '../database/entities/message-hide.entity';
 import { MessageReaction } from '../database/entities/message-reaction.entity';
+import { MessageBookmark } from '../database/entities/message-bookmark.entity';
 import { ScheduledMessage } from '../database/entities/scheduled-message.entity';
 import { UserBlock } from '../database/entities/user-block.entity';
 import { AuditEvent } from '../database/entities/audit-event.entity';
@@ -97,6 +107,8 @@ export class ChatService {
     private readonly messageHides: Repository<MessageHide>,
     @InjectRepository(MessageReaction)
     private readonly messageReactions: Repository<MessageReaction>,
+    @InjectRepository(MessageBookmark)
+    private readonly messageBookmarks: Repository<MessageBookmark>,
     @InjectRepository(ScheduledMessage)
     private readonly scheduledMessages: Repository<ScheduledMessage>,
     @InjectRepository(UserBlock)
@@ -118,16 +130,26 @@ export class ChatService {
 
     const pairKey = privatePairKey(payload.actorId, payload.otherUserId);
     const existing = await this.conversations.findOne({
-      where: { pairKey, type: ConversationType.PRIVATE },
+      where: {
+        organizationId: requireOrganizationId(),
+        pairKey,
+        type: ConversationType.PRIVATE,
+      },
       relations: { members: true },
     });
     if (existing) {
+      const mentionMeta = await this.unreadMentionMeta(payload.actorId, [
+        existing.id,
+      ]);
+      const mentionId = mentionMeta.get(existing.id) ?? null;
       return this.toConversationView(
         existing,
         payload.actorId,
         await this.unreadCountFor(payload.actorId, existing.id),
         null,
         await this.blockFlagsForConversation(existing, payload.actorId),
+        Boolean(mentionId),
+        mentionId,
       );
     }
 
@@ -140,6 +162,7 @@ export class ChatService {
       async (manager) => {
         const conversation = await manager.save(
           manager.create(Conversation, {
+            organizationId: requireOrganizationId(),
             type: ConversationType.PRIVATE,
             name: null,
             createdBy: payload.actorId,
@@ -159,7 +182,10 @@ export class ChatService {
           }),
         ]);
         return manager.findOneOrFail(Conversation, {
-          where: { id: conversation.id },
+          where: {
+            id: conversation.id,
+            organizationId: requireOrganizationId(),
+          },
           relations: { members: true },
         });
       },
@@ -185,9 +211,7 @@ export class ChatService {
     const uniqueMemberIds = [
       ...new Set(payload.memberIds.filter((id) => id !== payload.actorId)),
     ];
-    if (uniqueMemberIds.length < 1) {
-      return RpcErrors.badRequest('A group needs at least one other member');
-    }
+    // Channels may start with only the creator (e.g. #general on workspace create).
     if (uniqueMemberIds.length + 1 > MAX_GROUP_MEMBERS) {
       return RpcErrors.badRequest(
         `A group cannot have more than ${MAX_GROUP_MEMBERS} members`,
@@ -198,6 +222,7 @@ export class ChatService {
       async (manager) => {
         const conversation = await manager.save(
           manager.create(Conversation, {
+            organizationId: requireOrganizationId(),
             type: ConversationType.GROUP,
             name,
             createdBy: payload.actorId,
@@ -219,7 +244,10 @@ export class ChatService {
           ),
         ]);
         return manager.findOneOrFail(Conversation, {
-          where: { id: conversation.id },
+          where: {
+            id: conversation.id,
+            organizationId: requireOrganizationId(),
+          },
           relations: { members: true },
         });
       },
@@ -243,7 +271,10 @@ export class ChatService {
     );
 
     const items = await this.conversations.find({
-      where: { id: In(conversationIds) },
+      where: {
+        id: In(conversationIds),
+        organizationId: requireOrganizationId(),
+      },
       relations: { members: true },
     });
 
@@ -261,12 +292,14 @@ export class ChatService {
     const total = items.length;
     const { skip, take } = getSkipTake(payload.page, payload.limit);
     const pageItems = items.slice(skip, skip + take);
-    const unread = await this.unreadCounts(
+    const pageConversationIds = pageItems.map((item) => item.id);
+    const unread = await this.unreadCounts(payload.actorId, pageConversationIds);
+    const unreadMentions = await this.unreadMentionMeta(
       payload.actorId,
-      pageItems.map((item) => item.id),
+      pageConversationIds,
     );
     const latest = await this.latestMessagesByConversation(
-      pageItems.map((item) => item.id),
+      pageConversationIds,
       payload.actorId,
     );
     const blockFlags = await this.blockFlagsForConversations(
@@ -274,15 +307,18 @@ export class ChatService {
       payload.actorId,
     );
     return buildPaginatedResult(
-      pageItems.map((item) =>
-        this.toConversationView(
+      pageItems.map((item) => {
+        const mention = unreadMentions.get(item.id);
+        return this.toConversationView(
           item,
           payload.actorId,
           unread.get(item.id) ?? 0,
           latest.get(item.id) ?? null,
           blockFlags.get(item.id) ?? { blockedByMe: false, blockedMe: false },
-        ),
-      ),
+          Boolean(mention),
+          mention ?? null,
+        );
+      }),
       total,
       payload.page,
       payload.limit,
@@ -296,12 +332,18 @@ export class ChatService {
       payload.conversationId,
       payload.actorId,
     );
+    const mentionMeta = await this.unreadMentionMeta(payload.actorId, [
+      conversation.id,
+    ]);
+    const mentionId = mentionMeta.get(conversation.id) ?? null;
     return this.toConversationView(
       conversation,
       payload.actorId,
       await this.unreadCountFor(payload.actorId, conversation.id),
       null,
       await this.blockFlagsForConversation(conversation, payload.actorId),
+      Boolean(mentionId),
+      mentionId,
     );
   }
 
@@ -315,6 +357,9 @@ export class ChatService {
       .createQueryBuilder('m')
       .where('m.conversationId = :conversationId', {
         conversationId: payload.conversationId,
+      })
+      .andWhere('m.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
       })
       .andWhere(
         `NOT EXISTS (
@@ -366,6 +411,9 @@ export class ChatService {
       .createQueryBuilder('m')
       .where('m.conversationId = :conversationId', {
         conversationId: payload.conversationId,
+      })
+      .andWhere('m.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
       })
       .andWhere(`m.body ILIKE :pattern ESCAPE '\\'`, {
         pattern: `%${escapeIlikePattern(query)}%`,
@@ -438,6 +486,9 @@ export class ChatService {
     const [items, total] = await this.messages
       .createQueryBuilder('m')
       .where('m.conversationId IN (:...conversationIds)', { conversationIds })
+      .andWhere('m.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
+      })
       .andWhere(`m.body ILIKE :pattern ESCAPE '\\'`, {
         pattern: `%${escapeIlikePattern(query)}%`,
       })
@@ -464,7 +515,10 @@ export class ChatService {
       uniqueConversationIds.length === 0
         ? []
         : await this.conversations.find({
-            where: { id: In(uniqueConversationIds) },
+            where: {
+              id: In(uniqueConversationIds),
+              organizationId: requireOrganizationId(),
+            },
             relations: { members: true },
           });
     const conversationById = new Map(
@@ -518,6 +572,9 @@ export class ChatService {
       .where('m.conversationId = :conversationId', {
         conversationId: payload.conversationId,
       })
+      .andWhere('m.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
+      })
       .andWhere('m.attachmentUrl IS NOT NULL')
       .andWhere("m.attachmentUrl <> ''")
       .andWhere('m.deletedForEveryoneAt IS NULL')
@@ -533,10 +590,9 @@ export class ChatService {
       });
 
     if (kind === 'image') {
-      qb.andWhere(
-        `(m.type = :imageType OR m.attachmentMime ILIKE 'image/%')`,
-        { imageType: MessageType.IMAGE },
-      );
+      qb.andWhere(`(m.type = :imageType OR m.attachmentMime ILIKE 'image/%')`, {
+        imageType: MessageType.IMAGE,
+      });
     } else if (kind === 'audio') {
       qb.andWhere(
         `(m.type = :audioType OR m.attachmentMime ILIKE 'audio/%' OR m.attachmentMime = 'video/webm')`,
@@ -597,6 +653,7 @@ export class ChatService {
       where: {
         id: payload.messageId,
         conversationId: payload.conversationId,
+        organizationId: requireOrganizationId(),
       },
     });
     if (!message) {
@@ -637,7 +694,9 @@ export class ChatService {
     // Clients must not forge MessageType.CALL via HTTP/WS.
     if (type === MessageType.CALL) {
       if (!payload.systemCall) {
-        return RpcErrors.badRequest('Call history messages are system-generated only');
+        return RpcErrors.badRequest(
+          'Call history messages are system-generated only',
+        );
       }
       if (!rawBody) {
         return RpcErrors.badRequest('Call message body is required');
@@ -648,6 +707,7 @@ export class ChatService {
       );
       const saved = await this.messages.save(
         this.messages.create({
+          organizationId: requireOrganizationId(),
           conversationId: conversation.id,
           senderId: payload.actorId,
           body: rawBody,
@@ -659,14 +719,25 @@ export class ChatService {
           attachmentSize: null,
           mentions: [],
           linkPreview: null,
+          poll: null,
         }),
       );
       conversation.lastMessageAt = saved.createdAt;
       await this.conversations.save(conversation);
       return {
-        ...this.toMessageView(saved, conversation.members, null, [], payload.actorId),
+        ...this.toMessageView(
+          saved,
+          conversation.members,
+          null,
+          [],
+          payload.actorId,
+        ),
         recipientIds: this.recipientIds(conversation),
       };
+    }
+
+    if (type === MessageType.POLL) {
+      return RpcErrors.badRequest('Use the create poll endpoint for polls');
     }
 
     const attachmentMimeRaw = payload.attachmentMime?.trim() || null;
@@ -721,6 +792,7 @@ export class ChatService {
         where: {
           id: payload.replyToMessageId,
           conversationId: conversation.id,
+          organizationId: requireOrganizationId(),
         },
       });
       if (!replyTo) {
@@ -744,6 +816,7 @@ export class ChatService {
 
     const saved = await this.messages.save(
       this.messages.create({
+        organizationId: requireOrganizationId(),
         conversationId: conversation.id,
         senderId: payload.actorId,
         body,
@@ -766,14 +839,27 @@ export class ChatService {
     );
     conversation.lastMessageAt = saved.createdAt;
     await this.conversations.save(conversation);
-    await this.recordAudit(payload.actorId, 'message.sent', 'conversation', conversation.id, {
-      messageId: saved.id,
-      type,
-      undelivered: delivery.undelivered,
-    });
+    await this.recordAudit(
+      payload.actorId,
+      'message.sent',
+      'conversation',
+      conversation.id,
+      {
+        messageId: saved.id,
+        type,
+        undelivered: delivery.undelivered,
+      },
+    );
     return {
-      ...this.toMessageView(saved, conversation.members, replyTo, [], payload.actorId),
+      ...this.toMessageView(
+        saved,
+        conversation.members,
+        replyTo,
+        [],
+        payload.actorId,
+      ),
       recipientIds: delivery.recipientIds,
+      mutedRecipientIds: this.mutedRecipientIds(conversation),
     };
   }
 
@@ -786,6 +872,7 @@ export class ChatService {
       where: {
         id: payload.messageId,
         conversationId: conversation.id,
+        organizationId: requireOrganizationId(),
       },
     });
     if (!message) {
@@ -796,6 +883,12 @@ export class ChatService {
     }
     if (message.deletedForEveryoneAt) {
       return RpcErrors.badRequest('Cannot edit a deleted message');
+    }
+    if (message.type === MessageType.POLL || message.poll) {
+      return RpcErrors.badRequest('Polls cannot be edited');
+    }
+    if (message.type === MessageType.CALL) {
+      return RpcErrors.badRequest('Call messages cannot be edited');
     }
     const ageMs = Date.now() - message.createdAt.getTime();
     if (ageMs > EDIT_WINDOW_MS) {
@@ -814,7 +907,12 @@ export class ChatService {
     await this.messages.save(message);
 
     const replyTo = message.replyToMessageId
-      ? await this.messages.findOne({ where: { id: message.replyToMessageId } })
+      ? await this.messages.findOne({
+          where: {
+            id: message.replyToMessageId,
+            organizationId: requireOrganizationId(),
+          },
+        })
       : null;
     const reactions = await this.messageReactions.find({
       where: { messageId: message.id },
@@ -845,6 +943,7 @@ export class ChatService {
       where: {
         id: payload.messageId,
         conversationId: conversation.id,
+        organizationId: requireOrganizationId(),
       },
     });
     if (!message) {
@@ -874,7 +973,12 @@ export class ChatService {
     }
 
     const replyTo = message.replyToMessageId
-      ? await this.messages.findOne({ where: { id: message.replyToMessageId } })
+      ? await this.messages.findOne({
+          where: {
+            id: message.replyToMessageId,
+            organizationId: requireOrganizationId(),
+          },
+        })
       : null;
     const reactions = await this.messageReactions.find({
       where: { messageId: message.id },
@@ -901,6 +1005,7 @@ export class ChatService {
       where: {
         id: payload.messageId,
         conversationId: conversation.id,
+        organizationId: requireOrganizationId(),
       },
     });
     if (!message) {
@@ -919,6 +1024,9 @@ export class ChatService {
           .createQueryBuilder('m')
           .where('m.conversationId = :conversationId', {
             conversationId: conversation.id,
+          })
+          .andWhere('m.organizationId = :organizationId', {
+            organizationId: requireOrganizationId(),
           })
           .andWhere('m.pinnedAt IS NOT NULL')
           .andWhere('m.deletedForEveryoneAt IS NULL')
@@ -939,7 +1047,12 @@ export class ChatService {
     }
 
     const replyTo = message.replyToMessageId
-      ? await this.messages.findOne({ where: { id: message.replyToMessageId } })
+      ? await this.messages.findOne({
+          where: {
+            id: message.replyToMessageId,
+            organizationId: requireOrganizationId(),
+          },
+        })
       : null;
     const reactions = await this.messageReactions.find({
       where: { messageId: message.id },
@@ -957,6 +1070,308 @@ export class ChatService {
     };
   }
 
+  async createPoll(payload: CreatePollPayload): Promise<SendMessageResult> {
+    const question = payload.question.trim();
+    if (question.length < 2) {
+      return RpcErrors.badRequest('Poll question is required');
+    }
+    if (question.length > 240) {
+      return RpcErrors.badRequest('Poll question is too long');
+    }
+    const options = (payload.options ?? [])
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const unique = [...new Set(options.map((item) => item.toLowerCase()))];
+    if (options.length < 2 || options.length > 6) {
+      return RpcErrors.badRequest('Polls need between 2 and 6 options');
+    }
+    if (unique.length !== options.length) {
+      return RpcErrors.badRequest('Poll options must be unique');
+    }
+    if (options.some((item) => item.length > 80)) {
+      return RpcErrors.badRequest('Poll options must be 80 characters or fewer');
+    }
+
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const delivery = await this.resolvePrivateDelivery(
+      conversation,
+      payload.actorId,
+    );
+    if (delivery.forbidden) {
+      return RpcErrors.forbidden('You cannot message this conversation');
+    }
+
+    const saved = await this.messages.save(
+      this.messages.create({
+        organizationId: requireOrganizationId(),
+        conversationId: conversation.id,
+        senderId: payload.actorId,
+        body: question,
+        type: MessageType.POLL,
+        replyToMessageId: null,
+        attachmentUrl: null,
+        attachmentMime: null,
+        attachmentName: null,
+        attachmentSize: null,
+        mentions: [],
+        linkPreview: null,
+        poll: {
+          question,
+          options: options.map((text) => ({
+            id: randomUUID(),
+            text,
+            voterIds: [],
+          })),
+          allowMultiple: Boolean(payload.allowMultiple),
+          closed: false,
+        },
+        undelivered: delivery.undelivered,
+        expiresAt:
+          !delivery.undelivered && conversation.disappearingDurationSeconds > 0
+            ? new Date(
+                Date.now() + conversation.disappearingDurationSeconds * 1000,
+              )
+            : null,
+      }),
+    );
+    conversation.lastMessageAt = saved.createdAt;
+    await this.conversations.save(conversation);
+    await this.recordAudit(
+      payload.actorId,
+      'message.poll_created',
+      'conversation',
+      conversation.id,
+      { messageId: saved.id },
+    );
+
+    return {
+      ...this.toMessageView(
+        saved,
+        conversation.members,
+        null,
+        [],
+        payload.actorId,
+      ),
+      recipientIds: delivery.recipientIds,
+      mutedRecipientIds: this.mutedRecipientIds(conversation),
+    };
+  }
+
+  async votePoll(payload: VotePollPayload): Promise<SendMessageResult> {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const message = await this.messages.findOne({
+      where: {
+        id: payload.messageId,
+        conversationId: conversation.id,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (!message || message.type !== MessageType.POLL || !message.poll) {
+      return RpcErrors.notFound('Poll');
+    }
+    if (message.deletedForEveryoneAt) {
+      return RpcErrors.badRequest('Cannot vote on a deleted poll');
+    }
+    if (message.poll.closed) {
+      return RpcErrors.badRequest('This poll is closed');
+    }
+
+    const option = message.poll.options.find(
+      (item) => item.id === payload.optionId,
+    );
+    if (!option) {
+      return RpcErrors.badRequest('Invalid poll option');
+    }
+
+    const alreadyVoted = option.voterIds.includes(payload.actorId);
+    const updatedOptions = message.poll.options.map((item) => {
+      const withoutActor = item.voterIds.filter((id) => id !== payload.actorId);
+      if (item.id === payload.optionId) {
+        if (alreadyVoted) {
+          return { ...item, voterIds: withoutActor };
+        }
+        return { ...item, voterIds: [...withoutActor, payload.actorId] };
+      }
+      if (!message.poll!.allowMultiple) {
+        return { ...item, voterIds: withoutActor };
+      }
+      return item;
+    });
+
+    message.poll = {
+      ...message.poll,
+      options: updatedOptions,
+    };
+    await this.messages.save(message);
+
+    const reactions = await this.messageReactions.find({
+      where: { messageId: message.id },
+    });
+    const replyTo = message.replyToMessageId
+      ? await this.messages.findOne({ where: { id: message.replyToMessageId } })
+      : null;
+
+    return {
+      ...this.toMessageView(
+        message,
+        conversation.members,
+        replyTo,
+        reactions,
+        payload.actorId,
+      ),
+      recipientIds: this.recipientIds(conversation),
+      mutedRecipientIds: this.mutedRecipientIds(conversation),
+    };
+  }
+
+  async saveBookmark(payload: SaveBookmarkPayload): Promise<BookmarkView> {
+    const message = await this.messages.findOne({
+      where: {
+        id: payload.messageId,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (!message || message.deletedForEveryoneAt) {
+      return RpcErrors.notFound('Message');
+    }
+    await this.requireMembership(message.conversationId, payload.actorId);
+
+    const existing = await this.messageBookmarks.findOne({
+      where: { messageId: message.id, userId: payload.actorId },
+    });
+    const saved =
+      existing ??
+      (await this.messageBookmarks.save(
+        this.messageBookmarks.create({
+          organizationId: requireOrganizationId(),
+          conversationId: message.conversationId,
+          messageId: message.id,
+          userId: payload.actorId,
+        }),
+      ));
+
+    const conversation = await this.conversations.findOne({
+      where: {
+        id: message.conversationId,
+        organizationId: requireOrganizationId(),
+      },
+      relations: { members: true },
+    });
+    const reactions = await this.messageReactions.find({
+      where: { messageId: message.id },
+    });
+
+    return this.toBookmarkView(
+      saved,
+      message,
+      payload.actorId,
+      conversation ?? undefined,
+      reactions,
+    );
+  }
+
+  async removeBookmark(
+    payload: RemoveBookmarkPayload,
+  ): Promise<{ removed: boolean }> {
+    const existing = await this.messageBookmarks.findOne({
+      where: {
+        messageId: payload.messageId,
+        userId: payload.actorId,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (!existing) {
+      return { removed: false };
+    }
+    await this.messageBookmarks.delete({ id: existing.id });
+    return { removed: true };
+  }
+
+  async listBookmarks(payload: ListBookmarksPayload) {
+    const { skip, take } = getSkipTake(payload.page, payload.limit);
+    const qb = this.messageBookmarks
+      .createQueryBuilder('b')
+      .where('b.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
+      })
+      .andWhere('b.userId = :actorId', { actorId: payload.actorId })
+      .orderBy('b.createdAt', 'DESC')
+      .skip(skip)
+      .take(take);
+
+    if (payload.conversationId) {
+      await this.requireMembership(payload.conversationId, payload.actorId);
+      qb.andWhere('b.conversationId = :conversationId', {
+        conversationId: payload.conversationId,
+      });
+    }
+
+    const [rows, total] = await qb.getManyAndCount();
+    const messageIds = rows.map((row) => row.messageId);
+    const messages =
+      messageIds.length === 0
+        ? []
+        : await this.messages.find({
+            where: {
+              id: In(messageIds),
+              organizationId: requireOrganizationId(),
+            },
+          });
+    const messageById = new Map(messages.map((item) => [item.id, item]));
+    const conversationIds = [
+      ...new Set(rows.map((row) => row.conversationId)),
+    ];
+    const conversations =
+      conversationIds.length === 0
+        ? []
+        : await this.conversations.find({
+            where: {
+              id: In(conversationIds),
+              organizationId: requireOrganizationId(),
+            },
+            relations: { members: true },
+          });
+    const conversationById = new Map(
+      conversations.map((item) => [item.id, item]),
+    );
+    const reactionMap = await this.loadReactionsByMessageIds(messageIds);
+
+    const items: BookmarkView[] = [];
+    for (const row of rows) {
+      const message = messageById.get(row.messageId);
+      if (!message || message.deletedForEveryoneAt) {
+        continue;
+      }
+      const conversation = conversationById.get(row.conversationId);
+      if (!conversation) {
+        continue;
+      }
+      const isMember = (conversation.members ?? []).some(
+        (member) => member.userId === payload.actorId && !member.leftAt,
+      );
+      if (!isMember) {
+        continue;
+      }
+      items.push(
+        this.toBookmarkView(
+          row,
+          message,
+          payload.actorId,
+          conversation,
+          reactionMap.get(message.id) ?? [],
+        ),
+      );
+    }
+
+    return buildPaginatedResult(items, total, payload.page, payload.limit);
+  }
+
   async listPinnedMessages(payload: ConversationActorPayload) {
     const conversation = await this.requireMembership(
       payload.conversationId,
@@ -966,6 +1381,9 @@ export class ChatService {
       .createQueryBuilder('m')
       .where('m.conversationId = :conversationId', {
         conversationId: payload.conversationId,
+      })
+      .andWhere('m.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
       })
       .andWhere('m.pinnedAt IS NOT NULL')
       .andWhere('m.deletedForEveryoneAt IS NULL')
@@ -1018,9 +1436,7 @@ export class ChatService {
     }
     const now = Date.now();
     if (scheduledFor.getTime() < now + SCHEDULE_MIN_DELAY_MS) {
-      return RpcErrors.badRequest(
-        'Schedule at least 1 minute in the future',
-      );
+      return RpcErrors.badRequest('Schedule at least 1 minute in the future');
     }
     if (scheduledFor.getTime() > now + SCHEDULE_MAX_AHEAD_MS) {
       return RpcErrors.badRequest(
@@ -1045,6 +1461,7 @@ export class ChatService {
 
     const pendingCount = await this.scheduledMessages.count({
       where: {
+        organizationId: requireOrganizationId(),
         conversationId: conversation.id,
         senderId: payload.actorId,
         status: 'pending',
@@ -1090,6 +1507,7 @@ export class ChatService {
         where: {
           id: payload.replyToMessageId,
           conversationId: conversation.id,
+          organizationId: requireOrganizationId(),
         },
       });
       if (!replyTo || replyTo.deletedForEveryoneAt) {
@@ -1110,6 +1528,7 @@ export class ChatService {
 
     const saved = await this.scheduledMessages.save(
       this.scheduledMessages.create({
+        organizationId: requireOrganizationId(),
         conversationId: conversation.id,
         senderId: payload.actorId,
         body,
@@ -1141,6 +1560,7 @@ export class ChatService {
     await this.requireMembership(payload.conversationId, payload.actorId);
     const items = await this.scheduledMessages.find({
       where: {
+        organizationId: requireOrganizationId(),
         conversationId: payload.conversationId,
         senderId: payload.actorId,
         status: 'pending',
@@ -1156,6 +1576,7 @@ export class ChatService {
     const item = await this.scheduledMessages.findOne({
       where: {
         id: payload.scheduledMessageId,
+        organizationId: requireOrganizationId(),
         conversationId: payload.conversationId,
         senderId: payload.actorId,
       },
@@ -1164,7 +1585,9 @@ export class ChatService {
       return RpcErrors.notFound('Scheduled message');
     }
     if (item.status !== 'pending') {
-      return RpcErrors.badRequest('Only pending scheduled messages can be cancelled');
+      return RpcErrors.badRequest(
+        'Only pending scheduled messages can be cancelled',
+      );
     }
     item.status = 'cancelled';
     item.cancelledAt = new Date();
@@ -1185,7 +1608,11 @@ export class ChatService {
     const delivered: SendMessageResult[] = [];
     for (const row of due) {
       const claimed = await this.scheduledMessages.update(
-        { id: row.id, status: 'pending' },
+        {
+          id: row.id,
+          organizationId: row.organizationId,
+          status: 'pending',
+        },
         { status: 'sending' },
       );
       if (!claimed.affected) {
@@ -1193,19 +1620,21 @@ export class ChatService {
       }
 
       try {
-        const result = await this.sendMessage({
-          actorId: row.senderId,
-          conversationId: row.conversationId,
-          body: row.body,
-          type: row.type,
-          replyToMessageId: row.replyToMessageId ?? undefined,
-          attachmentUrl: row.attachmentUrl ?? undefined,
-          attachmentMime: row.attachmentMime ?? undefined,
-          attachmentName: row.attachmentName ?? undefined,
-          attachmentSize: row.attachmentSize ?? undefined,
-          mentionUserIds: row.mentions ?? [],
-          linkPreview: row.linkPreview,
-        });
+        const result = await runWithOrganization(row.organizationId, () =>
+          this.sendMessage({
+            actorId: row.senderId,
+            conversationId: row.conversationId,
+            body: row.body,
+            type: row.type,
+            replyToMessageId: row.replyToMessageId ?? undefined,
+            attachmentUrl: row.attachmentUrl ?? undefined,
+            attachmentMime: row.attachmentMime ?? undefined,
+            attachmentName: row.attachmentName ?? undefined,
+            attachmentSize: row.attachmentSize ?? undefined,
+            mentionUserIds: row.mentions ?? [],
+            linkPreview: row.linkPreview,
+          }),
+        );
         row.status = 'sent';
         row.sentMessageId = result.id;
         row.error = null;
@@ -1237,6 +1666,7 @@ export class ChatService {
       where: {
         id: payload.messageId,
         conversationId: fromConversation.id,
+        organizationId: requireOrganizationId(),
       },
     });
     if (!source || source.deletedForEveryoneAt) {
@@ -1253,6 +1683,7 @@ export class ChatService {
       }
       const saved = await this.messages.save(
         this.messages.create({
+          organizationId: requireOrganizationId(),
           conversationId: toConversation.id,
           senderId: payload.actorId,
           body: source.body,
@@ -1267,7 +1698,8 @@ export class ChatService {
             toConversation.disappearingDurationSeconds > 0 &&
             source.type !== MessageType.CALL
               ? new Date(
-                  Date.now() + toConversation.disappearingDurationSeconds * 1000,
+                  Date.now() +
+                    toConversation.disappearingDurationSeconds * 1000,
                 )
               : null,
         }),
@@ -1288,6 +1720,7 @@ export class ChatService {
 
     const saved = await this.messages.save(
       this.messages.create({
+        organizationId: requireOrganizationId(),
         conversationId: toConversation.id,
         senderId: payload.actorId,
         body: source.body,
@@ -1361,6 +1794,7 @@ export class ChatService {
         where: {
           id: payload.messageId,
           conversationId: conversation.id,
+          organizationId: requireOrganizationId(),
         },
       });
       if (!message) {
@@ -1452,44 +1886,58 @@ export class ChatService {
 
     const expired: DeleteMessageResult[] = [];
     for (const message of due) {
-      const conversation = await this.conversations.findOne({
-        where: { id: message.conversationId },
-        relations: { members: true },
-      });
-      if (!conversation) {
-        message.expiresAt = null;
-        await this.messages.save(message);
-        continue;
+      const result = await runWithOrganization(
+        message.organizationId,
+        async () => {
+          const conversation = await this.conversations.findOne({
+            where: {
+              id: message.conversationId,
+              organizationId: message.organizationId,
+            },
+            relations: { members: true },
+          });
+          if (!conversation) {
+            message.expiresAt = null;
+            await this.messages.save(message);
+            return null;
+          }
+
+          const removedAttachmentUrl = message.attachmentUrl;
+          message.deletedForEveryoneAt = new Date();
+          message.attachmentUrl = null;
+          message.attachmentMime = null;
+          message.attachmentName = null;
+          message.attachmentSize = null;
+          message.pinnedAt = null;
+          message.pinnedByUserId = null;
+          message.expiresAt = null;
+          await this.messages.save(message);
+
+          const replyTo = message.replyToMessageId
+            ? await this.messages.findOne({
+                where: {
+                  id: message.replyToMessageId,
+                  organizationId: message.organizationId,
+                },
+              })
+            : null;
+          return {
+            message: this.toMessageView(
+              message,
+              conversation.members,
+              replyTo,
+              [],
+              message.senderId,
+            ),
+            forEveryone: true,
+            recipientIds: this.recipientIds(conversation),
+            removedAttachmentUrl,
+          } satisfies DeleteMessageResult;
+        },
+      );
+      if (result) {
+        expired.push(result);
       }
-
-      const removedAttachmentUrl = message.attachmentUrl;
-      message.deletedForEveryoneAt = new Date();
-      message.attachmentUrl = null;
-      message.attachmentMime = null;
-      message.attachmentName = null;
-      message.attachmentSize = null;
-      message.pinnedAt = null;
-      message.pinnedByUserId = null;
-      message.expiresAt = null;
-      await this.messages.save(message);
-
-      const replyTo = message.replyToMessageId
-        ? await this.messages.findOne({
-            where: { id: message.replyToMessageId },
-          })
-        : null;
-      expired.push({
-        message: this.toMessageView(
-          message,
-          conversation.members,
-          replyTo,
-          [],
-          message.senderId,
-        ),
-        forEveryone: true,
-        recipientIds: this.recipientIds(conversation),
-        removedAttachmentUrl,
-      });
     }
     return expired;
   }
@@ -1505,6 +1953,7 @@ export class ChatService {
       where: {
         id: payload.messageId,
         conversationId: conversation.id,
+        organizationId: requireOrganizationId(),
       },
     });
     if (!message) {
@@ -1520,7 +1969,10 @@ export class ChatService {
       if (message.deletedForEveryoneAt) {
         const replyTo = message.replyToMessageId
           ? await this.messages.findOne({
-              where: { id: message.replyToMessageId },
+              where: {
+                id: message.replyToMessageId,
+                organizationId: requireOrganizationId(),
+              },
             })
           : null;
         const reactions = await this.messageReactions.find({
@@ -1559,7 +2011,10 @@ export class ChatService {
       await this.messages.save(message);
       const replyTo = message.replyToMessageId
         ? await this.messages.findOne({
-            where: { id: message.replyToMessageId },
+            where: {
+              id: message.replyToMessageId,
+              organizationId: requireOrganizationId(),
+            },
           })
         : null;
       const reactions = await this.messageReactions.find({
@@ -1593,7 +2048,10 @@ export class ChatService {
 
     const replyTo = message.replyToMessageId
       ? await this.messages.findOne({
-          where: { id: message.replyToMessageId },
+          where: {
+            id: message.replyToMessageId,
+            organizationId: requireOrganizationId(),
+          },
         })
       : null;
     const reactions = await this.messageReactions.find({
@@ -1610,6 +2068,49 @@ export class ChatService {
       forEveryone: false,
       recipientIds: [payload.actorId],
     };
+  }
+
+  async ensureGeneralMembership(payload: {
+    userId: string;
+  }): Promise<{ joined: boolean; conversationId: string | null }> {
+    const organizationId = requireOrganizationId();
+    const candidates = await this.conversations.find({
+      where: {
+        organizationId,
+        type: ConversationType.GROUP,
+        deletedAt: IsNull(),
+      },
+      relations: { members: true },
+    });
+    const general = candidates.find((item) => {
+      const name = (item.name ?? '').trim().toLowerCase().replace(/^#/, '');
+      return name === 'general';
+    });
+    if (!general) {
+      return { joined: false, conversationId: null };
+    }
+
+    const existing = general.members.find(
+      (member) => member.userId === payload.userId,
+    );
+    if (existing && !existing.leftAt) {
+      return { joined: true, conversationId: general.id };
+    }
+    if (existing?.leftAt) {
+      existing.leftAt = null;
+      existing.role = ConversationMemberRole.MEMBER;
+      await this.members.save(existing);
+      return { joined: true, conversationId: general.id };
+    }
+
+    await this.members.save(
+      this.members.create({
+        conversationId: general.id,
+        userId: payload.userId,
+        role: ConversationMemberRole.MEMBER,
+      }),
+    );
+    return { joined: true, conversationId: general.id };
   }
 
   async addMembers(payload: AddMembersPayload): Promise<ConversationView> {
@@ -1703,7 +2204,9 @@ export class ChatService {
       (member) => member.userId === payload.actorId && !member.leftAt,
     );
     if (!actor || actor.role !== ConversationMemberRole.OWNER) {
-      return RpcErrors.forbidden('Only the group owner can change member roles');
+      return RpcErrors.forbidden(
+        'Only the group owner can change member roles',
+      );
     }
 
     if (
@@ -1789,7 +2292,9 @@ export class ChatService {
       return RpcErrors.badRequest('Only group chats can be deleted');
     }
     if (conversation.createdBy !== payload.actorId) {
-      return RpcErrors.forbidden('Only the group creator can delete this group');
+      return RpcErrors.forbidden(
+        'Only the group creator can delete this group',
+      );
     }
 
     const recipientIds = conversation.members.map((member) => member.userId);
@@ -1800,7 +2305,10 @@ export class ChatService {
       }
     }
     await this.members.save(conversation.members);
-    await this.conversations.softDelete({ id: conversation.id });
+    await this.conversations.softDelete({
+      id: conversation.id,
+      organizationId: requireOrganizationId(),
+    });
     return { deleted: true, recipientIds };
   }
 
@@ -1810,11 +2318,16 @@ export class ChatService {
     }
 
     let block = await this.userBlocks.findOne({
-      where: { blockerId: payload.actorId, blockedId: payload.userId },
+      where: {
+        organizationId: requireOrganizationId(),
+        blockerId: payload.actorId,
+        blockedId: payload.userId,
+      },
     });
     if (!block) {
       block = await this.userBlocks.save(
         this.userBlocks.create({
+          organizationId: requireOrganizationId(),
           blockerId: payload.actorId,
           blockedId: payload.userId,
         }),
@@ -1827,8 +2340,11 @@ export class ChatService {
     };
   }
 
-  async unblockUser(payload: BlockUserPayload): Promise<{ unblocked: boolean }> {
+  async unblockUser(
+    payload: BlockUserPayload,
+  ): Promise<{ unblocked: boolean }> {
     const result = await this.userBlocks.delete({
+      organizationId: requireOrganizationId(),
       blockerId: payload.actorId,
       blockedId: payload.userId,
     });
@@ -1837,7 +2353,10 @@ export class ChatService {
 
   async listBlocks(payload: { actorId: string }): Promise<BlockView[]> {
     const blocks = await this.userBlocks.find({
-      where: { blockerId: payload.actorId },
+      where: {
+        organizationId: requireOrganizationId(),
+        blockerId: payload.actorId,
+      },
       order: { createdAt: 'DESC' },
     });
     return blocks.map((block) => ({
@@ -1847,9 +2366,7 @@ export class ChatService {
   }
 
   /** Validates membership + blocks before WebRTC signaling starts (private or group). */
-  async prepareVoiceCall(
-    payload: ConversationActorPayload,
-  ): Promise<{
+  async prepareVoiceCall(payload: ConversationActorPayload): Promise<{
     conversationId: string;
     kind: 'private' | 'group';
     peerIds: string[];
@@ -1859,7 +2376,9 @@ export class ChatService {
       payload.conversationId,
       payload.actorId,
     );
-    const activeMembers = conversation.members.filter((member) => !member.leftAt);
+    const activeMembers = conversation.members.filter(
+      (member) => !member.leftAt,
+    );
     if (activeMembers.length < 2) {
       return RpcErrors.badRequest('Not enough participants for a call');
     }
@@ -1896,8 +2415,7 @@ export class ChatService {
 
     return {
       conversationId: conversation.id,
-      kind:
-        conversation.type === ConversationType.GROUP ? 'group' : 'private',
+      kind: conversation.type === ConversationType.GROUP ? 'group' : 'private',
       peerIds,
       // Include every active member so lobby / active-call auth matches the group
       memberIds,
@@ -1914,16 +2432,32 @@ export class ChatService {
 
     const [totalConversations, totalMessages, messagesToday, messagesThisWeek] =
       await Promise.all([
-        this.conversations.count({ where: { deletedAt: IsNull() } }),
-        this.messages.count({ where: { deletedAt: IsNull() } }),
+        this.conversations.count({
+          where: {
+            organizationId: requireOrganizationId(),
+            deletedAt: IsNull(),
+          },
+        }),
+        this.messages.count({
+          where: {
+            organizationId: requireOrganizationId(),
+            deletedAt: IsNull(),
+          },
+        }),
         this.messages
           .createQueryBuilder('m')
           .where('m.createdAt >= :startOfDay', { startOfDay })
+          .andWhere('m.organizationId = :organizationId', {
+            organizationId: requireOrganizationId(),
+          })
           .andWhere('m.deletedAt IS NULL')
           .getCount(),
         this.messages
           .createQueryBuilder('m')
           .where('m.createdAt >= :weekAgo', { weekAgo })
+          .andWhere('m.organizationId = :organizationId', {
+            organizationId: requireOrganizationId(),
+          })
           .andWhere('m.deletedAt IS NULL')
           .getCount(),
       ]);
@@ -1934,6 +2468,9 @@ export class ChatService {
           .createQueryBuilder('m')
           .select('COUNT(DISTINCT m.conversationId)', 'count')
           .where('m.createdAt >= :startOfDay', { startOfDay })
+          .andWhere('m.organizationId = :organizationId', {
+            organizationId: requireOrganizationId(),
+          })
           .andWhere('m.deletedAt IS NULL')
           .getRawOne<{ count: string }>()
       )?.count ?? 0,
@@ -1944,6 +2481,9 @@ export class ChatService {
       .select(`to_char(m.createdAt, 'YYYY-MM-DD')`, 'date')
       .addSelect('COUNT(*)', 'count')
       .where('m.createdAt >= :weekAgo', { weekAgo })
+      .andWhere('m.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
+      })
       .andWhere('m.deletedAt IS NULL')
       .groupBy(`to_char(m.createdAt, 'YYYY-MM-DD')`)
       .orderBy('date', 'ASC')
@@ -1966,6 +2506,12 @@ export class ChatService {
       .addSelect('c.type', 'type')
       .addSelect('COUNT(*)', 'messageCount')
       .where('m.deletedAt IS NULL')
+      .andWhere('m.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
+      })
+      .andWhere('c.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
+      })
       .groupBy('m.conversationId')
       .addGroupBy('c.name')
       .addGroupBy('c.type')
@@ -1997,6 +2543,7 @@ export class ChatService {
   async listAuditEvents(payload: ListAuditPayload) {
     const { skip, take } = getSkipTake(payload.page, payload.limit);
     const [items, total] = await this.auditEvents.findAndCount({
+      where: { organizationId: requireOrganizationId() },
       order: { createdAt: 'DESC' },
       skip,
       take,
@@ -2012,6 +2559,7 @@ export class ChatService {
   async logAudit(payload: LogAuditPayload): Promise<AuditEventView> {
     const saved = await this.auditEvents.save(
       this.auditEvents.create({
+        organizationId: requireOrganizationId(),
         actorId: payload.actorId,
         action: payload.action,
         targetType: payload.targetType ?? null,
@@ -2023,11 +2571,14 @@ export class ChatService {
   }
 
   async getWorkspaceSettings(): Promise<WorkspaceSettingsView> {
-    let settings = await this.workspaceSettings.findOne({ where: { id: 1 } });
+    const organizationId = requireOrganizationId();
+    let settings = await this.workspaceSettings.findOne({
+      where: { organizationId },
+    });
     if (!settings) {
       settings = await this.workspaceSettings.save(
         this.workspaceSettings.create({
-          id: 1,
+          organizationId,
           appName: 'Relay',
           tagline: 'Private team messenger',
           primaryColor: '#2563eb',
@@ -2040,9 +2591,12 @@ export class ChatService {
   async updateWorkspaceSettings(
     payload: UpdateWorkspacePayload,
   ): Promise<WorkspaceSettingsView> {
-    let settings = await this.workspaceSettings.findOne({ where: { id: 1 } });
+    const organizationId = requireOrganizationId();
+    let settings = await this.workspaceSettings.findOne({
+      where: { organizationId },
+    });
     if (!settings) {
-      settings = this.workspaceSettings.create({ id: 1 });
+      settings = this.workspaceSettings.create({ organizationId });
     }
     if (payload.appName?.trim()) {
       settings.appName = payload.appName.trim().slice(0, 80);
@@ -2057,8 +2611,44 @@ export class ChatService {
       settings.logoUrl = payload.logoUrl?.trim() || null;
     }
     const saved = await this.workspaceSettings.save(settings);
-    await this.recordAudit(payload.actorId, 'workspace.updated', 'workspace', '1');
+    await this.recordAudit(
+      payload.actorId,
+      'workspace.updated',
+      'workspace',
+      organizationId,
+    );
     return this.toWorkspaceView(saved);
+  }
+
+  async purgeOrganization(organizationId: string): Promise<{ deleted: boolean }> {
+    const orgId = organizationId.trim();
+    if (!orgId) {
+      return RpcErrors.badRequest('organizationId is required');
+    }
+
+    await this.scheduledMessages.delete({ organizationId: orgId });
+    await this.auditEvents.delete({ organizationId: orgId });
+    await this.userBlocks.delete({ organizationId: orgId });
+    await this.workspaceSettings.delete({ organizationId: orgId });
+
+    // Hard-delete messages first so soft-deleted rows are also removed;
+    // reactions/hides cascade from messages.
+    await this.messages
+      .createQueryBuilder()
+      .delete()
+      .from(Message)
+      .where('"organizationId" = :orgId', { orgId })
+      .execute();
+
+    // Conversation members cascade from conversations.
+    await this.conversations
+      .createQueryBuilder()
+      .delete()
+      .from(Conversation)
+      .where('"organizationId" = :orgId', { orgId })
+      .execute();
+
+    return { deleted: true };
   }
 
   private async recordAudit(
@@ -2070,6 +2660,7 @@ export class ChatService {
   ): Promise<void> {
     await this.auditEvents.save(
       this.auditEvents.create({
+        organizationId: requireOrganizationId(),
         actorId,
         action,
         targetType: targetType ?? null,
@@ -2106,16 +2697,31 @@ export class ChatService {
   ): Promise<boolean> {
     const count = await this.userBlocks.count({
       where: [
-        { blockerId: userA, blockedId: userB },
-        { blockerId: userB, blockedId: userA },
+        {
+          organizationId: requireOrganizationId(),
+          blockerId: userA,
+          blockedId: userB,
+        },
+        {
+          organizationId: requireOrganizationId(),
+          blockerId: userB,
+          blockedId: userA,
+        },
       ],
     });
     return count > 0;
   }
 
-  private async hasBlock(blockerId: string, blockedId: string): Promise<boolean> {
+  private async hasBlock(
+    blockerId: string,
+    blockedId: string,
+  ): Promise<boolean> {
     const count = await this.userBlocks.count({
-      where: { blockerId, blockedId },
+      where: {
+        organizationId: requireOrganizationId(),
+        blockerId,
+        blockedId,
+      },
     });
     return count > 0;
   }
@@ -2197,7 +2803,9 @@ export class ChatService {
         const other = (item.members ?? []).find(
           (member) => member.userId !== actorId && !member.leftAt,
         );
-        return other ? ({ conversationId: item.id, otherUserId: other.userId } as const) : null;
+        return other
+          ? ({ conversationId: item.id, otherUserId: other.userId } as const)
+          : null;
       })
       .filter((item): item is { conversationId: string; otherUserId: string } =>
         Boolean(item),
@@ -2214,8 +2822,16 @@ export class ChatService {
     const peerIds = [...new Set(privatePeers.map((item) => item.otherUserId))];
     const blocks = await this.userBlocks.find({
       where: [
-        { blockerId: actorId, blockedId: In(peerIds) },
-        { blockerId: In(peerIds), blockedId: actorId },
+        {
+          organizationId: requireOrganizationId(),
+          blockerId: actorId,
+          blockedId: In(peerIds),
+        },
+        {
+          organizationId: requireOrganizationId(),
+          blockerId: In(peerIds),
+          blockedId: actorId,
+        },
       ],
     });
 
@@ -2253,7 +2869,12 @@ export class ChatService {
     if (ids.length === 0) {
       return map;
     }
-    const parents = await this.messages.find({ where: { id: In(ids) } });
+    const parents = await this.messages.find({
+      where: {
+        id: In(ids),
+        organizationId: requireOrganizationId(),
+      },
+    });
     for (const parent of parents) {
       map.set(parent.id, parent);
     }
@@ -2306,7 +2927,10 @@ export class ChatService {
     actorId: string,
   ): Promise<Conversation> {
     const conversation = await this.conversations.findOne({
-      where: { id: conversationId },
+      where: {
+        id: conversationId,
+        organizationId: requireOrganizationId(),
+      },
       relations: { members: true },
     });
     if (!conversation) {
@@ -2372,6 +2996,9 @@ export class ChatService {
         { actorId },
       )
       .where('m.conversationId IN (:...conversationIds)', { conversationIds })
+      .andWhere('m.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
+      })
       .andWhere('m.senderId != :actorId', { actorId })
       .andWhere('(cm.lastReadAt IS NULL OR m.createdAt > cm.lastReadAt)')
       .andWhere('m.deletedForEveryoneAt IS NULL')
@@ -2391,6 +3018,53 @@ export class ChatService {
     return counts;
   }
 
+  /** Oldest unread @mention message id per conversation for the actor. */
+  private async unreadMentionMeta(
+    actorId: string,
+    conversationIds: string[],
+  ): Promise<Map<string, string>> {
+    const firstByConversation = new Map<string, string>();
+    if (conversationIds.length === 0) {
+      return firstByConversation;
+    }
+
+    const mentionJson = JSON.stringify([actorId]);
+    const rows = await this.messages
+      .createQueryBuilder('m')
+      .select('m.conversationId', 'conversationId')
+      .addSelect('m.id', 'messageId')
+      .distinctOn(['m.conversationId'])
+      .innerJoin(
+        ConversationMember,
+        'cm',
+        'cm.conversationId = m.conversationId AND cm.userId = :actorId AND cm.leftAt IS NULL',
+        { actorId },
+      )
+      .where('m.conversationId IN (:...conversationIds)', { conversationIds })
+      .andWhere('m.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
+      })
+      .andWhere('m.senderId != :actorId', { actorId })
+      .andWhere('(cm.lastReadAt IS NULL OR m.createdAt > cm.lastReadAt)')
+      .andWhere('m.deletedForEveryoneAt IS NULL')
+      .andWhere('(m.undelivered = false OR m.senderId = :actorId)', { actorId })
+      .andWhere('m.mentions @> CAST(:mentionJson AS jsonb)', { mentionJson })
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM message_hides mh
+          WHERE mh."messageId" = m.id AND mh."userId" = :actorId
+        )`,
+      )
+      .orderBy('m.conversationId')
+      .addOrderBy('m.createdAt', 'ASC')
+      .getRawMany<{ conversationId: string; messageId: string }>();
+
+    for (const row of rows) {
+      firstByConversation.set(row.conversationId, row.messageId);
+    }
+    return firstByConversation;
+  }
+
   private async latestMessagesByConversation(
     conversationIds: string[],
     actorId: string,
@@ -2407,6 +3081,9 @@ export class ChatService {
       .createQueryBuilder('m')
       .distinctOn(['m.conversationId'])
       .where('m.conversationId IN (:...conversationIds)', { conversationIds })
+      .andWhere('m.organizationId = :organizationId', {
+        organizationId: requireOrganizationId(),
+      })
       .andWhere('(m.undelivered = false OR m.senderId = :actorId)', { actorId })
       .orderBy('m.conversationId')
       .addOrderBy('CASE WHEN m.deletedForEveryoneAt IS NULL THEN 0 ELSE 1 END')
@@ -2425,6 +3102,12 @@ export class ChatService {
       .map((member) => member.userId);
   }
 
+  private mutedRecipientIds(conversation: Conversation): string[] {
+    return (conversation.members ?? [])
+      .filter((member) => !member.leftAt && member.mutedAt)
+      .map((member) => member.userId);
+  }
+
   private toConversationView(
     conversation: Conversation,
     actorId: string,
@@ -2434,6 +3117,8 @@ export class ChatService {
       blockedByMe: false,
       blockedMe: false,
     },
+    hasUnreadMention = false,
+    firstUnreadMentionMessageId: string | null = null,
   ): ConversationView {
     const activeMembers = (conversation.members ?? []).filter(
       (member) => !member.leftAt,
@@ -2451,10 +3136,13 @@ export class ChatService {
       lastReadAt: actor?.lastReadAt?.toISOString() ?? null,
       muted: Boolean(actor?.mutedAt),
       pinned: Boolean(actor?.pinnedAt),
-      disappearingDurationSeconds: conversation.disappearingDurationSeconds ?? 0,
+      disappearingDurationSeconds:
+        conversation.disappearingDurationSeconds ?? 0,
       blockedByMe: blockFlags.blockedByMe,
       blockedMe: blockFlags.blockedMe,
       unreadCount,
+      hasUnreadMention,
+      firstUnreadMentionMessageId,
       members: activeMembers.map((member) => ({
         userId: member.userId,
         role: member.role,
@@ -2539,8 +3227,10 @@ export class ChatService {
         : this.buildReactionViews(reactions, actorId),
       mentions: deletedForEveryone ? [] : (message.mentions ?? []),
       linkPreview:
-        !deletedForEveryone && message.linkPreview
-          ? message.linkPreview
+        !deletedForEveryone && message.linkPreview ? message.linkPreview : null,
+      poll:
+        !deletedForEveryone && message.poll
+          ? this.toPollView(message.poll, actorId)
           : null,
       editedAt: message.editedAt?.toISOString() ?? null,
       pinned: Boolean(message.pinnedAt) && !deletedForEveryone,
@@ -2550,7 +3240,7 @@ export class ChatService {
           : null,
       pinnedByUserId:
         !deletedForEveryone && message.pinnedAt
-          ? message.pinnedByUserId ?? null
+          ? (message.pinnedByUserId ?? null)
           : null,
       forwarded: Boolean(message.forwardedFromMessageId),
       deletedForEveryone,
@@ -2561,6 +3251,62 @@ export class ChatService {
           ? message.expiresAt.toISOString()
           : null,
       createdAt: message.createdAt.toISOString(),
+    };
+  }
+
+  private toPollView(
+    poll: {
+      question: string;
+      options: Array<{ id: string; text: string; voterIds: string[] }>;
+      allowMultiple: boolean;
+      closed: boolean;
+    },
+    actorId?: string,
+  ): PollView {
+    const options = poll.options.map((option) => ({
+      id: option.id,
+      text: option.text,
+      voteCount: option.voterIds.length,
+      votedByMe: Boolean(actorId && option.voterIds.includes(actorId)),
+    }));
+    return {
+      question: poll.question,
+      options,
+      allowMultiple: Boolean(poll.allowMultiple),
+      closed: Boolean(poll.closed),
+      totalVotes: options.reduce((sum, option) => sum + option.voteCount, 0),
+    };
+  }
+
+  private toBookmarkView(
+    bookmark: MessageBookmark,
+    message: Message,
+    actorId: string,
+    conversation?: Conversation,
+    reactions: MessageReaction[] = [],
+  ): BookmarkView {
+    const conv =
+      conversation ??
+      ({
+        id: bookmark.conversationId,
+        type: ConversationType.PRIVATE,
+        name: null,
+        members: [],
+      } as unknown as Conversation);
+    return {
+      id: bookmark.id,
+      conversationId: bookmark.conversationId,
+      messageId: bookmark.messageId,
+      createdAt: bookmark.createdAt.toISOString(),
+      message: this.toMessageView(
+        message,
+        conv.members ?? [],
+        null,
+        reactions,
+        actorId,
+      ),
+      conversationName: conv.name ?? null,
+      conversationType: conv.type ?? ConversationType.PRIVATE,
     };
   }
 

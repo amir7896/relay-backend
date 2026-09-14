@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
@@ -9,6 +10,10 @@ import {
 export class AuditEvent {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
+
+  @Index()
+  @Column({ type: 'uuid' })
+  organizationId!: string;
 
   @Column({ type: 'uuid' })
   actorId!: string;

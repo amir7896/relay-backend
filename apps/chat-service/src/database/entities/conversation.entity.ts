@@ -13,13 +13,17 @@ import { ConversationMember } from './conversation-member.entity';
 import { Message } from './message.entity';
 
 @Entity({ name: 'conversations' })
-@Index('UQ_conversations_pairKey_active', ['pairKey'], {
+@Index('UQ_conversations_pairKey_active', ['organizationId', 'pairKey'], {
   unique: true,
   where: '"deletedAt" IS NULL AND "pairKey" IS NOT NULL',
 })
 export class Conversation {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
+
+  @Index()
+  @Column({ type: 'uuid' })
+  organizationId!: string;
 
   @Column({ type: 'enum', enum: ConversationType })
   type!: ConversationType;

@@ -7,6 +7,8 @@ import { AuthModule } from './auth/auth.module';
 import { AuthUser } from './database/entities/auth-user.entity';
 import { AuthToken } from './database/entities/auth-token.entity';
 import { RefreshToken } from './database/entities/refresh-token.entity';
+import { Organization } from './database/entities/organization.entity';
+import { OrganizationMember } from './database/entities/organization-member.entity';
 
 @Module({
   imports: [
@@ -24,7 +26,13 @@ import { RefreshToken } from './database/entities/refresh-token.entity';
           username: config.getOrThrow<string>('POSTGRES_USER'),
           password: config.getOrThrow<string>('POSTGRES_PASSWORD'),
           database: config.getOrThrow<string>('AUTH_POSTGRES_DATABASE'),
-          entities: [AuthUser, RefreshToken, AuthToken],
+          entities: [
+            AuthUser,
+            RefreshToken,
+            AuthToken,
+            Organization,
+            OrganizationMember,
+          ],
           poolMax: config.get<number>('POSTGRES_POOL_MAX', 20),
           poolMin: config.get<number>('POSTGRES_POOL_MIN', 2),
         }),

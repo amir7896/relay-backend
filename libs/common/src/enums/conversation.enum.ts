@@ -16,6 +16,8 @@ export enum MessageType {
   AUDIO = 'audio',
   /** System call history line (JSON body). */
   CALL = 'call',
+  /** Interactive poll card. */
+  POLL = 'poll',
 }
 
 export enum PresenceStatus {

@@ -38,6 +38,7 @@ export interface VerifyEmailPayload {
 
 export interface CreateInvitePayload {
   createdByUserId: string;
+  organizationId: string;
   email?: string;
   expiresInDays?: number;
   maxUses?: number;
@@ -46,6 +47,8 @@ export interface CreateInvitePayload {
 export interface InviteView {
   id: string;
   email: string | null;
+  organizationId: string | null;
+  organizationName?: string;
   inviteUrl: string;
   maxUses: number;
   usedCount: number;
@@ -55,6 +58,9 @@ export interface InviteView {
   createdByUserId: string | null;
   /** Raw token only returned when the invite is created */
   token?: string;
+  /** Present when SMTP is off or for local testing (copy/paste) */
+  debugInviteUrl?: string;
+  emailSent?: boolean;
 }
 
 export interface GetInvitePayload {
@@ -65,15 +71,19 @@ export interface PublicInviteView {
   email: string | null;
   expiresAt: string;
   valid: boolean;
+  organizationId?: string | null;
+  organizationName?: string | null;
 }
 
 export interface ListInvitesPayload {
-  createdByUserId?: string;
+  organizationId: string;
+  requestedByUserId: string;
 }
 
 export interface RevokeInvitePayload {
   inviteId: string;
   requestedByUserId: string;
+  organizationId: string;
 }
 
 export interface LoginPayload {
@@ -129,4 +139,7 @@ export interface TokenPair {
 export interface AuthResult {
   user: AuthUserView;
   tokens: TokenPair;
+  organizations: import('./organization.contracts').OrganizationView[];
+  /** Suggested active org (first membership / default). */
+  activeOrganizationId: string | null;
 }

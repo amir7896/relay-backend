@@ -18,6 +18,10 @@ export class Message {
 
   @Index()
   @Column({ type: 'uuid' })
+  organizationId!: string;
+
+  @Index()
+  @Column({ type: 'uuid' })
   conversationId!: string;
 
   @ManyToOne(() => Conversation, (conversation) => conversation.messages, {
@@ -81,6 +85,14 @@ export class Message {
     title: string;
     description: string;
     image: string | null;
+  } | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  poll!: {
+    question: string;
+    options: Array<{ id: string; text: string; voterIds: string[] }>;
+    allowMultiple: boolean;
+    closed: boolean;
   } | null;
 
   @Index()

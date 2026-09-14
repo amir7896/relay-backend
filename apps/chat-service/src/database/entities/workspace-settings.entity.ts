@@ -2,8 +2,8 @@ import { Column, Entity, PrimaryColumn, UpdateDateColumn } from 'typeorm';
 
 @Entity({ name: 'workspace_settings' })
 export class WorkspaceSettings {
-  @PrimaryColumn({ type: 'smallint', default: 1 })
-  id!: number;
+  @PrimaryColumn({ type: 'uuid' })
+  organizationId!: string;
 
   @Column({ type: 'varchar', length: 80, default: 'Relay' })
   appName!: string;

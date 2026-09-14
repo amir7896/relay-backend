@@ -3,10 +3,12 @@ export interface CreateProfilePayload {
   email: string;
   firstName: string;
   lastName: string;
+  organizationId?: string;
 }
 
 export interface UpdateProfilePayload {
   userId: string;
+  organizationId?: string;
   firstName?: string;
   lastName?: string;
   phone?: string;
@@ -22,11 +24,18 @@ export interface FindUsersPayload {
   search?: string;
   sortBy: string;
   order: 'ASC' | 'DESC';
+  organizationId?: string;
+}
+
+export interface PurgeOrganizationUsersPayload {
+  organizationId: string;
+  actorId: string;
 }
 
 export interface UserProfileView {
   id: string;
   userId: string;
+  organizationId: string;
   email: string;
   firstName: string;
   lastName: string;

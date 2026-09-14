@@ -9,13 +9,17 @@ import {
 } from 'typeorm';
 
 @Entity({ name: 'user_profiles' })
-@Index('UQ_user_profiles_userId_active', ['userId'], {
+@Index('UQ_user_profiles_org_userId_active', ['organizationId', 'userId'], {
   unique: true,
   where: '"deletedAt" IS NULL',
 })
 export class UserProfile {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
+
+  @Index()
+  @Column({ type: 'uuid' })
+  organizationId!: string;
 
   @Column({ type: 'uuid' })
   userId!: string;

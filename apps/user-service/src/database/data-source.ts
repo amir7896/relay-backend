@@ -6,6 +6,7 @@ import { CreateUserSchema1710000000001 } from './migrations/1710000000001-Create
 import { UserPartialUniqueUserId1720000000001 } from './migrations/1720000000001-UserPartialUniqueUserId';
 import { AddShowLastSeenPrivacy1730000004000 } from './migrations/1730000004000-AddShowLastSeenPrivacy';
 import { WidenAvatarUrl1740000000001 } from './migrations/1740000000001-WidenAvatarUrl';
+import { SharedTenantUserOrganizationId1742000000001 } from './migrations/1742000000001-SharedTenantUserOrganizationId';
 
 config({
   path: [
@@ -27,6 +28,7 @@ export default new DataSource({
     UserPartialUniqueUserId1720000000001,
     AddShowLastSeenPrivacy1730000004000,
     WidenAvatarUrl1740000000001,
+    SharedTenantUserOrganizationId1742000000001,
   ],
   synchronize: false,
 });

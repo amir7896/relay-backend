@@ -34,6 +34,10 @@ export class AuthToken {
   @Column({ type: 'uuid', nullable: true })
   createdByUserId!: string | null;
 
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  organizationId!: string | null;
+
   @Column({ type: 'int', default: 1 })
   maxUses!: number;
 

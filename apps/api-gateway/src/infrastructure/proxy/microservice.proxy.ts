@@ -9,6 +9,12 @@ import {
   InflightLimiter,
   USER_SERVICE,
 } from '@app/common';
+import { getGatewayTenant, tenantRpcFields } from '../../organizations/tenant-context';
+
+type SendOptions = {
+  /** Do not attach organization tenant fields (auth / org APIs). */
+  skipTenant?: boolean;
+};
 
 @Injectable()
 export class MicroserviceProxy implements OnModuleInit {
@@ -56,34 +62,47 @@ export class MicroserviceProxy implements OnModuleInit {
   sendAuth<TResult, TInput = unknown>(
     pattern: string,
     payload: TInput,
+    options?: SendOptions,
   ): Promise<TResult> {
-    return this.send(this.authClient, pattern, payload);
+    return this.send(this.authClient, pattern, payload, {
+      skipTenant: true,
+      ...options,
+    });
   }
 
   sendUser<TResult, TInput = unknown>(
     pattern: string,
     payload: TInput,
+    options?: SendOptions,
   ): Promise<TResult> {
-    return this.send(this.userClient, pattern, payload);
+    return this.send(this.userClient, pattern, payload, options);
   }
 
   sendChat<TResult, TInput = unknown>(
     pattern: string,
     payload: TInput,
+    options?: SendOptions,
   ): Promise<TResult> {
-    return this.send(this.chatClient, pattern, payload);
+    return this.send(this.chatClient, pattern, payload, options);
   }
 
   private async send<TResult, TInput>(
     client: ClientProxy,
     pattern: string,
     payload: TInput,
+    options?: SendOptions,
   ): Promise<TResult> {
+    const tenant = options?.skipTenant ? undefined : getGatewayTenant();
+    const enriched = {
+      ...(typeof payload === 'object' && payload !== null ? payload : { value: payload }),
+      ...tenantRpcFields(tenant),
+    } as TInput;
+
     await this.limiter.acquire();
     try {
       return await firstValueFrom(
         client
-          .send<TResult, TInput>(pattern, payload)
+          .send<TResult, TInput>(pattern, enriched)
           .pipe(timeout(this.rpcTimeoutMs)),
       );
     } catch (error) {

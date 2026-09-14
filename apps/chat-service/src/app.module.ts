@@ -13,6 +13,7 @@ import { UserBlock } from './database/entities/user-block.entity';
 import { AuditEvent } from './database/entities/audit-event.entity';
 import { WorkspaceSettings } from './database/entities/workspace-settings.entity';
 import { ScheduledMessage } from './database/entities/scheduled-message.entity';
+import { MessageBookmark } from './database/entities/message-bookmark.entity';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { ScheduledMessage } from './database/entities/scheduled-message.entity';
             AuditEvent,
             WorkspaceSettings,
             ScheduledMessage,
+            MessageBookmark,
           ],
           poolMax: config.get<number>('POSTGRES_POOL_MAX', 20),
           poolMin: config.get<number>('POSTGRES_POOL_MIN', 2),

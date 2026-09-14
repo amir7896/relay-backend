@@ -57,7 +57,7 @@ export class ScheduledMessageDispatcher
         return;
       }
       for (const result of delivered) {
-        const { recipientIds, ...data } = result;
+        const { recipientIds, mutedRecipientIds, ...data } = result;
         await this.conversationCache.setMemberIds(
           data.conversationId,
           recipientIds,
@@ -69,6 +69,8 @@ export class ScheduledMessageDispatcher
           title: 'New Relay message',
           body: (data.body || 'Attachment').slice(0, 120),
           conversationId: data.conversationId,
+          mentionUserIds: data.mentions ?? [],
+          mutedRecipientIds: mutedRecipientIds ?? [],
         });
       }
     } catch (error) {

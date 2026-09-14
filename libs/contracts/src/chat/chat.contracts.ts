@@ -20,6 +20,11 @@ export const CHAT_PATTERNS = {
   REACT_MESSAGE: 'chat.react_message',
   PIN_MESSAGE: 'chat.pin_message',
   LIST_PINNED_MESSAGES: 'chat.list_pinned_messages',
+  CREATE_POLL: 'chat.create_poll',
+  VOTE_POLL: 'chat.vote_poll',
+  SAVE_BOOKMARK: 'chat.save_bookmark',
+  REMOVE_BOOKMARK: 'chat.remove_bookmark',
+  LIST_BOOKMARKS: 'chat.list_bookmarks',
   SCHEDULE_MESSAGE: 'chat.schedule_message',
   LIST_SCHEDULED_MESSAGES: 'chat.list_scheduled_messages',
   CANCEL_SCHEDULED_MESSAGE: 'chat.cancel_scheduled_message',
@@ -46,6 +51,8 @@ export const CHAT_PATTERNS = {
   LOG_AUDIT: 'chat.log_audit',
   GET_WORKSPACE: 'chat.get_workspace',
   UPDATE_WORKSPACE: 'chat.update_workspace',
+  ENSURE_GENERAL_MEMBER: 'chat.ensure_general_member',
+  PURGE_ORGANIZATION: 'chat.purge_organization',
 } as const;
 
 export interface CreatePrivateChatPayload {
@@ -128,6 +135,8 @@ export interface SendMessagePayload extends ConversationActorPayload {
 
 export interface SendMessageResult extends MessageView {
   recipientIds: string[];
+  /** Members who muted this conversation (for push filtering). */
+  mutedRecipientIds?: string[];
 }
 
 export interface EditMessagePayload extends ConversationActorPayload {
@@ -227,6 +236,10 @@ export interface AddMembersPayload extends ConversationActorPayload {
   memberIds: string[];
 }
 
+export interface EnsureGeneralMemberPayload {
+  userId: string;
+}
+
 export interface RemoveMemberPayload extends ConversationActorPayload {
   memberId: string;
 }
@@ -283,6 +296,59 @@ export interface LinkPreviewView {
   image: string | null;
 }
 
+export interface PollOptionView {
+  id: string;
+  text: string;
+  voteCount: number;
+  votedByMe: boolean;
+}
+
+export interface PollView {
+  question: string;
+  options: PollOptionView[];
+  allowMultiple: boolean;
+  closed: boolean;
+  totalVotes: number;
+}
+
+export interface CreatePollPayload extends ConversationActorPayload {
+  question: string;
+  options: string[];
+  allowMultiple?: boolean;
+}
+
+export interface VotePollPayload extends ConversationActorPayload {
+  messageId: string;
+  optionId: string;
+}
+
+export interface SaveBookmarkPayload {
+  actorId: string;
+  messageId: string;
+}
+
+export interface RemoveBookmarkPayload {
+  actorId: string;
+  messageId: string;
+}
+
+export interface ListBookmarksPayload {
+  actorId: string;
+  page: number;
+  limit: number;
+  conversationId?: string;
+}
+
+export interface BookmarkView {
+  id: string;
+  conversationId: string;
+  messageId: string;
+  createdAt: string;
+  message: MessageView;
+  conversationName: string | null;
+  conversationType: ConversationType;
+}
+
 export interface MessageView {
   id: string;
   conversationId: string;
@@ -293,6 +359,7 @@ export interface MessageView {
   attachment: MessageAttachmentView | null;
   mentions: string[];
   linkPreview: LinkPreviewView | null;
+  poll: PollView | null;
   reactions: MessageReactionView[];
   editedAt: string | null;
   pinned: boolean;
@@ -323,6 +390,10 @@ export interface ConversationView {
   /** Private chat: peer blocked the current user. */
   blockedMe: boolean;
   unreadCount: number;
+  /** True when an unread message @mentions the current user. */
+  hasUnreadMention: boolean;
+  /** Oldest unread message that @mentions the current user (for jump). */
+  firstUnreadMentionMessageId: string | null;
   members: ConversationMemberView[];
   createdAt: string;
   updatedAt: string;
@@ -403,4 +474,9 @@ export interface UpdateWorkspacePayload {
   tagline?: string;
   primaryColor?: string;
   logoUrl?: string | null;
+}
+
+export interface PurgeOrganizationChatPayload {
+  organizationId: string;
+  actorId: string;
 }

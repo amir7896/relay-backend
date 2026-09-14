@@ -13,15 +13,17 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { MessageType, PresenceStatus } from '@app/common';
-import { CHAT_PATTERNS } from '@app/contracts';
+import { AUTH_PATTERNS, CHAT_PATTERNS } from '@app/contracts';
 import type {
   ConversationView,
   MessageView,
+  OrganizationView,
   PrepareVoiceCallResult,
   SeenResultView,
   SendMessageResult,
 } from '@app/contracts';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
+import { tenantRpcFields } from '../organizations/tenant-context';
 import { CallSessionService } from './call-session.service';
 import { ConversationCacheService } from './conversation-cache.service';
 import { PresenceService } from './presence.service';
@@ -29,7 +31,11 @@ import { PushService } from './push.service';
 import { WsAuthService } from './ws-auth.service';
 
 type AuthedSocket = Socket & {
-  data: { userId?: string; conversationIds?: string[] };
+  data: {
+    userId?: string;
+    conversationIds?: string[];
+    organization?: OrganizationView;
+  };
 };
 
 type CallSignalBody = {
@@ -87,6 +93,21 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const user = await this.wsAuth.authenticate(client);
       client.data.userId = user.id;
       client.data.conversationIds = [];
+      const organizationId =
+        typeof client.handshake.auth?.organizationId === 'string'
+          ? client.handshake.auth.organizationId
+          : undefined;
+      if (organizationId) {
+        try {
+          client.data.organization = await this.proxy.sendAuth<OrganizationView>(
+            AUTH_PATTERNS.RESOLVE_TENANT,
+            { userId: user.id, organizationId },
+            { skipTenant: true },
+          );
+        } catch {
+          client.data.organization = undefined;
+        }
+      }
       await client.join(`user:${user.id}`);
       const { becameOnline } = await this.presence.connect(user.id, client.id);
       if (becameOnline) {
@@ -123,6 +144,21 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.logger.debug(`Socket ${client.id} disconnected`);
   }
 
+  private sendChatFor<TResult>(
+    client: AuthedSocket,
+    pattern: string,
+    payload: Record<string, unknown>,
+  ): Promise<TResult> {
+    return this.proxy.sendChat<TResult>(
+      pattern,
+      {
+        ...payload,
+        ...tenantRpcFields(client.data.organization),
+      },
+      { skipTenant: true },
+    );
+  }
+
   @SubscribeMessage('chat:join')
   async joinConversation(
     @ConnectedSocket() client: AuthedSocket,
@@ -130,7 +166,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     const userId = this.requireUser(client);
     const conversationId = this.requireConversationId(body);
-    const conversation = await this.proxy.sendChat<ConversationView>(
+    const conversation = await this.sendChatFor<ConversationView>(
+      client,
       CHAT_PATTERNS.GET_CONVERSATION,
       {
         actorId: userId,
@@ -190,8 +227,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       throw new WsException('Call history messages are system-generated only');
     }
 
-    const result = await this.proxy.sendChat<SendMessageResult>(
-      CHAT_PATTERNS.SEND_MESSAGE,
+    const result = await this.sendChatFor<SendMessageResult>(client, CHAT_PATTERNS.SEND_MESSAGE,
       {
         actorId: userId,
         conversationId,
@@ -199,7 +235,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         type: body.type ?? MessageType.TEXT,
       },
     );
-    const { recipientIds, ...message } = result;
+    const { recipientIds, mutedRecipientIds: _muted, ...message } = result;
     await this.conversationCache.setMemberIds(conversationId, recipientIds);
     this.broadcastMessage(message, recipientIds);
     return message;
@@ -229,8 +265,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     const userId = this.requireUser(client);
     const conversationId = this.requireConversationId(body);
-    const result = await this.proxy.sendChat<SeenResultView>(
-      CHAT_PATTERNS.MARK_SEEN,
+    const result = await this.sendChatFor<SeenResultView>(client, CHAT_PATTERNS.MARK_SEEN,
       {
         actorId: userId,
         conversationId,
@@ -264,8 +299,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return { status: 'error', message: rateError };
     }
 
-    const prepared = await this.proxy.sendChat<PrepareVoiceCallResult>(
-      CHAT_PATTERNS.PREPARE_VOICE_CALL,
+    const prepared = await this.sendChatFor<PrepareVoiceCallResult>(client, CHAT_PATTERNS.PREPARE_VOICE_CALL,
       { actorId: userId, conversationId },
     );
 
@@ -575,8 +609,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     await this.assertLiveConversationMember(userId, session.conversationId);
 
-    const prepared = await this.proxy.sendChat<PrepareVoiceCallResult>(
-      CHAT_PATTERNS.PREPARE_VOICE_CALL,
+    const prepared = await this.sendChatFor<PrepareVoiceCallResult>(client, CHAT_PATTERNS.PREPARE_VOICE_CALL,
       { actorId: userId, conversationId: session.conversationId },
     );
 
@@ -897,15 +930,45 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  private async sendChatAsUser<TResult>(
+    userId: string,
+    pattern: string,
+    payload: Record<string, unknown>,
+  ): Promise<TResult> {
+    let organization: OrganizationView | undefined;
+    if (this.server) {
+      try {
+        const sockets = await this.server.in(`user:${userId}`).fetchSockets();
+        organization = (
+          sockets[0]?.data as { organization?: OrganizationView } | undefined
+        )?.organization;
+      } catch {
+        organization = undefined;
+      }
+    }
+    return this.proxy.sendChat<TResult>(
+      pattern,
+      {
+        ...payload,
+        ...tenantRpcFields(organization),
+      },
+      { skipTenant: true },
+    );
+  }
+
   private async assertLiveConversationMember(
     userId: string,
     conversationId: string,
   ): Promise<void> {
     try {
-      await this.proxy.sendChat<ConversationView>(CHAT_PATTERNS.GET_CONVERSATION, {
-        actorId: userId,
-        conversationId,
-      });
+      await this.sendChatAsUser<ConversationView>(
+        userId,
+        CHAT_PATTERNS.GET_CONVERSATION,
+        {
+          actorId: userId,
+          conversationId,
+        },
+      );
     } catch {
       throw new WsException('You are no longer a member of this conversation');
     }
@@ -1204,7 +1267,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       });
 
       const actorId = session.hostId || byUserId;
-      const result = await this.proxy.sendChat<SendMessageResult>(
+      const result = await this.sendChatAsUser<SendMessageResult>(
+        actorId,
         CHAT_PATTERNS.SEND_MESSAGE,
         {
           actorId,
@@ -1214,7 +1278,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           systemCall: true,
         },
       );
-      const { recipientIds, ...message } = result;
+      const { recipientIds, mutedRecipientIds: _muted, ...message } = result;
       await this.conversationCache.setMemberIds(
         session.conversationId,
         recipientIds,
@@ -1362,7 +1426,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (cached) {
       return cached;
     }
-    const conversation = await this.proxy.sendChat<ConversationView>(
+    const conversation = await this.sendChatAsUser<ConversationView>(
+      actorId,
       CHAT_PATTERNS.GET_CONVERSATION,
       { actorId, conversationId },
     );

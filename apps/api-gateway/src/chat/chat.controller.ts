@@ -50,6 +50,7 @@ import {
   BlockUserDto,
   ChatPageQueryDto,
   CreateGroupChatDto,
+  CreatePollDto,
   CreatePrivateChatDto,
   DeleteMessageDto,
   EditMessageDto,
@@ -60,6 +61,7 @@ import {
   PinConversationDto,
   PinMessageDto,
   ReactMessageDto,
+  SaveBookmarkDto,
   ScheduleMessageDto,
   SearchMessagesQueryDto,
   SendMessageDto,
@@ -67,6 +69,7 @@ import {
   SetMemberRoleDto,
   TypingDto,
   UpdateGroupDto,
+  VotePollDto,
 } from './dto/chat.dto';
 import { PresenceService } from './presence.service';
 import { AiService } from './ai.service';
@@ -435,7 +438,7 @@ export class ChatController {
         linkPreview: dto.linkPreview ?? null,
       },
     );
-    const { recipientIds, ...data } = result;
+    const { recipientIds, mutedRecipientIds, ...data } = result;
     await this.conversationCache.setMemberIds(id, recipientIds);
     this.chatGateway.broadcastMessage(data, recipientIds);
     void this.push.notifyOfflineRecipients({
@@ -444,6 +447,8 @@ export class ChatController {
       title: 'New Relay message',
       body: (data.body || 'Attachment').slice(0, 120),
       conversationId: id,
+      mentionUserIds: data.mentions ?? dto.mentionUserIds ?? [],
+      mutedRecipientIds: mutedRecipientIds ?? [],
     });
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_SENT, data };
   }
@@ -593,6 +598,100 @@ export class ChatController {
     await this.conversationCache.setMemberIds(id, recipientIds);
     this.chatGateway.broadcastMessage(data, recipientIds);
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_PINNED, data };
+  }
+
+  @Post('conversations/:id/polls')
+  @HttpCode(HttpStatus.CREATED)
+  async createPoll(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: CreatePollDto,
+  ) {
+    const result = await this.proxy.sendChat<SendMessageResult>(
+      CHAT_PATTERNS.CREATE_POLL,
+      {
+        actorId: user.id,
+        conversationId: id,
+        question: dto.question,
+        options: dto.options,
+        allowMultiple: dto.allowMultiple,
+      },
+    );
+    const { recipientIds, mutedRecipientIds, ...data } = result;
+    await this.conversationCache.setMemberIds(id, recipientIds);
+    this.chatGateway.broadcastMessage(data, recipientIds);
+    void this.push.notifyOfflineRecipients({
+      recipientIds,
+      senderId: user.id,
+      title: 'New Relay poll',
+      body: (data.body || 'Poll').slice(0, 120),
+      conversationId: id,
+      mutedRecipientIds: mutedRecipientIds ?? [],
+    });
+    return { message: 'Poll created', data };
+  }
+
+  @Post('conversations/:id/messages/:messageId/poll-votes')
+  @HttpCode(HttpStatus.OK)
+  async votePoll(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('messageId', ParseUuidPipe) messageId: string,
+    @Body() dto: VotePollDto,
+  ) {
+    const result = await this.proxy.sendChat<SendMessageResult>(
+      CHAT_PATTERNS.VOTE_POLL,
+      {
+        actorId: user.id,
+        conversationId: id,
+        messageId,
+        optionId: dto.optionId,
+      },
+    );
+    const { recipientIds, mutedRecipientIds: _muted, ...data } = result;
+    await this.conversationCache.setMemberIds(id, recipientIds);
+    this.chatGateway.broadcastMessage(data, recipientIds);
+    return { message: 'Vote recorded', data };
+  }
+
+  @Get('bookmarks')
+  async listBookmarks(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ChatPageQueryDto,
+    @Query('conversationId') conversationId?: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_BOOKMARKS, {
+      actorId: user.id,
+      page: query.page,
+      limit: query.limit,
+      conversationId: conversationId?.trim() || undefined,
+    });
+    return { message: 'Bookmarks retrieved', data };
+  }
+
+  @Post('bookmarks')
+  @HttpCode(HttpStatus.CREATED)
+  async saveBookmark(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: SaveBookmarkDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.SAVE_BOOKMARK, {
+      actorId: user.id,
+      messageId: dto.messageId,
+    });
+    return { message: 'Message saved', data };
+  }
+
+  @Delete('bookmarks/:messageId')
+  async removeBookmark(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('messageId', ParseUuidPipe) messageId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.REMOVE_BOOKMARK, {
+      actorId: user.id,
+      messageId,
+    });
+    return { message: 'Bookmark removed', data };
   }
 
   @Get('conversations/:id/pinned-messages')

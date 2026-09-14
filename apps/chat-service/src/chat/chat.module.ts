@@ -9,6 +9,7 @@ import { UserBlock } from '../database/entities/user-block.entity';
 import { AuditEvent } from '../database/entities/audit-event.entity';
 import { WorkspaceSettings } from '../database/entities/workspace-settings.entity';
 import { ScheduledMessage } from '../database/entities/scheduled-message.entity';
+import { MessageBookmark } from '../database/entities/message-bookmark.entity';
 import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
 
@@ -24,6 +25,7 @@ import { ChatService } from './chat.service';
       AuditEvent,
       WorkspaceSettings,
       ScheduledMessage,
+      MessageBookmark,
     ]),
   ],
   controllers: [ChatController],

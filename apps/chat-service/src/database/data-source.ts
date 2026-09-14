@@ -20,8 +20,12 @@ import { AddMessagePins1730000008000 } from './migrations/1730000008000-AddMessa
 import { AddScheduledMessages1730000009000 } from './migrations/1730000009000-AddScheduledMessages';
 import { AddDisappearingMessages1730000010000 } from './migrations/1730000010000-AddDisappearingMessages';
 import { AddUndeliveredMessages1730000011000 } from './migrations/1730000011000-AddUndeliveredMessages';
+import { SharedTenantChatOrganizationId1742000000002 } from './migrations/1742000000002-SharedTenantChatOrganizationId';
+import { AddMessagePolls1743000000000 } from './migrations/1743000000000-AddMessagePolls';
+import { AddMessageBookmarks1743000001000 } from './migrations/1743000001000-AddMessageBookmarks';
 
 import { ScheduledMessage } from './entities/scheduled-message.entity';
+import { MessageBookmark } from './entities/message-bookmark.entity';
 
 config({
   path: [
@@ -47,6 +51,7 @@ export default new DataSource({
     AuditEvent,
     WorkspaceSettings,
     ScheduledMessage,
+    MessageBookmark,
   ],
   migrations: [
     CreateChatSchema1730000000000,
@@ -60,6 +65,9 @@ export default new DataSource({
     AddScheduledMessages1730000009000,
     AddDisappearingMessages1730000010000,
     AddUndeliveredMessages1730000011000,
+    SharedTenantChatOrganizationId1742000000002,
+    AddMessagePolls1743000000000,
+    AddMessageBookmarks1743000001000,
   ],
   synchronize: false,
 });

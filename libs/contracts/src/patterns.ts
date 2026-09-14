@@ -15,6 +15,20 @@ export const AUTH_PATTERNS = {
   LIST_INVITES: 'auth.list_invites',
   GET_INVITE: 'auth.get_invite',
   REVOKE_INVITE: 'auth.revoke_invite',
+  CREATE_ORGANIZATION: 'auth.create_organization',
+  LIST_ORGANIZATIONS: 'auth.list_organizations',
+  GET_ORGANIZATION: 'auth.get_organization',
+  DELETE_ORGANIZATION: 'auth.delete_organization',
+  LEAVE_ORGANIZATION: 'auth.leave_organization',
+  ACCEPT_INVITE: 'auth.accept_invite',
+  LIST_ORG_MEMBERS: 'auth.list_org_members',
+  SET_ORG_MEMBER_ROLE: 'auth.set_org_member_role',
+  REMOVE_ORG_MEMBER: 'auth.remove_org_member',
+  UPDATE_ORGANIZATION: 'auth.update_organization',
+  TRANSFER_OWNERSHIP: 'auth.transfer_ownership',
+  RESOLVE_TENANT: 'auth.resolve_tenant',
+  ENSURE_DEFAULT_ORGANIZATION: 'auth.ensure_default_organization',
+  ADD_ORG_MEMBER: 'auth.add_org_member',
 } as const;
 
 export const USER_PATTERNS = {
@@ -24,4 +38,5 @@ export const USER_PATTERNS = {
   FIND_BY_USER_ID: 'user.find_by_user_id',
   UPDATE: 'user.update',
   REMOVE: 'user.remove',
+  PURGE_BY_ORGANIZATION: 'user.purge_by_organization',
 } as const;

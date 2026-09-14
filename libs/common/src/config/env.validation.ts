@@ -112,6 +112,8 @@ export const authEnvSchema = Joi.object({
     .default('development'),
   AUTH_HTTP_PORT: Joi.number().port().default(3001),
   AUTH_POSTGRES_DATABASE: Joi.string().required(),
+  USER_POSTGRES_DATABASE: Joi.string().required(),
+  CHAT_POSTGRES_DATABASE: Joi.string().required(),
   JWT_ACCESS_SECRET: Joi.string().min(16).required(),
   JWT_ACCESS_EXPIRES_IN: Joi.string().default('1d'),
   JWT_REFRESH_SECRET: Joi.string().min(16).required(),

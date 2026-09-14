@@ -9,17 +9,17 @@ import {
 } from 'typeorm';
 
 export type ScheduledMessageStatus =
-  | 'pending'
-  | 'sending'
-  | 'sent'
-  | 'cancelled'
-  | 'failed';
+  'pending' | 'sending' | 'sent' | 'cancelled' | 'failed';
 
 @Entity({ name: 'scheduled_messages' })
 @Index('IDX_scheduled_messages_due', ['status', 'scheduledFor'])
 export class ScheduledMessage {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
+
+  @Index()
+  @Column({ type: 'uuid' })
+  organizationId!: string;
 
   @Index()
   @Column({ type: 'uuid' })

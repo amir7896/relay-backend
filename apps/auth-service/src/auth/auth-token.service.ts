@@ -1,29 +1,38 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes } from 'crypto';
-import { Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { MailService, RpcErrors } from '@app/common';
 import type {
   CreateInvitePayload,
   ForgotPasswordResult,
   InviteView,
+  ListInvitesPayload,
   PublicInviteView,
   RequestEmailVerificationResult,
+  RevokeInvitePayload,
 } from '@app/contracts';
 import {
   AuthToken,
   AuthTokenType,
 } from '../database/entities/auth-token.entity';
 import { AuthUser } from '../database/entities/auth-user.entity';
+import { Organization } from '../database/entities/organization.entity';
+import { OrganizationService } from './organization.service';
 
 @Injectable()
 export class AuthTokenService {
+  private readonly logger = new Logger(AuthTokenService.name);
+
   constructor(
     @InjectRepository(AuthToken)
     private readonly tokens: Repository<AuthToken>,
     @InjectRepository(AuthUser)
     private readonly users: Repository<AuthUser>,
+    @InjectRepository(Organization)
+    private readonly organizations: Repository<Organization>,
+    private readonly organizationService: OrganizationService,
     private readonly mail: MailService,
     private readonly config: ConfigService,
   ) {}
@@ -56,7 +65,8 @@ export class AuthTokenService {
 
     return {
       sent: true,
-      debugVerifyUrl: result.previewUrl ?? (result.delivered ? undefined : verifyUrl),
+      debugVerifyUrl:
+        result.previewUrl ?? (result.delivered ? undefined : verifyUrl),
     };
   }
 
@@ -98,7 +108,8 @@ export class AuthTokenService {
 
     return {
       accepted: true,
-      debugResetUrl: result.previewUrl ?? (result.delivered ? undefined : resetUrl),
+      debugResetUrl:
+        result.previewUrl ?? (result.delivered ? undefined : resetUrl),
     };
   }
 
@@ -124,11 +135,22 @@ export class AuthTokenService {
   }
 
   async createInvite(payload: CreateInvitePayload): Promise<InviteView> {
+    const org = await this.organizationService.requireOrgAdmin({
+      organizationId: payload.organizationId,
+      userId: payload.createdByUserId,
+    });
+
     const email = payload.email?.toLowerCase().trim() || null;
     if (email) {
       const existing = await this.users.findOne({ where: { email } });
       if (existing) {
-        return RpcErrors.conflict('An account with this email already exists');
+        const alreadyMember = await this.organizationService.isMember({
+          organizationId: payload.organizationId,
+          userId: existing.id,
+        });
+        if (alreadyMember) {
+          return RpcErrors.conflict('That person is already in this workspace');
+        }
       }
     }
 
@@ -141,6 +163,7 @@ export class AuthTokenService {
       email,
       userId: null,
       createdByUserId: payload.createdByUserId,
+      organizationId: payload.organizationId,
       maxUses,
       ttlMs: days * 24 * 60 * 60 * 1000,
     });
@@ -148,16 +171,56 @@ export class AuthTokenService {
     const saved = await this.tokens.findOneOrFail({
       where: { tokenHash: this.hash(raw) },
     });
-    return this.toInviteView(saved, raw);
+    const view = this.toInviteView(saved, raw, org.name);
+
+    if (email) {
+      const mailResult = await this.mail.send({
+        to: email,
+        subject: `You're invited to ${org.name} on Relay`,
+        text: `Join ${org.name} on Relay:\n${view.inviteUrl}\n\nThis link expires on ${view.expiresAt}.`,
+        html: `<p>You are invited to <strong>${org.name}</strong> on Relay.</p><p><a href="${view.inviteUrl}">Accept invite</a></p><p>Expires: ${view.expiresAt}</p>`,
+      });
+      view.emailSent = mailResult.delivered;
+      view.debugInviteUrl =
+        mailResult.previewUrl ??
+        (mailResult.delivered ? undefined : view.inviteUrl);
+      if (mailResult.delivered) {
+        this.logger.log(
+          `Workspace invite email delivered | org=${org.name} | to=${email}`,
+        );
+      } else {
+        this.logger.warn(
+          `Workspace invite email NOT delivered | org=${org.name} | to=${email} | use copy-link fallback`,
+        );
+      }
+    } else {
+      view.debugInviteUrl = view.inviteUrl;
+      view.emailSent = false;
+      this.logger.log(
+        `Workspace invite created without email | org=${org.name} | copy-link only`,
+      );
+    }
+
+    return view;
   }
 
-  async listInvites(): Promise<InviteView[]> {
+  async listInvites(payload: ListInvitesPayload): Promise<InviteView[]> {
+    await this.organizationService.requireOrgAdmin({
+      organizationId: payload.organizationId,
+      userId: payload.requestedByUserId,
+    });
     const rows = await this.tokens.find({
-      where: { type: AuthTokenType.INVITE },
+      where: {
+        type: AuthTokenType.INVITE,
+        organizationId: payload.organizationId,
+      },
       order: { createdAt: 'DESC' },
       take: 100,
     });
-    return rows.map((row) => this.toInviteView(row));
+    const org = await this.organizations.findOne({
+      where: { id: payload.organizationId },
+    });
+    return rows.map((row) => this.toInviteView(row, undefined, org?.name));
   }
 
   async getInvite(token: string): Promise<PublicInviteView> {
@@ -165,10 +228,19 @@ export class AuthTokenService {
     if (!record) {
       return { email: null, expiresAt: new Date(0).toISOString(), valid: false };
     }
+    let organizationName: string | null = null;
+    if (record.organizationId) {
+      const org = await this.organizations.findOne({
+        where: { id: record.organizationId },
+      });
+      organizationName = org?.name ?? null;
+    }
     return {
       email: record.email,
       expiresAt: record.expiresAt.toISOString(),
       valid: true,
+      organizationId: record.organizationId,
+      organizationName,
     };
   }
 
@@ -179,6 +251,11 @@ export class AuthTokenService {
     const record = await this.findValidToken(token, AuthTokenType.INVITE);
     if (!record) {
       return RpcErrors.badRequest('Invite link is invalid or expired');
+    }
+    if (!record.organizationId) {
+      return RpcErrors.badRequest(
+        'This invite is not linked to a workspace. Create a new invite from your workspace.',
+      );
     }
     if (record.email && record.email !== email) {
       return RpcErrors.badRequest(
@@ -199,10 +276,18 @@ export class AuthTokenService {
   }
 
   async revokeInvite(
-    inviteId: string,
+    payload: RevokeInvitePayload,
   ): Promise<{ revoked: boolean }> {
+    await this.organizationService.requireOrgAdmin({
+      organizationId: payload.organizationId,
+      userId: payload.requestedByUserId,
+    });
     const record = await this.tokens.findOne({
-      where: { id: inviteId, type: AuthTokenType.INVITE },
+      where: {
+        id: payload.inviteId,
+        type: AuthTokenType.INVITE,
+        organizationId: payload.organizationId,
+      },
     });
     if (!record) {
       return RpcErrors.notFound('Invite');
@@ -217,6 +302,7 @@ export class AuthTokenService {
     email: string | null;
     userId: string | null;
     createdByUserId?: string | null;
+    organizationId?: string | null;
     maxUses?: number;
     ttlMs: number;
   }): Promise<string> {
@@ -241,6 +327,7 @@ export class AuthTokenService {
       email: input.email,
       userId: input.userId,
       createdByUserId: input.createdByUserId ?? null,
+      organizationId: input.organizationId ?? null,
       maxUses: input.maxUses ?? 1,
       usedCount: 0,
       expiresAt: new Date(Date.now() + input.ttlMs),
@@ -274,7 +361,7 @@ export class AuthTokenService {
       return null;
     }
     const match = await this.tokens.findOne({
-      where: { tokenHash: this.hash(raw), type },
+      where: { tokenHash: this.hash(raw), type, revokedAt: IsNull() },
     });
     if (!match) return null;
     if (match.revokedAt) return null;
@@ -292,10 +379,16 @@ export class AuthTokenService {
     return createHash('sha256').update(token).digest('hex');
   }
 
-  private toInviteView(row: AuthToken, rawToken?: string): InviteView {
+  private toInviteView(
+    row: AuthToken,
+    rawToken?: string,
+    organizationName?: string,
+  ): InviteView {
     const view: InviteView = {
       id: row.id,
       email: row.email,
+      organizationId: row.organizationId,
+      organizationName,
       inviteUrl: rawToken
         ? `${this.mail.publicAppUrl}/invite/${rawToken}`
         : `${this.mail.publicAppUrl}/invite`,

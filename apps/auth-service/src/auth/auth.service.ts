@@ -15,6 +15,8 @@ import {
 import {
   AuthResult,
   AuthUserView,
+  AcceptInvitePayload,
+  AcceptInviteResult,
   ChangePasswordPayload,
   CreateInvitePayload,
   DeactivatePayload,
@@ -22,6 +24,7 @@ import {
   ForgotPasswordResult,
   GetInvitePayload,
   InviteView,
+  ListInvitesPayload,
   LoginPayload,
   LogoutPayload,
   PublicInviteView,
@@ -38,6 +41,7 @@ import {
 import { AuthUser } from '../database/entities/auth-user.entity';
 import { RefreshToken } from '../database/entities/refresh-token.entity';
 import { AuthTokenService } from './auth-token.service';
+import { OrganizationService } from './organization.service';
 
 @Injectable()
 export class AuthService implements OnModuleInit {
@@ -52,10 +56,12 @@ export class AuthService implements OnModuleInit {
     private readonly config: ConfigService,
     private readonly authTokens: AuthTokenService,
     private readonly mail: MailService,
+    private readonly organizations: OrganizationService,
   ) {}
 
   async onModuleInit(): Promise<void> {
     await this.ensureAdmin();
+    await this.organizations.ensureDefaultOrganization();
   }
 
   async register(payload: RegisterPayload): Promise<AuthResult> {
@@ -66,6 +72,7 @@ export class AuthService implements OnModuleInit {
     }
 
     let inviteId: string | null = null;
+    let inviteOrganizationId: string | null = null;
     let emailVerified = false;
     if (payload.inviteToken) {
       const invite = await this.authTokens.assertInviteForRegister(
@@ -73,6 +80,7 @@ export class AuthService implements OnModuleInit {
         email,
       );
       inviteId = invite.id;
+      inviteOrganizationId = invite.organizationId;
       emailVerified = Boolean(invite.email && invite.email === email);
     }
 
@@ -86,7 +94,14 @@ export class AuthService implements OnModuleInit {
 
     try {
       const saved = await this.users.save(user);
-      if (inviteId) {
+      if (inviteId && inviteOrganizationId) {
+        await this.organizations.addMemberDirect({
+          organizationId: inviteOrganizationId,
+          userId: saved.id,
+          role: 'member',
+        });
+        await this.authTokens.consumeInvite(inviteId);
+      } else if (inviteId) {
         await this.authTokens.consumeInvite(inviteId);
       }
       const tokens = await this.issueTokens(saved);
@@ -101,7 +116,18 @@ export class AuthService implements OnModuleInit {
             );
           });
       }
-      return { user: this.toView(saved), tokens };
+      // Invite joins that workspace; otherwise Slack-style onboarding creates one.
+      const authResult = await this.toAuthResult(saved, tokens);
+      if (
+        inviteOrganizationId &&
+        authResult.organizations.some((org) => org.id === inviteOrganizationId)
+      ) {
+        return {
+          ...authResult,
+          activeOrganizationId: inviteOrganizationId,
+        };
+      }
+      return authResult;
     } catch (error) {
       if (this.isUniqueViolation(error)) {
         return RpcErrors.conflict('An account with this email already exists');
@@ -135,7 +161,46 @@ export class AuthService implements OnModuleInit {
     }
 
     const tokens = await this.issueTokens(user, payload.ip, payload.userAgent);
-    return { user: this.toView(user), tokens };
+    return this.toAuthResult(user, tokens);
+  }
+
+  async acceptInvite(payload: AcceptInvitePayload): Promise<AcceptInviteResult> {
+    const email = payload.email.toLowerCase().trim();
+    const user = await this.users.findOne({ where: { id: payload.userId } });
+    if (!user || !user.isActive) {
+      return RpcErrors.unauthorized('Account is not available');
+    }
+    if (user.email.toLowerCase() !== email) {
+      return RpcErrors.forbidden('Signed-in email does not match this account');
+    }
+
+    const invite = await this.authTokens.assertInviteForRegister(
+      payload.inviteToken,
+      email,
+    );
+    const organizationId = invite.organizationId!;
+    const alreadyMember = await this.organizations.isMember({
+      organizationId,
+      userId: user.id,
+    });
+    if (!alreadyMember) {
+      await this.organizations.addMemberDirect({
+        organizationId,
+        userId: user.id,
+        role: 'member',
+      });
+      await this.authTokens.consumeInvite(invite.id);
+    }
+
+    const organizations = await this.organizations.listForUser({
+      userId: user.id,
+    });
+    return {
+      organizationId,
+      organizations,
+      activeOrganizationId: organizationId,
+      alreadyMember,
+    };
   }
 
   async refresh(payload: RefreshPayload): Promise<AuthResult> {
@@ -182,7 +247,7 @@ export class AuthService implements OnModuleInit {
         payload.userAgent,
         manager.getRepository(RefreshToken),
       );
-      return { user: this.toView(stored.user), tokens };
+      return this.toAuthResult(stored.user, tokens);
     });
   }
 
@@ -281,28 +346,11 @@ export class AuthService implements OnModuleInit {
   }
 
   async createInvite(payload: CreateInvitePayload): Promise<InviteView> {
-    const invite = await this.authTokens.createInvite(payload);
-    if (invite.email && invite.inviteUrl.includes('/invite/')) {
-      void this.mail
-        .send({
-          to: invite.email,
-          subject: 'You are invited to Relay',
-          text: `Join Relay with this invite link:\n${invite.inviteUrl}\n\nThe link expires on ${invite.expiresAt}.`,
-          html: `<p>You are invited to Relay.</p><p><a href="${invite.inviteUrl}">Accept invite</a></p><p>Expires: ${invite.expiresAt}</p>`,
-        })
-        .catch((error: unknown) => {
-          this.logger.warn(
-            `Could not email invite: ${
-              error instanceof Error ? error.message : 'unknown'
-            }`,
-          );
-        });
-    }
-    return invite;
+    return this.authTokens.createInvite(payload);
   }
 
-  async listInvites(): Promise<InviteView[]> {
-    return this.authTokens.listInvites();
+  async listInvites(payload: ListInvitesPayload): Promise<InviteView[]> {
+    return this.authTokens.listInvites(payload);
   }
 
   async getInvite(payload: GetInvitePayload): Promise<PublicInviteView> {
@@ -312,7 +360,7 @@ export class AuthService implements OnModuleInit {
   async revokeInvite(
     payload: RevokeInvitePayload,
   ): Promise<{ revoked: boolean }> {
-    return this.authTokens.revokeInvite(payload.inviteId);
+    return this.authTokens.revokeInvite(payload);
   }
 
   async deactivate(
@@ -429,6 +477,25 @@ export class AuthService implements OnModuleInit {
     }
     const driver = error.driverError as { code?: string } | undefined;
     return driver?.code === '23505';
+  }
+
+  private async toAuthResult(
+    user: AuthUser,
+    tokens: TokenPair,
+  ): Promise<AuthResult> {
+    const organizations = await this.organizations.listForUser({
+      userId: user.id,
+    });
+    const activeOrganizationId =
+      organizations.find((org) => org.isDefault)?.id ??
+      organizations[0]?.id ??
+      null;
+    return {
+      user: this.toView(user),
+      tokens,
+      organizations,
+      activeOrganizationId,
+    };
   }
 
   private toView(user: AuthUser): AuthUserView {

@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -12,16 +13,9 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
-import {
-  AuthenticatedUser,
-  CurrentUser,
-  Public,
-  Roles,
-  UserRole,
-  AUTH_SUCCESS_MESSAGES,
-} from '@app/common';
-import { AUTH_PATTERNS, USER_PATTERNS } from '@app/contracts';
+import { AUTH_PATTERNS, CHAT_PATTERNS, USER_PATTERNS } from '@app/contracts';
 import type {
+  AcceptInviteResult,
   AuthResult,
   AuthUserView,
   ForgotPasswordResult,
@@ -29,7 +23,15 @@ import type {
   PublicInviteView,
   RequestEmailVerificationResult,
 } from '@app/contracts';
+import {
+  AuthenticatedUser,
+  BadRequestAppException,
+  CurrentUser,
+  Public,
+  AUTH_SUCCESS_MESSAGES,
+} from '@app/common';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
+import { SkipOrg } from '../organizations/skip-org.decorator';
 import {
   CreateInviteDto,
   ForgotPasswordDto,
@@ -55,6 +57,7 @@ import {
 
 @AuthDocs()
 @Controller('auth')
+@SkipOrg()
 export class AuthController {
   constructor(
     private readonly proxy: MicroserviceProxy,
@@ -73,12 +76,33 @@ export class AuthController {
       dto,
     );
     try {
-      await this.proxy.sendUser(USER_PATTERNS.CREATE_PROFILE, {
-        userId: result.user.id,
-        email: result.user.email,
-        firstName: dto.firstName,
-        lastName: dto.lastName,
-      });
+      const organizationId =
+        result.activeOrganizationId ?? result.organizations[0]?.id;
+      if (organizationId) {
+        await this.proxy.sendUser(
+          USER_PATTERNS.CREATE_PROFILE,
+          {
+            userId: result.user.id,
+            email: result.user.email,
+            firstName: dto.firstName,
+            lastName: dto.lastName,
+            organizationId,
+          },
+          { skipTenant: true },
+        );
+        try {
+          await this.proxy.sendChat(
+            CHAT_PATTERNS.ENSURE_GENERAL_MEMBER,
+            {
+              userId: result.user.id,
+              organizationId,
+            },
+            { skipTenant: true },
+          );
+        } catch {
+          // #general may not exist yet for legacy orgs — invite still succeeds.
+        }
+      }
     } catch (error) {
       try {
         await this.proxy.sendAuth(AUTH_PATTERNS.DEACTIVATE, {
@@ -226,17 +250,24 @@ export class AuthController {
     return { message: AUTH_SUCCESS_MESSAGES.VERIFICATION_SENT, data };
   }
 
-  @Roles(UserRole.ADMIN)
   @Post('invites')
   @HttpCode(HttpStatus.CREATED)
   async createInvite(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateInviteDto,
+    @Headers('x-organization-id') organizationId?: string,
   ) {
+    const orgId = organizationId?.trim();
+    if (!orgId) {
+      throw new BadRequestAppException(
+        'X-Organization-Id header is required to invite teammates',
+      );
+    }
     const data = await this.proxy.sendAuth<InviteView>(
       AUTH_PATTERNS.CREATE_INVITE,
       {
         createdByUserId: user.id,
+        organizationId: orgId,
         email: dto.email,
         expiresInDays: dto.expiresInDays,
         maxUses: dto.maxUses,
@@ -245,12 +276,23 @@ export class AuthController {
     return { message: AUTH_SUCCESS_MESSAGES.INVITE_CREATED, data };
   }
 
-  @Roles(UserRole.ADMIN)
   @Get('invites')
-  async listInvites() {
+  async listInvites(
+    @CurrentUser() user: AuthenticatedUser,
+    @Headers('x-organization-id') organizationId?: string,
+  ) {
+    const orgId = organizationId?.trim();
+    if (!orgId) {
+      throw new BadRequestAppException(
+        'X-Organization-Id header is required to list invites',
+      );
+    }
     const data = await this.proxy.sendAuth<InviteView[]>(
       AUTH_PATTERNS.LIST_INVITES,
-      {},
+      {
+        organizationId: orgId,
+        requestedByUserId: user.id,
+      },
     );
     return { message: AUTH_SUCCESS_MESSAGES.INVITES_FETCHED, data };
   }
@@ -265,15 +307,71 @@ export class AuthController {
     return { message: AUTH_SUCCESS_MESSAGES.INVITE_FETCHED, data };
   }
 
-  @Roles(UserRole.ADMIN)
+  @SkipOrg()
+  @Post('invites/:token/accept')
+  @HttpCode(HttpStatus.OK)
+  async acceptInvite(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('token') token: string,
+  ) {
+    const data = await this.proxy.sendAuth<AcceptInviteResult>(
+      AUTH_PATTERNS.ACCEPT_INVITE,
+      {
+        userId: user.id,
+        email: user.email,
+        inviteToken: token,
+      },
+      { skipTenant: true },
+    );
+
+    const nameParts = (user.email.split('@')[0] || 'User').split(/[._-]/);
+    try {
+      await this.proxy.sendUser(
+        USER_PATTERNS.CREATE_PROFILE,
+        {
+          userId: user.id,
+          email: user.email,
+          firstName: nameParts[0] || 'User',
+          lastName: nameParts.slice(1).join(' ') || 'Account',
+          organizationId: data.organizationId,
+        },
+        { skipTenant: true },
+      );
+    } catch {
+      // Profile may already exist for this org.
+    }
+    try {
+      await this.proxy.sendChat(
+        CHAT_PATTERNS.ENSURE_GENERAL_MEMBER,
+        {
+          userId: user.id,
+          organizationId: data.organizationId,
+        },
+        { skipTenant: true },
+      );
+    } catch {
+      // #general may not exist for legacy orgs.
+    }
+
+    return { message: 'Joined workspace', data };
+  }
+
   @Delete('invites/:id')
   async revokeInvite(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
+    @Headers('x-organization-id') organizationId?: string,
   ) {
+    const orgId = organizationId?.trim();
+    if (!orgId) {
+      throw new BadRequestAppException(
+        'X-Organization-Id header is required to revoke invites',
+      );
+    }
     const data = await this.proxy.sendAuth(AUTH_PATTERNS.REVOKE_INVITE, {
       inviteId: id,
       requestedByUserId: user.id,
+      organizationId: orgId,
     });
     return { message: AUTH_SUCCESS_MESSAGES.INVITE_REVOKED, data };
   }
