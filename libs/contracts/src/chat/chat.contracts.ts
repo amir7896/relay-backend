@@ -831,8 +831,8 @@ export interface InvokeSlashCommandResult {
 
 export interface UserGroupView {
   id: string;
+  handle: string;
   name: string;
-  displayName: string;
   description: string | null;
   memberIds: string[];
   createdBy: string;
@@ -846,8 +846,8 @@ export interface ListUserGroupsPayload {
 
 export interface CreateUserGroupPayload {
   actorId: string;
+  handle: string;
   name: string;
-  displayName: string;
   description?: string | null;
   memberIds: string[];
 }
@@ -855,7 +855,8 @@ export interface CreateUserGroupPayload {
 export interface UpdateUserGroupPayload {
   actorId: string;
   groupId: string;
-  displayName?: string;
+  handle?: string;
+  name?: string;
   description?: string | null;
   memberIds?: string[];
 }

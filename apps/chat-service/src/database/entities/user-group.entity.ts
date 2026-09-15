@@ -8,7 +8,6 @@ import {
 } from 'typeorm';
 
 @Entity({ name: 'user_groups' })
-@Index(['organizationId', 'name'], { unique: true })
 export class UserGroup {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -17,16 +16,17 @@ export class UserGroup {
   @Column({ type: 'uuid' })
   organizationId!: string;
 
-  /** Handle without @: eng, design (lowercase). */
+  /** Mention handle without @ (e.g. "eng"). */
   @Column({ type: 'varchar', length: 32 })
-  name!: string;
+  handle!: string;
 
   @Column({ type: 'varchar', length: 80 })
-  displayName!: string;
+  name!: string;
 
   @Column({ type: 'varchar', length: 240, nullable: true })
   description!: string | null;
 
+  /** Member user IDs in this user group. */
   @Column({ type: 'jsonb', default: [] })
   memberIds!: string[];
 

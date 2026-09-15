@@ -34,10 +34,8 @@ import type {
   CreatePollPayload,
   CreatePrivateChatPayload,
   CreateSlashCommandPayload,
-  CreateUserGroupPayload,
   DeleteMessagePayload,
   DeleteMessageResult,
-  DeleteUserGroupPayload,
   EditMessagePayload,
   ForwardMessagePayload,
   IncomingWebhookView,
@@ -49,7 +47,6 @@ import type {
   ListConversationsPayload,
   ListIncomingWebhooksPayload,
   ListSlashCommandsPayload,
-  ListUserGroupsPayload,
   ListMediaPayload,
   ListMessageEditsPayload,
   ListMessagesPayload,
@@ -91,6 +88,11 @@ import type {
   CancelReminderPayload,
   CreateSidebarSectionPayload,
   DeleteSidebarSectionPayload,
+  CreateUserGroupPayload,
+  DeleteUserGroupPayload,
+  ListUserGroupsPayload,
+  UpdateUserGroupPayload,
+  UserGroupView,
   MessageReminderView,
   ReminderDispatchResult,
   SearchMessagesPayload,
@@ -103,9 +105,7 @@ import type {
   ThreadSummaryView,
   UpdateGroupPayload,
   UpdateSidebarSectionPayload,
-  UpdateUserGroupPayload,
   UpdateWorkspacePayload,
-  UserGroupView,
   VotePollPayload,
   WorkspaceSettingsView,
 } from '@app/contracts';
@@ -166,12 +166,7 @@ const RESERVED_SLASH_NAMES = new Set(
   BUILTIN_SLASH_COMMANDS.map((item) => item.name),
 );
 
-const RESERVED_USER_GROUP_NAMES = new Set([
-  'channel',
-  'here',
-  'everyone',
-  'all',
-]);
+const RESERVED_USER_GROUP_HANDLES = new Set(['channel', 'here', 'everyone']);
 
 export function privatePairKey(userA: string, userB: string): string {
   return [userA, userB].sort().join(':');
@@ -2249,10 +2244,28 @@ export class ChatService {
     const activeMemberIds = new Set(
       conversation.members.filter((m) => !m.leftAt).map((m) => m.userId),
     );
-    const validMentions = [
-      ...new Set((payload.mentionUserIds ?? []).filter(Boolean)),
-    ].filter(
-      (userId) => userId !== payload.actorId && activeMemberIds.has(userId),
+    const mentionSet = new Set(
+      [...new Set((payload.mentionUserIds ?? []).filter(Boolean))].filter(
+        (userId) => userId !== payload.actorId,
+      ),
+    );
+    if (conversation.type === ConversationType.GROUP) {
+      if (/(^|[\s([{])@channel\b/i.test(body)) {
+        for (const memberId of activeMemberIds) {
+          if (memberId !== payload.actorId) {
+            mentionSet.add(memberId);
+          }
+        }
+      }
+      await this.expandUserGroupMentions(
+        body,
+        payload.actorId,
+        activeMemberIds,
+        mentionSet,
+      );
+    }
+    const validMentions = [...mentionSet].filter((userId) =>
+      activeMemberIds.has(userId),
     );
 
     const saved = await this.scheduledMessages.save(
@@ -4106,7 +4119,7 @@ export class ChatService {
   ): Promise<UserGroupView[]> {
     const rows = await this.userGroups.find({
       where: { organizationId: requireOrganizationId() },
-      order: { name: 'ASC' },
+      order: { handle: 'ASC' },
     });
     return rows.map((row) => this.toUserGroupView(row));
   }
@@ -4114,48 +4127,43 @@ export class ChatService {
   async createUserGroup(
     payload: CreateUserGroupPayload,
   ): Promise<UserGroupView> {
-    const name = this.normalizeUserGroupName(payload.name);
-    if (!name) {
+    const handle = this.normalizeUserGroupHandle(payload.handle);
+    if (!handle) {
       return RpcErrors.badRequest(
-        'Group handle is required (letters, numbers, underscore; max 32)',
+        'Handle is required (letters, numbers, underscore; max 32)',
       );
     }
-    if (RESERVED_USER_GROUP_NAMES.has(name)) {
-      return RpcErrors.badRequest(`@${name} is reserved`);
+    if (RESERVED_USER_GROUP_HANDLES.has(handle)) {
+      return RpcErrors.badRequest(`@${handle} is reserved`);
     }
-    const displayName = payload.displayName?.trim() || name;
-    if (displayName.length > 80) {
-      return RpcErrors.badRequest('displayName max 80 characters');
+    const name = payload.name?.trim() ?? '';
+    if (!name || name.length > 80) {
+      return RpcErrors.badRequest('Name is required (max 80 chars)');
     }
     const description = payload.description?.trim() || null;
     if (description && description.length > 240) {
-      return RpcErrors.badRequest('description max 240 characters');
+      return RpcErrors.badRequest('Description must be at most 240 chars');
     }
-    const memberIds = [
-      ...new Set((payload.memberIds ?? []).filter(Boolean)),
-    ];
+    const memberIds = this.normalizeMemberIds(payload.memberIds);
     if (memberIds.length === 0) {
       return RpcErrors.badRequest('Add at least one member');
-    }
-    if (memberIds.length > 200) {
-      return RpcErrors.badRequest('A group can have at most 200 members');
     }
 
     const existing = await this.userGroups.findOne({
       where: {
         organizationId: requireOrganizationId(),
-        name,
+        handle,
       },
     });
     if (existing) {
-      return RpcErrors.conflict(`@${name} already exists`);
+      return RpcErrors.conflict(`@${handle} already exists`);
     }
 
     const saved = await this.userGroups.save(
       this.userGroups.create({
         organizationId: requireOrganizationId(),
+        handle,
         name,
-        displayName,
         description,
         memberIds,
         createdBy: payload.actorId,
@@ -4167,7 +4175,7 @@ export class ChatService {
       'user_group.created',
       'user_group',
       saved.id,
-      { name, memberCount: memberIds.length },
+      { handle, memberCount: memberIds.length },
     );
 
     return this.toUserGroupView(saved);
@@ -4186,29 +4194,50 @@ export class ChatService {
       return RpcErrors.notFound('User group');
     }
 
-    if (payload.displayName !== undefined) {
-      const displayName = payload.displayName.trim();
-      if (!displayName || displayName.length > 80) {
-        return RpcErrors.badRequest('displayName is required (max 80)');
+    if (payload.handle !== undefined) {
+      const handle = this.normalizeUserGroupHandle(payload.handle);
+      if (!handle) {
+        return RpcErrors.badRequest(
+          'Handle is required (letters, numbers, underscore; max 32)',
+        );
       }
-      group.displayName = displayName;
+      if (RESERVED_USER_GROUP_HANDLES.has(handle)) {
+        return RpcErrors.badRequest(`@${handle} is reserved`);
+      }
+      if (handle !== group.handle) {
+        const clash = await this.userGroups.findOne({
+          where: {
+            organizationId: requireOrganizationId(),
+            handle,
+          },
+        });
+        if (clash) {
+          return RpcErrors.conflict(`@${handle} already exists`);
+        }
+        group.handle = handle;
+      }
     }
+
+    if (payload.name !== undefined) {
+      const name = payload.name.trim();
+      if (!name || name.length > 80) {
+        return RpcErrors.badRequest('Name is required (max 80 chars)');
+      }
+      group.name = name;
+    }
+
     if (payload.description !== undefined) {
       const description = payload.description?.trim() || null;
       if (description && description.length > 240) {
-        return RpcErrors.badRequest('description max 240 characters');
+        return RpcErrors.badRequest('Description must be at most 240 chars');
       }
       group.description = description;
     }
+
     if (payload.memberIds !== undefined) {
-      const memberIds = [
-        ...new Set(payload.memberIds.filter(Boolean)),
-      ];
+      const memberIds = this.normalizeMemberIds(payload.memberIds);
       if (memberIds.length === 0) {
         return RpcErrors.badRequest('Add at least one member');
-      }
-      if (memberIds.length > 200) {
-        return RpcErrors.badRequest('A group can have at most 200 members');
       }
       group.memberIds = memberIds;
     }
@@ -4219,7 +4248,7 @@ export class ChatService {
       'user_group.updated',
       'user_group',
       saved.id,
-      { name: saved.name },
+      { handle: saved.handle },
     );
     return this.toUserGroupView(saved);
   }
@@ -4241,8 +4270,8 @@ export class ChatService {
       payload.actorId,
       'user_group.deleted',
       'user_group',
-      group.id,
-      { name: group.name },
+      payload.groupId,
+      { handle: group.handle },
     );
     return { deleted: true };
   }
@@ -4254,11 +4283,11 @@ export class ChatService {
     mentionSet: Set<string>,
   ): Promise<void> {
     const handles = new Set<string>();
-    const pattern = /(^|[\s([{])@([a-zA-Z][a-zA-Z0-9_]{0,31})\b/g;
+    const pattern = /(^|[\s([{])@([a-z][a-z0-9_]{0,31})\b/gi;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(body)) !== null) {
       const handle = match[2].toLowerCase();
-      if (!RESERVED_USER_GROUP_NAMES.has(handle)) {
+      if (!RESERVED_USER_GROUP_HANDLES.has(handle)) {
         handles.add(handle);
       }
     }
@@ -4269,7 +4298,7 @@ export class ChatService {
     const groups = await this.userGroups.find({
       where: {
         organizationId: requireOrganizationId(),
-        name: In([...handles]),
+        handle: In([...handles]),
       },
     });
     for (const group of groups) {
@@ -4281,19 +4310,29 @@ export class ChatService {
     }
   }
 
-  private normalizeUserGroupName(raw: string): string | null {
-    const name = raw.trim().replace(/^@/, '').toLowerCase();
-    if (!/^[a-z][a-z0-9_]{0,31}$/.test(name)) {
+  private normalizeUserGroupHandle(raw: string): string | null {
+    const handle = raw.trim().replace(/^@/, '').toLowerCase();
+    if (!/^[a-z][a-z0-9_]{0,31}$/.test(handle)) {
       return null;
     }
-    return name;
+    return handle;
+  }
+
+  private normalizeMemberIds(raw: string[] | undefined): string[] {
+    return [
+      ...new Set(
+        (raw ?? [])
+          .map((id) => id?.trim())
+          .filter((id): id is string => Boolean(id) && isUuidToken(id)),
+      ),
+    ];
   }
 
   private toUserGroupView(row: UserGroup): UserGroupView {
     return {
       id: row.id,
+      handle: row.handle,
       name: row.name,
-      displayName: row.displayName,
       description: row.description,
       memberIds: Array.isArray(row.memberIds) ? row.memberIds : [],
       createdBy: row.createdBy,

@@ -616,17 +616,17 @@ export class CreateUserGroupDto {
   @MaxLength(32)
   @Matches(/^[a-zA-Z][a-zA-Z0-9_]{0,31}$/, {
     message:
-      'name must start with a letter and use only letters, numbers, underscore',
+      'handle must start with a letter and use only letters, numbers, underscore',
   })
-  name!: string;
+  handle!: string;
 
   @ApiProperty({ example: 'Engineering' })
   @IsString()
   @IsNotEmpty()
   @MaxLength(80)
-  displayName!: string;
+  name!: string;
 
-  @ApiPropertyOptional({ example: 'Backend and frontend engineers' })
+  @ApiPropertyOptional({ example: 'Backend + frontend engineers' })
   @IsOptional()
   @IsString()
   @MaxLength(240)
@@ -641,14 +641,25 @@ export class CreateUserGroupDto {
 }
 
 export class UpdateUserGroupDto {
+  @ApiPropertyOptional({ example: 'eng' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(32)
+  @Matches(/^[a-zA-Z][a-zA-Z0-9_]{0,31}$/, {
+    message:
+      'handle must start with a letter and use only letters, numbers, underscore',
+  })
+  handle?: string;
+
   @ApiPropertyOptional({ example: 'Engineering' })
   @IsOptional()
   @IsString()
   @IsNotEmpty()
   @MaxLength(80)
-  displayName?: string;
+  name?: string;
 
-  @ApiPropertyOptional({ example: 'Backend and frontend engineers' })
+  @ApiPropertyOptional({ example: 'Backend + frontend engineers' })
   @IsOptional()
   @IsString()
   @MaxLength(240)

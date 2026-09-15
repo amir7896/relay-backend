@@ -8,8 +8,8 @@ export class AddUserGroups1743000014000 implements MigrationInterface {
       CREATE TABLE IF NOT EXISTS "user_groups" (
         "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         "organizationId" uuid NOT NULL,
-        "name" varchar(32) NOT NULL,
-        "displayName" varchar(80) NOT NULL,
+        "handle" varchar(32) NOT NULL,
+        "name" varchar(80) NOT NULL,
         "description" varchar(240),
         "memberIds" jsonb NOT NULL DEFAULT '[]'::jsonb,
         "createdBy" uuid NOT NULL,
@@ -18,8 +18,8 @@ export class AddUserGroups1743000014000 implements MigrationInterface {
       )
     `);
     await queryRunner.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS "UQ_user_groups_org_name"
-      ON "user_groups" ("organizationId", "name")
+      CREATE UNIQUE INDEX IF NOT EXISTS "UQ_user_groups_org_handle"
+      ON "user_groups" ("organizationId", "handle")
     `);
     await queryRunner.query(`
       CREATE INDEX IF NOT EXISTS "IDX_user_groups_org"

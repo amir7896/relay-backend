@@ -64,9 +64,9 @@ import type {
   RevokeSlashCommandPayload,
   InvokeSlashCommandPayload,
   CreateUserGroupPayload,
+  DeleteUserGroupPayload,
   ListUserGroupsPayload,
   UpdateUserGroupPayload,
-  DeleteUserGroupPayload,
 } from '@app/contracts';
 import { runWithOrganization } from '@app/database';
 import { ChatService } from './chat.service';

@@ -254,7 +254,7 @@ export class ChatController {
     const role = request.organization?.role;
     if (role !== 'owner' && role !== 'admin') {
       throw new ForbiddenAppException(
-        'Only workspace owners and admins can manage slash commands',
+        'Only workspace owners and admins can manage this setting',
       );
     }
   }
@@ -748,8 +748,8 @@ export class ChatController {
       CHAT_PATTERNS.CREATE_USER_GROUP,
       {
         actorId: user.id,
+        handle: dto.handle,
         name: dto.name,
-        displayName: dto.displayName,
         description: dto.description ?? null,
         memberIds: dto.memberIds,
       },
@@ -770,7 +770,8 @@ export class ChatController {
       {
         actorId: user.id,
         groupId,
-        displayName: dto.displayName,
+        handle: dto.handle,
+        name: dto.name,
         description: dto.description,
         memberIds: dto.memberIds,
       },
