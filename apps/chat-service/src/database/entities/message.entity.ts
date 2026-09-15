@@ -48,6 +48,11 @@ export class Message {
   @Column({ type: 'uuid', nullable: true })
   replyToMessageId!: string | null;
 
+  /** Slack-style thread root; null = main timeline message */
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  threadRootId!: string | null;
+
   @Column({ type: 'timestamptz', nullable: true })
   deletedForEveryoneAt!: Date | null;
 
@@ -72,6 +77,13 @@ export class Message {
 
   @Column({ type: 'int', nullable: true })
   attachmentSize!: number | null;
+
+  /** When set, message is shown as an integration/bot post. */
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  botUsername!: string | null;
+
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  botIconUrl!: string | null;
 
   @Column({ type: 'uuid', nullable: true })
   forwardedFromMessageId!: string | null;

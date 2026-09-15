@@ -27,6 +27,38 @@ export class Organization {
   @Column({ type: 'boolean', default: false })
   isDefault!: boolean;
 
+  /** free | pro | enterprise — seat caps for billing MVP */
+  @Column({ type: 'varchar', length: 32, default: 'free' })
+  plan!: 'free' | 'pro' | 'enterprise';
+
+  @Column({ type: 'int', default: 25 })
+  maxSeats!: number;
+
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  stripeCustomerId!: string | null;
+
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  stripeSubscriptionId!: string | null;
+
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  stripePriceId!: string | null;
+
+  @Column({ type: 'boolean', default: false })
+  ssoEnabled!: boolean;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  ssoProvider!: 'oidc' | 'saml' | null;
+
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  ssoIssuerUrl!: string | null;
+
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  ssoClientId!: string | null;
+
+  /** Confidential OIDC client secret — never expose in OrgSsoView. */
+  @Column({ type: 'varchar', length: 500, nullable: true, select: false })
+  ssoClientSecret!: string | null;
+
   @OneToMany(() => OrganizationMember, (member) => member.organization)
   members!: OrganizationMember[];
 

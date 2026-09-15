@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { AuthModule } from '../auth/auth.module';
 import { StorageModule } from '../storage/storage.module';
 import { ChatController } from './chat.controller';
+import { IncomingWebhooksController } from './incoming-webhooks.controller';
 import { ChatGateway } from './chat.gateway';
 import { ConversationCacheService } from './conversation-cache.service';
 import { PresenceService } from './presence.service';
@@ -12,7 +13,9 @@ import { AiService } from './ai.service';
 import { CallSessionService } from './call-session.service';
 import { LinkPreviewService } from './link-preview.service';
 import { PushService } from './push.service';
+import { NotificationPrefsService } from './notification-prefs.service';
 import { ScheduledMessageDispatcher } from './scheduled-message.dispatcher';
+import { ReminderDispatcher } from './reminder.dispatcher';
 import { DisappearingMessageDispatcher } from './disappearing-message.dispatcher';
 
 @Module({
@@ -26,7 +29,7 @@ import { DisappearingMessageDispatcher } from './disappearing-message.dispatcher
       }),
     }),
   ],
-  controllers: [ChatController],
+  controllers: [ChatController, IncomingWebhooksController],
   providers: [
     ChatGateway,
     WsAuthService,
@@ -35,8 +38,10 @@ import { DisappearingMessageDispatcher } from './disappearing-message.dispatcher
     CallSessionService,
     AiService,
     LinkPreviewService,
+    NotificationPrefsService,
     PushService,
     ScheduledMessageDispatcher,
+    ReminderDispatcher,
     DisappearingMessageDispatcher,
   ],
   exports: [PresenceService, AiService, LinkPreviewService, PushService],

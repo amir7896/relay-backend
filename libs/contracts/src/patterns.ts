@@ -29,6 +29,21 @@ export const AUTH_PATTERNS = {
   RESOLVE_TENANT: 'auth.resolve_tenant',
   ENSURE_DEFAULT_ORGANIZATION: 'auth.ensure_default_organization',
   ADD_ORG_MEMBER: 'auth.add_org_member',
+  SETUP_2FA: 'auth.setup_2fa',
+  CONFIRM_2FA: 'auth.confirm_2fa',
+  DISABLE_2FA: 'auth.disable_2fa',
+  VERIFY_2FA_LOGIN: 'auth.verify_2fa_login',
+  LIST_SESSIONS: 'auth.list_sessions',
+  REVOKE_SESSION: 'auth.revoke_session',
+  REVOKE_OTHER_SESSIONS: 'auth.revoke_other_sessions',
+  UPDATE_ORG_BILLING: 'auth.update_org_billing',
+  CREATE_BILLING_CHECKOUT: 'auth.create_billing_checkout',
+  CREATE_BILLING_PORTAL: 'auth.create_billing_portal',
+  HANDLE_STRIPE_WEBHOOK: 'auth.handle_stripe_webhook',
+  UPDATE_ORG_SSO: 'auth.update_org_sso',
+  GET_ORG_SSO: 'auth.get_org_sso',
+  GET_ORG_SSO_CREDENTIALS: 'auth.get_org_sso_credentials',
+  SSO_COMPLETE: 'auth.sso_complete',
 } as const;
 
 export const USER_PATTERNS = {

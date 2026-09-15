@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { QueryFailedError, Repository } from 'typeorm';
 import {
   MailService,
@@ -18,15 +18,20 @@ import {
   AcceptInvitePayload,
   AcceptInviteResult,
   ChangePasswordPayload,
+  Confirm2faPayload,
   CreateInvitePayload,
   DeactivatePayload,
+  Disable2faPayload,
   ForgotPasswordPayload,
   ForgotPasswordResult,
   GetInvitePayload,
   InviteView,
   ListInvitesPayload,
+  ListSessionsPayload,
   LoginPayload,
+  LoginResult,
   LogoutPayload,
+  OrgMemberRole,
   PublicInviteView,
   RefreshPayload,
   RegisterPayload,
@@ -34,14 +39,26 @@ import {
   RequestEmailVerificationResult,
   ResetPasswordPayload,
   RevokeInvitePayload,
+  RevokeOtherSessionsPayload,
+  RevokeSessionPayload,
+  SessionView,
+  Setup2faPayload,
+  Setup2faResult,
+  SsoCompletePayload,
   TokenPair,
   ValidatePayload,
+  Verify2faLoginPayload,
   VerifyEmailPayload,
 } from '@app/contracts';
 import { AuthUser } from '../database/entities/auth-user.entity';
 import { RefreshToken } from '../database/entities/refresh-token.entity';
 import { AuthTokenService } from './auth-token.service';
 import { OrganizationService } from './organization.service';
+import {
+  buildOtpAuthUrl,
+  generateTotpSecret,
+  verifyTotpCode,
+} from './totp.util';
 
 @Injectable()
 export class AuthService implements OnModuleInit {
@@ -73,6 +90,7 @@ export class AuthService implements OnModuleInit {
 
     let inviteId: string | null = null;
     let inviteOrganizationId: string | null = null;
+    let inviteRole: 'member' | 'guest' = 'member';
     let emailVerified = false;
     if (payload.inviteToken) {
       const invite = await this.authTokens.assertInviteForRegister(
@@ -81,6 +99,7 @@ export class AuthService implements OnModuleInit {
       );
       inviteId = invite.id;
       inviteOrganizationId = invite.organizationId;
+      inviteRole = invite.inviteRole === 'guest' ? 'guest' : 'member';
       emailVerified = Boolean(invite.email && invite.email === email);
     }
 
@@ -98,7 +117,7 @@ export class AuthService implements OnModuleInit {
         await this.organizations.addMemberDirect({
           organizationId: inviteOrganizationId,
           userId: saved.id,
-          role: 'member',
+          role: inviteRole,
         });
         await this.authTokens.consumeInvite(inviteId);
       } else if (inviteId) {
@@ -136,11 +155,12 @@ export class AuthService implements OnModuleInit {
     }
   }
 
-  async login(payload: LoginPayload): Promise<AuthResult> {
+  async login(payload: LoginPayload): Promise<LoginResult> {
     const email = payload.email.toLowerCase().trim();
     const user = await this.users
       .createQueryBuilder('user')
       .addSelect('user.password')
+      .addSelect('user.totpSecret')
       .where('user.email = :email', { email })
       .getOne();
 
@@ -160,8 +180,200 @@ export class AuthService implements OnModuleInit {
       return RpcErrors.forbidden('This account has been deactivated');
     }
 
+    if (user.totpEnabled) {
+      const tempToken = await this.jwt.signAsync(
+        { sub: user.id, type: '2fa_pending' },
+        {
+          secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+          expiresIn: '5m',
+        },
+      );
+      return {
+        requires2fa: true,
+        tempToken,
+        userId: user.id,
+        email: user.email,
+      };
+    }
+
     const tokens = await this.issueTokens(user, payload.ip, payload.userAgent);
     return this.toAuthResult(user, tokens);
+  }
+
+  async verify2faLogin(payload: Verify2faLoginPayload): Promise<AuthResult> {
+    let decoded: { sub?: string; type?: string };
+    try {
+      decoded = this.jwt.verify<{ sub?: string; type?: string }>(
+        payload.tempToken,
+        {
+          secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+        },
+      );
+    } catch {
+      return RpcErrors.unauthorized('2FA session expired or invalid');
+    }
+
+    if (decoded.type !== '2fa_pending' || !decoded.sub) {
+      return RpcErrors.unauthorized('2FA session expired or invalid');
+    }
+
+    const user = await this.users
+      .createQueryBuilder('user')
+      .addSelect('user.totpSecret')
+      .where('user.id = :id', { id: decoded.sub })
+      .getOne();
+
+    if (!user || !user.isActive) {
+      return RpcErrors.unauthorized('Account is not available');
+    }
+    if (!user.totpEnabled || !user.totpSecret) {
+      return RpcErrors.badRequest('2FA is not enabled for this account');
+    }
+    if (!verifyTotpCode(user.totpSecret, payload.code)) {
+      return RpcErrors.unauthorized('Invalid authenticator code');
+    }
+
+    const tokens = await this.issueTokens(user, payload.ip, payload.userAgent);
+    return this.toAuthResult(user, tokens);
+  }
+
+  async setup2fa(payload: Setup2faPayload): Promise<Setup2faResult> {
+    const user = await this.users.findOne({ where: { id: payload.userId } });
+    if (!user) {
+      return RpcErrors.notFound('User');
+    }
+    if (user.totpEnabled) {
+      return RpcErrors.conflict('Two-factor authentication is already enabled');
+    }
+
+    const secret = generateTotpSecret();
+    user.totpSecret = secret;
+    await this.users.save(user);
+
+    return {
+      secret,
+      otpauthUrl: buildOtpAuthUrl(secret, user.email),
+    };
+  }
+
+  async confirm2fa(
+    payload: Confirm2faPayload,
+  ): Promise<{ enabled: boolean }> {
+    const user = await this.users
+      .createQueryBuilder('user')
+      .addSelect('user.totpSecret')
+      .where('user.id = :id', { id: payload.userId })
+      .getOne();
+
+    if (!user) {
+      return RpcErrors.notFound('User');
+    }
+    if (!user.totpSecret) {
+      return RpcErrors.badRequest('Set up 2FA before confirming');
+    }
+    if (user.totpEnabled) {
+      return RpcErrors.conflict('Two-factor authentication is already enabled');
+    }
+    if (!verifyTotpCode(user.totpSecret, payload.code)) {
+      return RpcErrors.unauthorized('Invalid authenticator code');
+    }
+
+    user.totpEnabled = true;
+    await this.users.save(user);
+    return { enabled: true };
+  }
+
+  async disable2fa(
+    payload: Disable2faPayload,
+  ): Promise<{ disabled: boolean }> {
+    const user = await this.users
+      .createQueryBuilder('user')
+      .addSelect('user.password')
+      .addSelect('user.totpSecret')
+      .where('user.id = :id', { id: payload.userId })
+      .getOne();
+
+    if (!user) {
+      return RpcErrors.notFound('User');
+    }
+
+    if (!(await verifyPassword(payload.password, user.password))) {
+      return RpcErrors.unauthorized('Password is incorrect');
+    }
+
+    if (user.totpEnabled) {
+      if (
+        !payload.code ||
+        !user.totpSecret ||
+        !verifyTotpCode(user.totpSecret, payload.code)
+      ) {
+        return RpcErrors.unauthorized('Invalid authenticator code');
+      }
+    }
+
+    user.totpSecret = null;
+    user.totpEnabled = false;
+    await this.users.save(user);
+    return { disabled: true };
+  }
+
+  async listSessions(payload: ListSessionsPayload): Promise<SessionView[]> {
+    const tokens = await this.refreshTokens
+      .createQueryBuilder('token')
+      .where('token.userId = :userId', { userId: payload.userId })
+      .andWhere('token.revoked = false')
+      .andWhere('token.expiresAt > :now', { now: new Date() })
+      .orderBy('token.createdAt', 'DESC')
+      .getMany();
+
+    const currentHash = payload.currentRefreshToken
+      ? this.hashToken(payload.currentRefreshToken)
+      : null;
+
+    return tokens.map((token) => ({
+      id: token.id,
+      userAgent: token.userAgent,
+      ip: token.ip,
+      createdAt: token.createdAt.toISOString(),
+      expiresAt: token.expiresAt.toISOString(),
+      current: currentHash ? token.tokenHash === currentHash : false,
+    }));
+  }
+
+  async revokeSession(
+    payload: RevokeSessionPayload,
+  ): Promise<{ revoked: boolean }> {
+    const token = await this.refreshTokens.findOne({
+      where: { id: payload.sessionId, userId: payload.userId },
+    });
+    if (!token) {
+      return RpcErrors.notFound('Session');
+    }
+    if (!token.revoked) {
+      token.revoked = true;
+      await this.refreshTokens.save(token);
+    }
+    return { revoked: true };
+  }
+
+  async revokeOtherSessions(
+    payload: RevokeOtherSessionsPayload,
+  ): Promise<{ revoked: number }> {
+    const qb = this.refreshTokens
+      .createQueryBuilder()
+      .update(RefreshToken)
+      .set({ revoked: true })
+      .where('userId = :userId', { userId: payload.userId })
+      .andWhere('revoked = false');
+
+    if (payload.currentRefreshToken) {
+      qb.andWhere('tokenHash != :currentHash', {
+        currentHash: this.hashToken(payload.currentRefreshToken),
+      });
+    }
+
+    const result = await qb.execute();
+    return { revoked: result.affected ?? 0 };
   }
 
   async acceptInvite(payload: AcceptInvitePayload): Promise<AcceptInviteResult> {
@@ -187,7 +399,7 @@ export class AuthService implements OnModuleInit {
       await this.organizations.addMemberDirect({
         organizationId,
         userId: user.id,
-        role: 'member',
+        role: invite.inviteRole === 'guest' ? 'guest' : 'member',
       });
       await this.authTokens.consumeInvite(invite.id);
     }
@@ -195,11 +407,71 @@ export class AuthService implements OnModuleInit {
     const organizations = await this.organizations.listForUser({
       userId: user.id,
     });
+    const role: OrgMemberRole =
+      organizations.find((org) => org.id === organizationId)?.role ??
+      (invite.inviteRole === 'guest' ? 'guest' : 'member');
     return {
       organizationId,
       organizations,
       activeOrganizationId: organizationId,
       alreadyMember,
+      role,
+    };
+  }
+
+  /**
+   * Complete OIDC SSO: find-or-create user by email, ensure org membership, issue tokens.
+   */
+  async ssoComplete(payload: SsoCompletePayload): Promise<AuthResult> {
+    const email = payload.email.toLowerCase().trim();
+    if (!email || !email.includes('@')) {
+      return RpcErrors.badRequest('SSO email is required');
+    }
+
+    const org = await this.organizations.getSsoCredentials(
+      payload.organizationId,
+    );
+    if (!org.configured || !org.ssoEnabled) {
+      return RpcErrors.badRequest('SSO is not configured for this workspace');
+    }
+
+    let user = await this.users.findOne({ where: { email } });
+    if (!user) {
+      user = await this.users.save(
+        this.users.create({
+          email,
+          password: await hashPassword(randomBytes(32).toString('hex')),
+          role: UserRole.USER,
+          isActive: true,
+          isEmailVerified: payload.emailVerified !== false,
+        }),
+      );
+    }
+
+    if (!user.isActive) {
+      return RpcErrors.forbidden('This account has been deactivated');
+    }
+
+    if (payload.emailVerified !== false && !user.isEmailVerified) {
+      user.isEmailVerified = true;
+      await this.users.save(user);
+    }
+
+    await this.organizations.addMemberDirect({
+      organizationId: payload.organizationId,
+      userId: user.id,
+      role: 'member',
+    });
+
+    const tokens = await this.issueTokens(
+      user,
+      payload.ip,
+      payload.userAgent,
+    );
+    const authResult = await this.toAuthResult(user, tokens);
+    return {
+      ...authResult,
+      activeOrganizationId: payload.organizationId,
     };
   }
 
@@ -505,6 +777,7 @@ export class AuthService implements OnModuleInit {
       role: user.role,
       isActive: user.isActive,
       isEmailVerified: user.isEmailVerified,
+      totpEnabled: Boolean(user.totpEnabled),
       createdAt: user.createdAt.toISOString(),
       updatedAt: user.updatedAt.toISOString(),
     };

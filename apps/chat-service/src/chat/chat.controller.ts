@@ -3,19 +3,31 @@ import { MessagePattern, Payload } from '@nestjs/microservices';
 import { RpcErrors } from '@app/common';
 import { CHAT_PATTERNS } from '@app/contracts';
 import type {
+  AcceptChannelInvitePayload,
+  AddChannelBookmarkPayload,
   AddMembersPayload,
   BlockUserPayload,
   ConversationActorPayload,
+  CreateChannelInvitePayload,
   CreateGroupChatPayload,
   CreatePollPayload,
   CreatePrivateChatPayload,
+  CreateSidebarSectionPayload,
   DeleteMessagePayload,
+  DeleteSidebarSectionPayload,
   EditMessagePayload,
   ForwardMessagePayload,
+  JoinChannelPayload,
   ListBookmarksPayload,
   ListConversationsPayload,
   ListMessagesPayload,
   ListMediaPayload,
+  ListMessageEditsPayload,
+  ListMyThreadsPayload,
+  ListThreadRepliesPayload,
+  FollowThreadPayload,
+  UnfollowThreadPayload,
+  MarkThreadReadPayload,
   GetMessagePayload,
   MarkSeenPayload,
   MuteConversationPayload,
@@ -23,10 +35,15 @@ import type {
   PinMessagePayload,
   ReactMessagePayload,
   RemoveBookmarkPayload,
+  RemoveChannelBookmarkPayload,
   RemoveMemberPayload,
+  RevokeChannelInvitePayload,
   CancelScheduledMessagePayload,
   SaveBookmarkPayload,
   ScheduleMessagePayload,
+  UpsertDraftPayload,
+  CreateReminderPayload,
+  CancelReminderPayload,
   SearchMessagesPayload,
   GlobalSearchMessagesPayload,
   SendMessagePayload,
@@ -35,8 +52,21 @@ import type {
   ListAuditPayload,
   LogAuditPayload,
   UpdateGroupPayload,
+  UpdateSidebarSectionPayload,
   UpdateWorkspacePayload,
   VotePollPayload,
+  CreateIncomingWebhookPayload,
+  ListIncomingWebhooksPayload,
+  RevokeIncomingWebhookPayload,
+  PostIncomingWebhookPayload,
+  CreateSlashCommandPayload,
+  ListSlashCommandsPayload,
+  RevokeSlashCommandPayload,
+  InvokeSlashCommandPayload,
+  CreateUserGroupPayload,
+  ListUserGroupsPayload,
+  UpdateUserGroupPayload,
+  DeleteUserGroupPayload,
 } from '@app/contracts';
 import { runWithOrganization } from '@app/database';
 import { ChatService } from './chat.service';
@@ -130,6 +160,15 @@ export class ChatController {
     return this.withOrg(payload, () => this.chatService.editMessage(payload));
   }
 
+  @MessagePattern(CHAT_PATTERNS.LIST_MESSAGE_EDITS)
+  listMessageEdits(
+    @Payload() payload: ListMessageEditsPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listMessageEdits(payload),
+    );
+  }
+
   @MessagePattern(CHAT_PATTERNS.REACT_MESSAGE)
   reactMessage(@Payload() payload: ReactMessagePayload & TenantChatPayload) {
     return this.withOrg(payload, () => this.chatService.reactMessage(payload));
@@ -205,6 +244,54 @@ export class ChatController {
   dispatchDueScheduled() {
     // System job: processes due rows across all organizations.
     return this.chatService.dispatchDueScheduled();
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UPSERT_DRAFT)
+  upsertDraft(@Payload() payload: UpsertDraftPayload & TenantChatPayload) {
+    return this.withOrg(payload, () => this.chatService.upsertDraft(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.GET_DRAFT)
+  getDraft(@Payload() payload: ConversationActorPayload & TenantChatPayload) {
+    return this.withOrg(payload, () => this.chatService.getDraft(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CLEAR_DRAFT)
+  clearDraft(@Payload() payload: ConversationActorPayload & TenantChatPayload) {
+    return this.withOrg(payload, () => this.chatService.clearDraft(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_REMINDER)
+  createReminder(
+    @Payload() payload: CreateReminderPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.createReminder(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_REMINDERS)
+  listReminders(
+    @Payload() payload: { actorId: string } & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listReminders(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CANCEL_REMINDER)
+  cancelReminder(
+    @Payload() payload: CancelReminderPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.cancelReminder(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.DISPATCH_DUE_REMINDERS)
+  dispatchDueReminders() {
+    // System job: processes due reminders across all organizations.
+    return this.chatService.dispatchDueReminders();
   }
 
   @MessagePattern(CHAT_PATTERNS.FORWARD_MESSAGE)
@@ -292,6 +379,255 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.UPDATE_GROUP)
   updateGroup(@Payload() payload: UpdateGroupPayload & TenantChatPayload) {
     return this.withOrg(payload, () => this.chatService.updateGroup(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.ADD_CHANNEL_BOOKMARK)
+  addChannelBookmark(
+    @Payload() payload: AddChannelBookmarkPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.addChannelBookmark(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.REMOVE_CHANNEL_BOOKMARK)
+  removeChannelBookmark(
+    @Payload() payload: RemoveChannelBookmarkPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.removeChannelBookmark(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_SIDEBAR_SECTIONS)
+  listSidebarSections(
+    @Payload() payload: { actorId: string } & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listSidebarSections(payload.actorId),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_SIDEBAR_SECTION)
+  createSidebarSection(
+    @Payload() payload: CreateSidebarSectionPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.createSidebarSection(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UPDATE_SIDEBAR_SECTION)
+  updateSidebarSection(
+    @Payload() payload: UpdateSidebarSectionPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.updateSidebarSection(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.DELETE_SIDEBAR_SECTION)
+  deleteSidebarSection(
+    @Payload() payload: DeleteSidebarSectionPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.deleteSidebarSection(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_THREAD_REPLIES)
+  listThreadReplies(
+    @Payload() payload: ListThreadRepliesPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listThreadReplies(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_MY_THREADS)
+  listMyThreads(
+    @Payload() payload: ListMyThreadsPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () => this.chatService.listMyThreads(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.FOLLOW_THREAD)
+  followThread(
+    @Payload() payload: FollowThreadPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () => this.chatService.followThread(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UNFOLLOW_THREAD)
+  unfollowThread(
+    @Payload() payload: UnfollowThreadPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.unfollowThread(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.MARK_THREAD_READ)
+  markThreadRead(
+    @Payload() payload: MarkThreadReadPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.markThreadRead(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_PUBLIC_CHANNELS)
+  listPublicChannels(
+    @Payload() payload: { actorId: string } & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listPublicChannels(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.JOIN_CHANNEL)
+  joinChannel(@Payload() payload: JoinChannelPayload & TenantChatPayload) {
+    return this.withOrg(payload, () => this.chatService.joinChannel(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_CHANNEL_INVITE)
+  createChannelInvite(
+    @Payload() payload: CreateChannelInvitePayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.createChannelInvite(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.ACCEPT_CHANNEL_INVITE)
+  acceptChannelInvite(
+    @Payload() payload: AcceptChannelInvitePayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.acceptChannelInvite(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.REVOKE_CHANNEL_INVITE)
+  revokeChannelInvite(
+    @Payload() payload: RevokeChannelInvitePayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.revokeChannelInvite(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_CHANNEL_INVITES)
+  listChannelInvites(
+    @Payload() payload: ConversationActorPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listChannelInvites(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_INCOMING_WEBHOOK)
+  createIncomingWebhook(
+    @Payload() payload: CreateIncomingWebhookPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.createIncomingWebhook(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_INCOMING_WEBHOOKS)
+  listIncomingWebhooks(
+    @Payload() payload: ListIncomingWebhooksPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listIncomingWebhooks(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.REVOKE_INCOMING_WEBHOOK)
+  revokeIncomingWebhook(
+    @Payload() payload: RevokeIncomingWebhookPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.revokeIncomingWebhook(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.POST_INCOMING_WEBHOOK)
+  postIncomingWebhook(@Payload() payload: PostIncomingWebhookPayload) {
+    return this.chatService.postIncomingWebhook(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_SLASH_COMMANDS)
+  listSlashCommands(
+    @Payload() payload: ListSlashCommandsPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listSlashCommands(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_SLASH_COMMAND)
+  createSlashCommand(
+    @Payload() payload: CreateSlashCommandPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.createSlashCommand(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.REVOKE_SLASH_COMMAND)
+  revokeSlashCommand(
+    @Payload() payload: RevokeSlashCommandPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.revokeSlashCommand(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.INVOKE_SLASH_COMMAND)
+  invokeSlashCommand(
+    @Payload() payload: InvokeSlashCommandPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.invokeSlashCommand(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_USER_GROUPS)
+  listUserGroups(
+    @Payload() payload: ListUserGroupsPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listUserGroups(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_USER_GROUP)
+  createUserGroup(
+    @Payload() payload: CreateUserGroupPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.createUserGroup(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UPDATE_USER_GROUP)
+  updateUserGroup(
+    @Payload() payload: UpdateUserGroupPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.updateUserGroup(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.DELETE_USER_GROUP)
+  deleteUserGroup(
+    @Payload() payload: DeleteUserGroupPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.deleteUserGroup(payload),
+    );
   }
 
   @MessagePattern(CHAT_PATTERNS.DELETE_GROUP)

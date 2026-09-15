@@ -23,9 +23,30 @@ import { AddUndeliveredMessages1730000011000 } from './migrations/1730000011000-
 import { SharedTenantChatOrganizationId1742000000002 } from './migrations/1742000000002-SharedTenantChatOrganizationId';
 import { AddMessagePolls1743000000000 } from './migrations/1743000000000-AddMessagePolls';
 import { AddMessageBookmarks1743000001000 } from './migrations/1743000001000-AddMessageBookmarks';
+import { AddThreadsChannelsGovernance1743000002000 } from './migrations/1743000002000-AddThreadsChannelsGovernance';
+import { AddDraftsAndReminders1743000003000 } from './migrations/1743000003000-AddDraftsAndReminders';
+import { AddChannelTopicDescriptionBookmarks1743000004000 } from './migrations/1743000004000-AddChannelTopicDescriptionBookmarks';
+import { AddThreadFollows1743000005000 } from './migrations/1743000005000-AddThreadFollows';
+import { OpenReactionsAndCustomEmoji1743000006000 } from './migrations/1743000006000-OpenReactionsAndCustomEmoji';
+import { AddMessageEdits1743000007000 } from './migrations/1743000007000-AddMessageEdits';
+import { AddSidebarSections1743000008000 } from './migrations/1743000008000-AddSidebarSections';
+import { AddMessageSearchVector1743000010000 } from './migrations/1743000010000-AddMessageSearchVector';
+import { AddMentionsGinIndex1743000011000 } from './migrations/1743000011000-AddMentionsGinIndex';
+import { AddIncomingWebhooks1743000012000 } from './migrations/1743000012000-AddIncomingWebhooks';
+import { AddSlashCommands1743000013000 } from './migrations/1743000013000-AddSlashCommands';
+import { AddUserGroups1743000014000 } from './migrations/1743000014000-AddUserGroups';
 
 import { ScheduledMessage } from './entities/scheduled-message.entity';
 import { MessageBookmark } from './entities/message-bookmark.entity';
+import { ChannelInvite } from './entities/channel-invite.entity';
+import { MessageDraft } from './entities/message-draft.entity';
+import { MessageReminder } from './entities/message-reminder.entity';
+import { ThreadFollow } from './entities/thread-follow.entity';
+import { MessageEdit } from './entities/message-edit.entity';
+import { SidebarSection } from './entities/sidebar-section.entity';
+import { IncomingWebhook } from './entities/incoming-webhook.entity';
+import { SlashCommand } from './entities/slash-command.entity';
+import { UserGroup } from './entities/user-group.entity';
 
 config({
   path: [
@@ -52,6 +73,15 @@ export default new DataSource({
     WorkspaceSettings,
     ScheduledMessage,
     MessageBookmark,
+    ChannelInvite,
+    MessageDraft,
+    MessageReminder,
+    ThreadFollow,
+    MessageEdit,
+    SidebarSection,
+    IncomingWebhook,
+    SlashCommand,
+    UserGroup,
   ],
   migrations: [
     CreateChatSchema1730000000000,
@@ -68,6 +98,18 @@ export default new DataSource({
     SharedTenantChatOrganizationId1742000000002,
     AddMessagePolls1743000000000,
     AddMessageBookmarks1743000001000,
+    AddThreadsChannelsGovernance1743000002000,
+    AddDraftsAndReminders1743000003000,
+    AddChannelTopicDescriptionBookmarks1743000004000,
+    AddThreadFollows1743000005000,
+    OpenReactionsAndCustomEmoji1743000006000,
+    AddMessageEdits1743000007000,
+    AddSidebarSections1743000008000,
+    AddMessageSearchVector1743000010000,
+    AddMentionsGinIndex1743000011000,
+    AddIncomingWebhooks1743000012000,
+    AddSlashCommands1743000013000,
+    AddUserGroups1743000014000,
   ],
   synchronize: false,
 });

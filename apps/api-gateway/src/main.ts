@@ -53,7 +53,17 @@ async function bootstrap() {
   const logger = new Logger('ApiGateway');
 
   app.useLogger(app.get(PinoLogger));
-  app.use(express.json({ limit: '64kb' }));
+  app.use(
+    express.json({
+      limit: '64kb',
+      verify: (req, _res, buf) => {
+        const url = (req as { originalUrl?: string }).originalUrl ?? '';
+        if (url.includes('/billing/stripe/webhook')) {
+          (req as { rawBody?: Buffer }).rawBody = buf;
+        }
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: true, limit: '64kb' }));
   app.use(
     helmet({

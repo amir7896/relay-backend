@@ -24,6 +24,7 @@ export * from './dto/pagination-query.dto';
 export * from './utils/pagination.util';
 export * from './utils/duration.util';
 export * from './utils/hash.util';
+export * from './utils/message-search.util';
 export * from './middleware/request-id.middleware';
 export * from './config/env.validation';
 export * from './mail/mail.module';

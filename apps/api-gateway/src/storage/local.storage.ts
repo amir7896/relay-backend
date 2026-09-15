@@ -17,7 +17,11 @@ export class LocalStorage implements ObjectStorage {
   async upload(file: UploadInput): Promise<UploadResult> {
     const extension = extname(file.originalName).toLowerCase() || '.bin';
     const folder =
-      file.purpose === 'avatar' ? 'profilePictures' : '';
+      file.purpose === 'avatar'
+        ? 'profilePictures'
+        : file.purpose === 'emoji'
+          ? 'customEmojis'
+          : '';
     if (folder) {
       const dir = join(this.root, folder);
       if (!existsSync(dir)) {

@@ -165,4 +165,87 @@ export class AiService {
       poweredByAi: false,
     };
   }
+
+  async translateMessage(
+    actorId: string,
+    conversationId: string,
+    messageId: string,
+    targetLanguage = 'en',
+  ): Promise<{
+    translatedText: string;
+    detectedLanguage: string | null;
+    poweredByAi: boolean;
+  }> {
+    const message = await this.proxy.sendChat<MessageView>(
+      CHAT_PATTERNS.GET_MESSAGE,
+      { actorId, conversationId, messageId },
+    );
+    const text = message.body?.trim() ?? '';
+    if (!text || message.deletedForEveryone) {
+      return {
+        translatedText: '',
+        detectedLanguage: null,
+        poweredByAi: false,
+      };
+    }
+
+    const lang = (targetLanguage || 'en').trim().slice(0, 16) || 'en';
+    const apiKey = this.config.get<string>('OPENAI_API_KEY')?.trim();
+    if (apiKey) {
+      try {
+        const response = await fetch(
+          'https://api.openai.com/v1/chat/completions',
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: this.config.get<string>('OPENAI_MODEL', 'gpt-4o-mini'),
+              temperature: 0.2,
+              messages: [
+                {
+                  role: 'system',
+                  content: `Translate the user message into language code "${lang}". Return JSON only: {"translatedText":"...","detectedLanguage":"xx"}. Keep meaning; do not add commentary.`,
+                },
+                { role: 'user', content: text.slice(0, 4000) },
+              ],
+            }),
+          },
+        );
+        if (response.ok) {
+          const payload = (await response.json()) as {
+            choices?: { message?: { content?: string } }[];
+          };
+          const raw = payload.choices?.[0]?.message?.content?.trim() ?? '';
+          const jsonMatch = raw.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]) as {
+              translatedText?: unknown;
+              detectedLanguage?: unknown;
+            };
+            if (typeof parsed.translatedText === 'string' && parsed.translatedText.trim()) {
+              return {
+                translatedText: parsed.translatedText.trim(),
+                detectedLanguage:
+                  typeof parsed.detectedLanguage === 'string'
+                    ? parsed.detectedLanguage
+                    : null,
+                poweredByAi: true,
+              };
+            }
+          }
+        }
+      } catch {
+        // fall through
+      }
+    }
+
+    return {
+      translatedText: `[${lang}] ${text}`,
+      detectedLanguage: null,
+      poweredByAi: false,
+    };
+  }
 }

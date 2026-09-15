@@ -13,12 +13,18 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
+  ValidateBy,
   ValidateIf,
 } from 'class-validator';
-import { ALLOWED_REACTIONS, ConversationMemberRole, MessageType } from '@app/common';
+import {
+  ConversationMemberRole,
+  MessageType,
+  isValidReactionEmoji,
+} from '@app/common';
 
 export class CreatePrivateChatDto {
   @ApiProperty({
@@ -47,6 +53,23 @@ export class CreateGroupChatDto {
   @ArrayMaxSize(49)
   @IsUUID('4', { each: true })
   memberIds!: string[];
+
+  @ApiPropertyOptional({
+    enum: ['public', 'private'],
+    default: 'private',
+    description: 'Public channels are browsable/joinable by org members',
+  })
+  @IsOptional()
+  @IsIn(['public', 'private'])
+  visibility?: 'public' | 'private';
+
+  @ApiPropertyOptional({
+    default: false,
+    description: 'When true, only owners/admins can post',
+  })
+  @IsOptional()
+  @IsBoolean()
+  announceOnly?: boolean;
 }
 
 export class SendMessageDto {
@@ -69,6 +92,22 @@ export class SendMessageDto {
   @IsOptional()
   @IsUUID('4')
   replyToMessageId?: string;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'Post into a Slack-style thread under this root message',
+  })
+  @IsOptional()
+  @IsUUID('4')
+  threadRootId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'When replying in a thread, also post a copy to the main channel',
+  })
+  @IsOptional()
+  @IsBoolean()
+  alsoSendToChannel?: boolean;
 
   @ApiPropertyOptional({
     example: '/uploads/abc.jpg',
@@ -129,9 +168,20 @@ export class EditMessageDto {
 }
 
 export class ReactMessageDto {
-  @ApiProperty({ example: '👍', enum: ALLOWED_REACTIONS })
+  @ApiProperty({
+    example: '👍',
+    description: 'Unicode emoji or workspace :shortcode:',
+  })
   @IsString()
-  @IsIn([...ALLOWED_REACTIONS])
+  @MaxLength(64)
+  @ValidateBy({
+    name: 'isReactionEmoji',
+    validator: {
+      validate: (value: unknown) =>
+        typeof value === 'string' && isValidReactionEmoji(value),
+      defaultMessage: () => 'Unsupported reaction emoji',
+    },
+  })
   emoji!: string;
 }
 
@@ -182,6 +232,57 @@ export class ScheduleMessageDto extends SendMessageDto {
   })
   @IsDateString()
   scheduledFor!: string;
+}
+
+export class UpsertDraftDto {
+  @ApiProperty({ example: 'Draft text…', maxLength: 4000 })
+  @IsString()
+  @MaxLength(4000)
+  body!: string;
+}
+
+export class UpdateNotificationPrefsDto {
+  @ApiPropertyOptional({ enum: ['all', 'mentions', 'none'] })
+  @IsOptional()
+  @IsIn(['all', 'mentions', 'none'])
+  mode?: 'all' | 'mentions' | 'none';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  quietHoursEnabled?: boolean;
+
+  @ApiPropertyOptional({ example: '22:00' })
+  @IsOptional()
+  @Matches(/^\d{2}:\d{2}$/)
+  quietStart?: string;
+
+  @ApiPropertyOptional({ example: '08:00' })
+  @IsOptional()
+  @Matches(/^\d{2}:\d{2}$/)
+  quietEnd?: string;
+
+  @ApiPropertyOptional({ example: 'Asia/Karachi' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  timezone?: string;
+
+  @ApiPropertyOptional({
+    description: 'Suppress message push when Away / Busy / DND is set',
+  })
+  @IsOptional()
+  @IsBoolean()
+  respectStatus?: boolean;
+}
+
+export class CreateReminderDto {
+  @ApiProperty({
+    example: '2026-09-12T18:30:00.000Z',
+    description: 'ISO timestamp when to remind (min 1 minute, max 30 days)',
+  })
+  @IsDateString()
+  remindAt!: string;
 }
 
 export class DeleteMessageDto {
@@ -237,11 +338,92 @@ export class AddMembersDto {
 }
 
 export class UpdateGroupDto {
-  @ApiProperty({ example: 'Project Alpha' })
+  @ApiPropertyOptional({ example: 'Project Alpha' })
+  @ValidateIf(
+    (dto: UpdateGroupDto) =>
+      dto.name !== undefined ||
+      (dto.visibility === undefined &&
+        dto.announceOnly === undefined &&
+        dto.topic === undefined &&
+        dto.description === undefined),
+  )
   @IsString()
   @IsNotEmpty()
   @MaxLength(120)
-  name!: string;
+  name?: string;
+
+  @ApiPropertyOptional({ enum: ['public', 'private'] })
+  @IsOptional()
+  @IsIn(['public', 'private'])
+  visibility?: 'public' | 'private';
+
+  @ApiPropertyOptional({
+    description: 'When true, only owners/admins can post',
+  })
+  @IsOptional()
+  @IsBoolean()
+  announceOnly?: boolean;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    maxLength: 250,
+    description: 'Short channel topic shown under the channel name',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(250)
+  topic?: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    maxLength: 2000,
+    description: 'Longer channel purpose / description',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  description?: string | null;
+}
+
+export class AddChannelBookmarkDto {
+  @ApiProperty({ example: 'Design docs' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  title!: string;
+
+  @ApiProperty({ example: 'https://example.com/docs' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(2000)
+  @Matches(/^https?:\/\//i, {
+    message: 'url must start with http:// or https://',
+  })
+  url!: string;
+}
+
+export class CreateChannelInviteDto {
+  @ApiPropertyOptional({
+    example: 72,
+    description: 'Hours until the invite expires',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(8760)
+  expiresInHours?: number;
+
+  @ApiPropertyOptional({
+    example: 25,
+    description: 'Maximum number of successful accepts',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  maxUses?: number;
 }
 
 export class CreatePollDto {
@@ -314,4 +496,169 @@ export class ListMediaQueryDto extends ChatPageQueryDto {
   @IsOptional()
   @IsIn(['all', 'image', 'file', 'audio'])
   kind: 'all' | 'image' | 'file' | 'audio' = 'all';
+}
+
+export class CreateSidebarSectionDto {
+  @ApiProperty({ example: 'Design' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  name!: string;
+}
+
+export class UpdateSidebarSectionDto {
+  @ApiPropertyOptional({ example: 'Design' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  name?: string;
+
+  @ApiPropertyOptional({ example: false })
+  @IsOptional()
+  @IsBoolean()
+  collapsed?: boolean;
+
+  @ApiPropertyOptional({ example: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @IsUUID('4', { each: true })
+  conversationIds?: string[];
+}
+
+export class CreateIncomingWebhookDto {
+  @ApiProperty({ example: 'CI Deployments' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  name!: string;
+
+  @ApiPropertyOptional({ example: 'GitHub' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  defaultUsername?: string;
+
+  @ApiPropertyOptional({ example: 'https://cdn.example.com/bot.png' })
+  @IsOptional()
+  @ValidateIf((_, value) => value != null && value !== '')
+  @IsString()
+  @MaxLength(500)
+  @Matches(/^https?:\/\//i, {
+    message: 'defaultIconUrl must start with http:// or https://',
+  })
+  defaultIconUrl?: string;
+}
+
+export class PostIncomingWebhookDto {
+  @ApiProperty({ example: 'Build #42 succeeded' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(4000)
+  text!: string;
+
+  @ApiPropertyOptional({ example: 'CI Bot' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  username?: string;
+}
+
+export class CreateSlashCommandDto {
+  @ApiProperty({ example: 'deploy' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(32)
+  @Matches(/^[a-zA-Z][a-zA-Z0-9_]{0,31}$/, {
+    message:
+      'name must start with a letter and use only letters, numbers, underscore',
+  })
+  name!: string;
+
+  @ApiProperty({ example: 'Announce a deployment' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(160)
+  description!: string;
+
+  @ApiProperty({
+    example: 'Deploying: {text}',
+    description: 'Supports {text} and {user} placeholders',
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(2000)
+  responseTemplate!: string;
+}
+
+export class InvokeSlashCommandDto {
+  @ApiProperty({ example: '/shrug almost Friday' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(4000)
+  raw!: string;
+}
+
+export class CreateUserGroupDto {
+  @ApiProperty({ example: 'eng' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(32)
+  @Matches(/^[a-zA-Z][a-zA-Z0-9_]{0,31}$/, {
+    message:
+      'name must start with a letter and use only letters, numbers, underscore',
+  })
+  name!: string;
+
+  @ApiProperty({ example: 'Engineering' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  displayName!: string;
+
+  @ApiPropertyOptional({ example: 'Backend and frontend engineers' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(240)
+  description?: string;
+
+  @ApiProperty({ type: [String], format: 'uuid' })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(200)
+  @IsUUID('4', { each: true })
+  memberIds!: string[];
+}
+
+export class UpdateUserGroupDto {
+  @ApiPropertyOptional({ example: 'Engineering' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  displayName?: string;
+
+  @ApiPropertyOptional({ example: 'Backend and frontend engineers' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(240)
+  description?: string | null;
+
+  @ApiPropertyOptional({ type: [String], format: 'uuid' })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(200)
+  @IsUUID('4', { each: true })
+  memberIds?: string[];
 }

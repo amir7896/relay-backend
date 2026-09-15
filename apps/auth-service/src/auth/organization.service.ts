@@ -1,25 +1,36 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import Stripe from 'stripe';
 import { RpcErrors, UserRole } from '@app/common';
 import type {
   AddOrgMemberPayload,
+  ApplyStripeSubscriptionPayload,
+  BillingCheckoutResult,
+  BillingPortalResult,
+  CreateBillingCheckoutPayload,
+  CreateBillingPortalPayload,
   CreateOrganizationPayload,
   DeleteOrganizationPayload,
   DeleteOrganizationResult,
   EnsureDefaultOrganizationPayload,
   GetOrganizationPayload,
+  HandleStripeWebhookPayload,
   LeaveOrganizationPayload,
   LeaveOrganizationResult,
   ListOrganizationsPayload,
   ListOrgMembersPayload,
   OrgMemberView,
+  OrgSsoView,
   OrganizationView,
   RemoveOrgMemberPayload,
   ResolveTenantPayload,
   SetOrgMemberRolePayload,
   TransferOwnershipPayload,
+  UpdateOrgBillingPayload,
   UpdateOrganizationPayload,
+  UpdateOrgSsoPayload,
 } from '@app/contracts';
 import { Organization } from '../database/entities/organization.entity';
 import {
@@ -31,6 +42,12 @@ import {
   AuthToken,
   AuthTokenType,
 } from '../database/entities/auth-token.entity';
+
+const PLAN_DEFAULT_SEATS: Record<'free' | 'pro' | 'enterprise', number> = {
+  free: 25,
+  pro: 100,
+  enterprise: 1000,
+};
 
 @Injectable()
 export class OrganizationService {
@@ -45,6 +62,7 @@ export class OrganizationService {
     private readonly users: Repository<AuthUser>,
     @InjectRepository(AuthToken)
     private readonly tokens: Repository<AuthToken>,
+    private readonly config: ConfigService,
   ) {}
 
   async ensureDefaultOrganization(
@@ -136,9 +154,10 @@ export class OrganizationService {
       relations: { organization: true },
       order: { createdAt: 'ASC' },
     });
-    return rows
-      .filter((row) => row.organization?.status === 'active')
-      .map((row) => this.toView(row.organization, row.role));
+    const active = rows.filter((row) => row.organization?.status === 'active');
+    return Promise.all(
+      active.map((row) => this.toView(row.organization, row.role)),
+    );
   }
 
   async getForUser(
@@ -155,6 +174,34 @@ export class OrganizationService {
       return RpcErrors.notFound('Organization');
     }
     return this.toView(membership.organization, membership.role);
+  }
+
+  async assertSeatAvailable(
+    organizationId: string,
+    options?: { role?: OrgMemberRole },
+  ): Promise<void> {
+    // Guests do not consume billed seats.
+    if (options?.role === 'guest') {
+      return;
+    }
+    const org = await this.organizations.findOne({
+      where: { id: organizationId },
+    });
+    if (!org) {
+      return RpcErrors.notFound('Organization');
+    }
+    const seatCount = await this.members.count({
+      where: [
+        { organizationId, role: 'owner' },
+        { organizationId, role: 'admin' },
+        { organizationId, role: 'member' },
+      ],
+    });
+    if (seatCount >= org.maxSeats) {
+      return RpcErrors.conflict(
+        `This workspace has reached its seat limit (${org.maxSeats}). Upgrade your plan to add more members.`,
+      );
+    }
   }
 
   async resolveTenant(
@@ -195,6 +242,9 @@ export class OrganizationService {
     if (existing) {
       return { ok: true };
     }
+    await this.assertSeatAvailable(input.organizationId, {
+      role: input.role ?? 'member',
+    });
     await this.members.save(
       this.members.create({
         organizationId: input.organizationId,
@@ -376,6 +426,13 @@ export class OrganizationService {
     if (member.role === 'owner') {
       return RpcErrors.forbidden('Use transfer ownership to change the owner');
     }
+    const becomingBillable =
+      payload.role !== 'guest' && member.role === 'guest';
+    if (becomingBillable) {
+      await this.assertSeatAvailable(payload.organizationId, {
+        role: payload.role,
+      });
+    }
     member.role = payload.role;
     const saved = await this.members.save(member);
     return {
@@ -476,6 +533,446 @@ export class OrganizationService {
     return this.toView(actor.organization, 'admin');
   }
 
+  async updateBilling(
+    payload: UpdateOrgBillingPayload,
+  ): Promise<OrganizationView> {
+    const membership = await this.members.findOne({
+      where: {
+        organizationId: payload.organizationId,
+        userId: payload.actorId,
+      },
+    });
+    if (!membership || membership.role !== 'owner') {
+      return RpcErrors.forbidden('Only the workspace owner can update billing');
+    }
+    const org = await this.organizations.findOne({
+      where: { id: payload.organizationId },
+    });
+    if (!org) {
+      return RpcErrors.notFound('Organization');
+    }
+
+    if (payload.plan) {
+      org.plan = payload.plan;
+      if (payload.maxSeats === undefined) {
+        org.maxSeats = PLAN_DEFAULT_SEATS[payload.plan];
+      }
+    }
+    if (payload.maxSeats !== undefined) {
+      if (payload.maxSeats < 1) {
+        return RpcErrors.badRequest('maxSeats must be at least 1');
+      }
+      org.maxSeats = payload.maxSeats;
+    }
+
+    const saved = await this.organizations.save(org);
+    return this.toView(saved, membership.role);
+  }
+
+  async createCheckoutSession(
+    payload: CreateBillingCheckoutPayload,
+  ): Promise<BillingCheckoutResult> {
+    const membership = await this.members.findOne({
+      where: {
+        organizationId: payload.organizationId,
+        userId: payload.actorId,
+      },
+    });
+    if (!membership || membership.role !== 'owner') {
+      return RpcErrors.forbidden(
+        'Only the workspace owner can manage billing',
+      );
+    }
+
+    const secretKey = this.config.get<string>('STRIPE_SECRET_KEY')?.trim();
+    const pricePro = this.config.get<string>('STRIPE_PRICE_PRO')?.trim();
+    const priceEnterprise = this.config
+      .get<string>('STRIPE_PRICE_ENTERPRISE')
+      ?.trim();
+    if (!secretKey || !pricePro || !priceEnterprise) {
+      return RpcErrors.serviceUnavailable(
+        'Stripe billing is not configured. Set STRIPE_SECRET_KEY, STRIPE_PRICE_PRO, and STRIPE_PRICE_ENTERPRISE.',
+      );
+    }
+
+    const priceId = payload.plan === 'pro' ? pricePro : priceEnterprise;
+    const org = await this.organizations.findOne({
+      where: { id: payload.organizationId },
+    });
+    if (!org) {
+      return RpcErrors.notFound('Organization');
+    }
+
+    const actor = await this.users.findOne({
+      where: { id: payload.actorId },
+      select: { id: true, email: true },
+    });
+    const stripe = new Stripe(secretKey);
+
+    let customerId = org.stripeCustomerId;
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: actor?.email,
+        name: org.name,
+        metadata: {
+          organizationId: org.id,
+        },
+      });
+      customerId = customer.id;
+      org.stripeCustomerId = customerId;
+      await this.organizations.save(org);
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      customer: customerId,
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: payload.successUrl,
+      cancel_url: payload.cancelUrl,
+      metadata: {
+        organizationId: org.id,
+        plan: payload.plan,
+      },
+      subscription_data: {
+        metadata: {
+          organizationId: org.id,
+          plan: payload.plan,
+        },
+      },
+    });
+
+    if (!session.url) {
+      return RpcErrors.internal('Stripe did not return a checkout URL');
+    }
+    return { url: session.url };
+  }
+
+  async createBillingPortalSession(
+    payload: CreateBillingPortalPayload,
+  ): Promise<BillingPortalResult> {
+    const membership = await this.members.findOne({
+      where: {
+        organizationId: payload.organizationId,
+        userId: payload.actorId,
+      },
+    });
+    if (!membership || membership.role !== 'owner') {
+      return RpcErrors.forbidden(
+        'Only the workspace owner can manage billing',
+      );
+    }
+
+    const secretKey = this.config.get<string>('STRIPE_SECRET_KEY')?.trim();
+    if (!secretKey) {
+      return RpcErrors.serviceUnavailable(
+        'Stripe billing is not configured. Set STRIPE_SECRET_KEY.',
+      );
+    }
+
+    const org = await this.organizations.findOne({
+      where: { id: payload.organizationId },
+    });
+    if (!org) {
+      return RpcErrors.notFound('Organization');
+    }
+    if (!org.stripeCustomerId) {
+      return RpcErrors.badRequest(
+        'No Stripe customer yet. Upgrade with Checkout first.',
+      );
+    }
+
+    const stripe = new Stripe(secretKey);
+    const session = await stripe.billingPortal.sessions.create({
+      customer: org.stripeCustomerId,
+      return_url: payload.returnUrl,
+    });
+    if (!session.url) {
+      return RpcErrors.internal('Stripe did not return a portal URL');
+    }
+    return { url: session.url };
+  }
+
+  async applyStripeSubscription(
+    payload: ApplyStripeSubscriptionPayload,
+  ): Promise<{ updated: boolean }> {
+    const org = await this.organizations.findOne({
+      where: { stripeCustomerId: payload.customerId },
+    });
+    if (!org) {
+      this.logger.warn(
+        `Stripe subscription update for unknown customer ${payload.customerId}`,
+      );
+      return { updated: false };
+    }
+
+    const canceled =
+      payload.status === 'canceled' ||
+      payload.status === 'unpaid' ||
+      !payload.subscriptionId;
+
+    if (canceled) {
+      org.stripeSubscriptionId = null;
+      org.stripePriceId = null;
+      org.plan = 'free';
+      org.maxSeats = PLAN_DEFAULT_SEATS.free;
+      await this.organizations.save(org);
+      return { updated: true };
+    }
+
+    org.stripeSubscriptionId = payload.subscriptionId;
+    org.stripePriceId = payload.priceId;
+
+    const pricePro = this.config.get<string>('STRIPE_PRICE_PRO')?.trim();
+    const priceEnterprise = this.config
+      .get<string>('STRIPE_PRICE_ENTERPRISE')
+      ?.trim();
+    let plan: 'pro' | 'enterprise' | 'free' = org.plan;
+    if (payload.priceId && pricePro && payload.priceId === pricePro) {
+      plan = 'pro';
+    } else if (
+      payload.priceId &&
+      priceEnterprise &&
+      payload.priceId === priceEnterprise
+    ) {
+      plan = 'enterprise';
+    } else if (payload.status === 'active' || payload.status === 'trialing') {
+      // Keep existing plan if price mapping unknown; default to pro seats
+      if (org.plan === 'free') {
+        plan = 'pro';
+      }
+    }
+    org.plan = plan;
+    org.maxSeats = PLAN_DEFAULT_SEATS[plan];
+    await this.organizations.save(org);
+    return { updated: true };
+  }
+
+  async handleStripeWebhook(
+    payload: HandleStripeWebhookPayload,
+  ): Promise<{ received: true; handled: boolean }> {
+    const secretKey = this.config.get<string>('STRIPE_SECRET_KEY')?.trim();
+    const webhookSecret = this.config
+      .get<string>('STRIPE_WEBHOOK_SECRET')
+      ?.trim();
+
+    let type = payload.type;
+    let dataObject: Record<string, unknown> | undefined =
+      (payload.data?.object as Record<string, unknown> | undefined) ??
+      (payload.data as Record<string, unknown> | undefined);
+
+    if (webhookSecret) {
+      if (!secretKey) {
+        return RpcErrors.serviceUnavailable(
+          'STRIPE_SECRET_KEY is required when STRIPE_WEBHOOK_SECRET is set',
+        );
+      }
+      if (!payload.rawBody || !payload.signature) {
+        return RpcErrors.badRequest(
+          'Stripe webhook requires raw body and stripe-signature header',
+        );
+      }
+      const stripe = new Stripe(secretKey);
+      let event: Stripe.Event;
+      try {
+        event = stripe.webhooks.constructEvent(
+          payload.rawBody,
+          payload.signature,
+          webhookSecret,
+        );
+      } catch (error) {
+        return RpcErrors.badRequest(
+          error instanceof Error
+            ? error.message
+            : 'Invalid Stripe webhook signature',
+        );
+      }
+      type = event.type;
+      dataObject = event.data.object as unknown as Record<string, unknown>;
+    } else if (!type || !dataObject) {
+      return RpcErrors.badRequest(
+        'Dev webhook requires type and data (or set STRIPE_WEBHOOK_SECRET)',
+      );
+    }
+
+    const handled = await this.applyStripeEvent(type!, dataObject!);
+    return { received: true, handled };
+  }
+
+  private async applyStripeEvent(
+    type: string,
+    dataObject: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (
+      type === 'customer.subscription.created' ||
+      type === 'customer.subscription.updated' ||
+      type === 'customer.subscription.deleted'
+    ) {
+      const customerId =
+        typeof dataObject.customer === 'string'
+          ? dataObject.customer
+          : undefined;
+      const subscriptionId =
+        typeof dataObject.id === 'string' ? dataObject.id : null;
+      const status =
+        typeof dataObject.status === 'string' ? dataObject.status : 'canceled';
+      const items = dataObject.items as
+        | { data?: Array<{ price?: { id?: string } }> }
+        | undefined;
+      const priceId = items?.data?.[0]?.price?.id ?? null;
+      if (!customerId) {
+        return false;
+      }
+      const result = await this.applyStripeSubscription({
+        customerId,
+        subscriptionId:
+          type === 'customer.subscription.deleted' ? null : subscriptionId,
+        priceId,
+        status:
+          type === 'customer.subscription.deleted' ? 'canceled' : status,
+      });
+      return result.updated;
+    }
+
+    if (type === 'checkout.session.completed') {
+      const customerId =
+        typeof dataObject.customer === 'string'
+          ? dataObject.customer
+          : undefined;
+      const subscriptionId =
+        typeof dataObject.subscription === 'string'
+          ? dataObject.subscription
+          : null;
+      const metadata = dataObject.metadata as
+        | { organizationId?: string; plan?: string }
+        | undefined;
+      const secretKey = this.config.get<string>('STRIPE_SECRET_KEY')?.trim();
+      if (customerId && subscriptionId && secretKey) {
+        const stripe = new Stripe(secretKey);
+        const subscription =
+          await stripe.subscriptions.retrieve(subscriptionId);
+        const priceId = subscription.items.data[0]?.price?.id ?? null;
+        const result = await this.applyStripeSubscription({
+          customerId,
+          subscriptionId: subscription.id,
+          priceId,
+          status: subscription.status,
+        });
+        return result.updated;
+      }
+      if (customerId) {
+        const planHint =
+          metadata?.plan === 'enterprise'
+            ? this.config.get<string>('STRIPE_PRICE_ENTERPRISE')
+            : this.config.get<string>('STRIPE_PRICE_PRO');
+        const result = await this.applyStripeSubscription({
+          customerId,
+          subscriptionId,
+          priceId: planHint?.trim() || null,
+          status: 'active',
+        });
+        return result.updated;
+      }
+      return false;
+    }
+
+    return false;
+  }
+
+  async updateSso(payload: UpdateOrgSsoPayload): Promise<OrgSsoView> {
+    await this.requireOrgAdmin({
+      organizationId: payload.organizationId,
+      userId: payload.actorId,
+    });
+    const org = await this.organizations.findOne({
+      where: { id: payload.organizationId },
+    });
+    if (!org) {
+      return RpcErrors.notFound('Organization');
+    }
+
+    const plan = org.plan ?? 'free';
+    if (payload.ssoEnabled && plan !== 'pro' && plan !== 'enterprise') {
+      return RpcErrors.forbidden(
+        'SSO requires a Pro or Enterprise plan. Upgrade billing to enable SSO.',
+      );
+    }
+
+    org.ssoEnabled = payload.ssoEnabled;
+    if (payload.ssoProvider !== undefined) {
+      org.ssoProvider = payload.ssoProvider;
+    }
+    if (payload.ssoIssuerUrl !== undefined) {
+      org.ssoIssuerUrl = payload.ssoIssuerUrl?.trim() || null;
+    }
+    if (payload.ssoClientId !== undefined) {
+      org.ssoClientId = payload.ssoClientId?.trim() || null;
+    }
+    if (payload.ssoClientSecret !== undefined) {
+      org.ssoClientSecret = payload.ssoClientSecret?.trim() || null;
+    }
+
+    const saved = await this.organizations.save(org);
+    return this.toSsoView(saved);
+  }
+
+  async getSso(input: {
+    organizationId: string;
+    userId: string;
+  }): Promise<OrgSsoView> {
+    await this.getForUser({
+      organizationId: input.organizationId,
+      userId: input.userId,
+    });
+    const org = await this.organizations
+      .createQueryBuilder('org')
+      .addSelect('org.ssoClientSecret')
+      .where('org.id = :id', { id: input.organizationId })
+      .getOne();
+    if (!org) {
+      return RpcErrors.notFound('Organization');
+    }
+    return this.toSsoView(org);
+  }
+
+  /** Public/gateway: load OIDC credentials by organization id (no user auth). */
+  async getSsoCredentials(organizationId: string) {
+    const org = await this.organizations
+      .createQueryBuilder('org')
+      .addSelect('org.ssoClientSecret')
+      .where('org.id = :id', { id: organizationId })
+      .getOne();
+    if (!org) {
+      return RpcErrors.notFound('Organization');
+    }
+    const view = this.toSsoView(org);
+    return {
+      ...view,
+      ssoClientSecret: org.ssoClientSecret ?? null,
+      slug: org.slug,
+      name: org.name,
+    };
+  }
+
+  /** Resolve org by slug for login SSO picker. */
+  async getSsoCredentialsBySlug(slug: string) {
+    const normalized = this.normalizeSlug(slug);
+    const org = await this.organizations
+      .createQueryBuilder('org')
+      .addSelect('org.ssoClientSecret')
+      .where('org.slug = :slug', { slug: normalized })
+      .getOne();
+    if (!org) {
+      return RpcErrors.notFound('Organization');
+    }
+    const view = this.toSsoView(org);
+    return {
+      ...view,
+      ssoClientSecret: org.ssoClientSecret ?? null,
+      slug: org.slug,
+      name: org.name,
+    };
+  }
+
   private normalizeSlug(input: string): string {
     const slug = input
       .toLowerCase()
@@ -489,10 +986,39 @@ export class OrganizationService {
     return slug;
   }
 
-  private toView(
+  private toSsoView(org: Organization): OrgSsoView {
+    const hasClientSecret = Boolean(org.ssoClientSecret);
+    const plan = (org.plan ?? 'free') as 'free' | 'pro' | 'enterprise';
+    const paidPlan = plan === 'pro' || plan === 'enterprise';
+    return {
+      organizationId: org.id,
+      ssoEnabled: Boolean(org.ssoEnabled),
+      ssoProvider: org.ssoProvider ?? null,
+      ssoIssuerUrl: org.ssoIssuerUrl ?? null,
+      ssoClientId: org.ssoClientId ?? null,
+      hasClientSecret,
+      plan,
+      configured:
+        paidPlan &&
+        Boolean(org.ssoEnabled) &&
+        org.ssoProvider === 'oidc' &&
+        Boolean(org.ssoIssuerUrl) &&
+        Boolean(org.ssoClientId) &&
+        hasClientSecret,
+    };
+  }
+
+  private async toView(
     org: Organization,
     role?: OrgMemberRole,
-  ): OrganizationView {
+  ): Promise<OrganizationView> {
+    const seatCount = await this.members.count({
+      where: [
+        { organizationId: org.id, role: 'owner' },
+        { organizationId: org.id, role: 'admin' },
+        { organizationId: org.id, role: 'member' },
+      ],
+    });
     return {
       id: org.id,
       slug: org.slug,
@@ -500,6 +1026,10 @@ export class OrganizationService {
       status: org.status,
       isDefault: org.isDefault,
       role,
+      plan: org.plan ?? 'free',
+      maxSeats: org.maxSeats ?? 25,
+      seatCount,
+      ssoEnabled: Boolean(org.ssoEnabled),
       createdAt: org.createdAt.toISOString(),
       updatedAt: org.updatedAt.toISOString(),
     };

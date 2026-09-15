@@ -42,6 +42,8 @@ export interface CreateInvitePayload {
   email?: string;
   expiresInDays?: number;
   maxUses?: number;
+  /** Full member (default) or guest with limited channel access. */
+  role?: 'member' | 'guest';
 }
 
 export interface InviteView {
@@ -56,6 +58,7 @@ export interface InviteView {
   revokedAt: string | null;
   createdAt: string;
   createdByUserId: string | null;
+  role?: 'member' | 'guest';
   /** Raw token only returned when the invite is created */
   token?: string;
   /** Present when SMTP is off or for local testing (copy/paste) */
@@ -125,6 +128,7 @@ export interface AuthUserView {
   role: UserRole;
   isActive: boolean;
   isEmailVerified: boolean;
+  totpEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -142,4 +146,65 @@ export interface AuthResult {
   organizations: import('./organization.contracts').OrganizationView[];
   /** Suggested active org (first membership / default). */
   activeOrganizationId: string | null;
+}
+
+/** Returned when password is correct but TOTP is required */
+export interface AuthResultRequires2fa {
+  requires2fa: true;
+  tempToken: string;
+  userId: string;
+  email: string;
+}
+
+export type LoginResult = AuthResult | AuthResultRequires2fa;
+
+export interface Verify2faLoginPayload {
+  tempToken: string;
+  code: string;
+  ip?: string;
+  userAgent?: string;
+}
+
+export interface Setup2faPayload {
+  userId: string;
+}
+
+export interface Setup2faResult {
+  secret: string;
+  otpauthUrl: string;
+}
+
+export interface Confirm2faPayload {
+  userId: string;
+  code: string;
+}
+
+export interface Disable2faPayload {
+  userId: string;
+  password: string;
+  code?: string;
+}
+
+export interface SessionView {
+  id: string;
+  userAgent: string | null;
+  ip: string | null;
+  createdAt: string;
+  expiresAt: string;
+  current: boolean;
+}
+
+export interface ListSessionsPayload {
+  userId: string;
+  currentRefreshToken?: string;
+}
+
+export interface RevokeSessionPayload {
+  userId: string;
+  sessionId: string;
+}
+
+export interface RevokeOtherSessionsPayload {
+  userId: string;
+  currentRefreshToken?: string;
 }

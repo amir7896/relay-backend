@@ -10,6 +10,15 @@ import { AuditEvent } from '../database/entities/audit-event.entity';
 import { WorkspaceSettings } from '../database/entities/workspace-settings.entity';
 import { ScheduledMessage } from '../database/entities/scheduled-message.entity';
 import { MessageBookmark } from '../database/entities/message-bookmark.entity';
+import { ChannelInvite } from '../database/entities/channel-invite.entity';
+import { MessageDraft } from '../database/entities/message-draft.entity';
+import { MessageReminder } from '../database/entities/message-reminder.entity';
+import { ThreadFollow } from '../database/entities/thread-follow.entity';
+import { MessageEdit } from '../database/entities/message-edit.entity';
+import { SidebarSection } from '../database/entities/sidebar-section.entity';
+import { IncomingWebhook } from '../database/entities/incoming-webhook.entity';
+import { SlashCommand } from '../database/entities/slash-command.entity';
+import { UserGroup } from '../database/entities/user-group.entity';
 import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
 
@@ -26,6 +35,15 @@ import { ChatService } from './chat.service';
       WorkspaceSettings,
       ScheduledMessage,
       MessageBookmark,
+      ChannelInvite,
+      MessageDraft,
+      MessageReminder,
+      ThreadFollow,
+      MessageEdit,
+      SidebarSection,
+      IncomingWebhook,
+      SlashCommand,
+      UserGroup,
     ]),
   ],
   controllers: [ChatController],

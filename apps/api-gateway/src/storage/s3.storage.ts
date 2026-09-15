@@ -63,8 +63,20 @@ export class S3Storage implements ObjectStorage {
       .replace(/[^a-z0-9._-]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, 48) || 'user';
-    const mediaFolder = isAudio ? 'voiceNotes' : isImage ? 'images' : 'files';
-    const key = `${this.prefix}/${user}/${mediaFolder}/${randomUUID()}${extension}`;
+    const mediaFolder =
+      file.purpose === 'emoji'
+        ? 'customEmojis'
+        : file.purpose === 'avatar'
+          ? 'profilePictures'
+          : isAudio
+            ? 'voiceNotes'
+            : isImage
+              ? 'images'
+              : 'files';
+    const key =
+      file.purpose === 'emoji' || file.purpose === 'avatar'
+        ? `${this.prefix}/${mediaFolder}/${randomUUID()}${extension}`
+        : `${this.prefix}/${user}/${mediaFolder}/${randomUUID()}${extension}`;
 
     await this.client.send(
       new PutObjectCommand({

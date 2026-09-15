@@ -9,6 +9,7 @@ import {
   Patch,
   Post,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { ApiBearerAuth, ApiHeader, ApiTags } from '@nestjs/swagger';
 import {
   AuthenticatedUser,
@@ -17,20 +18,27 @@ import {
 } from '@app/common';
 import { AUTH_PATTERNS, CHAT_PATTERNS, USER_PATTERNS } from '@app/contracts';
 import type {
+  BillingCheckoutResult,
+  BillingPortalResult,
   ConversationView,
   DeleteOrganizationResult,
   LeaveOrganizationResult,
   OrgMemberView,
+  OrgSsoView,
   OrganizationView,
 } from '@app/contracts';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
+import { AuditLoggerService } from '../infrastructure/audit/audit-logger.service';
 import { SkipOrg } from './skip-org.decorator';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { DeleteOrganizationDto } from './dto/delete-organization.dto';
 import {
   SetOrgMemberRoleDto,
   TransferOwnershipDto,
+  UpdateOrgBillingDto,
+  CreateBillingCheckoutDto,
   UpdateOrganizationDto,
+  UpdateOrgSsoDto,
 } from './dto/org-manage.dto';
 
 @ApiTags('Organizations')
@@ -40,7 +48,11 @@ import {
 export class OrganizationsController {
   private readonly logger = new Logger(OrganizationsController.name);
 
-  constructor(private readonly proxy: MicroserviceProxy) {}
+  constructor(
+    private readonly proxy: MicroserviceProxy,
+    private readonly config: ConfigService,
+    private readonly audit: AuditLoggerService,
+  ) {}
 
   @Get()
   async list(@CurrentUser() user: AuthenticatedUser) {
@@ -99,6 +111,15 @@ export class OrganizationsController {
       );
     }
 
+    this.audit.log({
+      actorId: user.id,
+      organizationId: data.id,
+      action: 'org.created',
+      targetType: 'organization',
+      targetId: data.id,
+      meta: { slug: data.slug, name: data.name },
+    });
+
     return { message: 'Organization created successfully', data };
   }
 
@@ -132,6 +153,14 @@ export class OrganizationsController {
       },
       { skipTenant: true },
     );
+    this.audit.log({
+      actorId: user.id,
+      organizationId,
+      action: 'member.role_changed',
+      targetType: 'user',
+      targetId: userId,
+      meta: { role: data.role },
+    });
     return { message: 'Member role updated', data };
   }
 
@@ -163,6 +192,13 @@ export class OrganizationsController {
         }`,
       );
     }
+    this.audit.log({
+      actorId: user.id,
+      organizationId,
+      action: 'member.removed',
+      targetType: 'user',
+      targetId: userId,
+    });
     return { message: 'Member removed', data };
   }
 
@@ -181,7 +217,155 @@ export class OrganizationsController {
       },
       { skipTenant: true },
     );
+    this.audit.log({
+      actorId: user.id,
+      organizationId,
+      action: 'org.ownership_transferred',
+      targetType: 'user',
+      targetId: dto.userId,
+    });
     return { message: 'Ownership transferred', data };
+  }
+
+  @Patch(':organizationId/billing')
+  async updateBilling(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('organizationId', ParseUUIDPipe) organizationId: string,
+    @Body() dto: UpdateOrgBillingDto,
+  ) {
+    const data = await this.proxy.sendAuth<OrganizationView>(
+      AUTH_PATTERNS.UPDATE_ORG_BILLING,
+      {
+        organizationId,
+        actorId: user.id,
+        plan: dto.plan,
+        maxSeats: dto.maxSeats,
+      },
+      { skipTenant: true },
+    );
+    this.audit.log({
+      actorId: user.id,
+      organizationId,
+      action: 'org.billing_updated',
+      targetType: 'organization',
+      targetId: organizationId,
+      meta: {
+        plan: data.plan,
+        maxSeats: data.maxSeats,
+      },
+    });
+    return { message: 'Billing updated', data };
+  }
+
+  @Post(':organizationId/billing/checkout')
+  async createBillingCheckout(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('organizationId', ParseUUIDPipe) organizationId: string,
+    @Body() dto: CreateBillingCheckoutDto,
+  ) {
+    const publicUrl = (
+      this.config.get<string>('APP_PUBLIC_URL') || 'http://localhost:5173'
+    ).replace(/\/$/, '');
+    const data = await this.proxy.sendAuth<BillingCheckoutResult>(
+      AUTH_PATTERNS.CREATE_BILLING_CHECKOUT,
+      {
+        organizationId,
+        actorId: user.id,
+        plan: dto.plan,
+        successUrl: `${publicUrl}/profile?billing=success`,
+        cancelUrl: `${publicUrl}/profile?billing=cancel`,
+      },
+      { skipTenant: true },
+    );
+    this.audit.log({
+      actorId: user.id,
+      organizationId,
+      action: 'org.billing_checkout_started',
+      targetType: 'organization',
+      targetId: organizationId,
+      meta: { plan: dto.plan },
+    });
+    return { message: 'Checkout session created', data };
+  }
+
+  @Post(':organizationId/billing/portal')
+  async createBillingPortal(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('organizationId', ParseUUIDPipe) organizationId: string,
+  ) {
+    const publicUrl = (
+      this.config.get<string>('APP_PUBLIC_URL') ||
+      this.config.get<string>('FRONTEND_URL') ||
+      'http://localhost:5173'
+    ).replace(/\/$/, '');
+    const data = await this.proxy.sendAuth<BillingPortalResult>(
+      AUTH_PATTERNS.CREATE_BILLING_PORTAL,
+      {
+        organizationId,
+        actorId: user.id,
+        returnUrl: `${publicUrl}/profile?billing=portal`,
+      },
+      { skipTenant: true },
+    );
+    this.audit.log({
+      actorId: user.id,
+      organizationId,
+      action: 'org.billing_portal_opened',
+      targetType: 'organization',
+      targetId: organizationId,
+    });
+    return { message: 'Billing portal session created', data };
+  }
+
+  @Patch(':organizationId/sso')
+  async updateSso(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('organizationId', ParseUUIDPipe) organizationId: string,
+    @Body() dto: UpdateOrgSsoDto,
+  ) {
+    const data = await this.proxy.sendAuth<OrgSsoView>(
+      AUTH_PATTERNS.UPDATE_ORG_SSO,
+      {
+        organizationId,
+        actorId: user.id,
+        ssoEnabled: dto.ssoEnabled,
+        ssoProvider: dto.ssoProvider,
+        ssoIssuerUrl: dto.ssoIssuerUrl,
+        ssoClientId: dto.ssoClientId,
+        ssoClientSecret: dto.ssoClientSecret,
+      },
+      { skipTenant: true },
+    );
+    this.audit.log({
+      actorId: user.id,
+      organizationId,
+      action: 'org.sso_updated',
+      targetType: 'organization',
+      targetId: organizationId,
+      meta: {
+        ssoEnabled: data.ssoEnabled,
+        ssoProvider: data.ssoProvider,
+        configured: data.configured,
+        secretRotated: Boolean(dto.ssoClientSecret?.trim()),
+      },
+    });
+    return { message: 'SSO settings updated', data };
+  }
+
+  @Get(':organizationId/sso')
+  async getSso(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('organizationId', ParseUUIDPipe) organizationId: string,
+  ) {
+    const data = await this.proxy.sendAuth<OrgSsoView>(
+      AUTH_PATTERNS.GET_ORG_SSO,
+      {
+        organizationId,
+        userId: user.id,
+      },
+      { skipTenant: true },
+    );
+    return { message: 'SSO settings retrieved', data };
   }
 
   @Patch(':organizationId')
@@ -199,6 +383,14 @@ export class OrganizationsController {
       },
       { skipTenant: true },
     );
+    this.audit.log({
+      actorId: user.id,
+      organizationId,
+      action: 'org.renamed',
+      targetType: 'organization',
+      targetId: organizationId,
+      meta: { name: data.name },
+    });
     return { message: 'Workspace updated', data };
   }
 
@@ -228,6 +420,13 @@ export class OrganizationsController {
     }
 
     this.logger.log(`User ${user.id} left workspace ${organizationId}`);
+    this.audit.log({
+      actorId: user.id,
+      organizationId,
+      action: 'member.left',
+      targetType: 'user',
+      targetId: user.id,
+    });
     return { message: 'Left workspace', data };
   }
 
@@ -278,6 +477,13 @@ export class OrganizationsController {
     this.logger.warn(
       `Workspace ${organizationId} deleted by user ${user.id}`,
     );
+    this.audit.log({
+      actorId: user.id,
+      organizationId,
+      action: 'org.deleted',
+      targetType: 'organization',
+      targetId: organizationId,
+    });
     return { message: 'Workspace deleted', data };
   }
 

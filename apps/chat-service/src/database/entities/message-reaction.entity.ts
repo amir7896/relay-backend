@@ -32,7 +32,7 @@ export class MessageReaction {
   @Column({ type: 'uuid' })
   userId!: string;
 
-  @Column({ type: 'varchar', length: 16 })
+  @Column({ type: 'varchar', length: 64 })
   emoji!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })

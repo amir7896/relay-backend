@@ -109,13 +109,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         }
       }
       await client.join(`user:${user.id}`);
-      const { becameOnline } = await this.presence.connect(user.id, client.id);
+      const { becameOnline, presence } = await this.presence.connect(
+        user.id,
+        client.id,
+      );
       if (becameOnline) {
-        this.server.to(`user:${user.id}`).emit('chat:presence', {
-          userId: user.id,
-          status: PresenceStatus.ONLINE,
-          lastSeenAt: null,
-        });
+        this.server.to(`user:${user.id}`).emit('chat:presence', presence);
       }
     } catch (error) {
       this.logger.debug(
@@ -133,12 +132,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const conversationIds = client.data.conversationIds ?? [];
     const result = await this.presence.disconnect(userId, client.id);
     if (result.status === PresenceStatus.OFFLINE) {
-      this.broadcastPresence(
-        userId,
-        PresenceStatus.OFFLINE,
-        result.lastSeenAt,
-        conversationIds,
-      );
+      this.broadcastPresenceView(result, conversationIds);
       await this.endCallForDisconnectedUser(userId);
     }
     this.logger.debug(`Socket ${client.id} disconnected`);
@@ -215,7 +209,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   async sendMessage(
     @ConnectedSocket() client: AuthedSocket,
     @MessageBody()
-    body: { conversationId?: string; body?: string; type?: MessageType },
+    body: {
+      conversationId?: string;
+      body?: string;
+      type?: MessageType;
+      replyToMessageId?: string;
+      threadRootId?: string;
+    },
   ) {
     const userId = this.requireUser(client);
     const conversationId = this.requireConversationId(body);
@@ -233,6 +233,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         conversationId,
         body: text,
         type: body.type ?? MessageType.TEXT,
+        replyToMessageId: body.replyToMessageId,
+        threadRootId: body.threadRootId,
       },
     );
     const { recipientIds, mutedRecipientIds: _muted, ...message } = result;
@@ -282,7 +284,37 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   async heartbeat(@ConnectedSocket() client: AuthedSocket) {
     const userId = this.requireUser(client);
     await this.presence.heartbeat(userId);
-    return { ok: true, status: PresenceStatus.ONLINE };
+    const presence = await this.presence.getPresence(userId);
+    return { ok: true, status: presence.status };
+  }
+
+  @SubscribeMessage('chat:presence_set')
+  async setPresence(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody()
+    body: { status?: string; customStatus?: string | null },
+  ) {
+    const userId = this.requireUser(client);
+    const allowed = new Set([
+      PresenceStatus.ONLINE,
+      PresenceStatus.AWAY,
+      PresenceStatus.BUSY,
+      PresenceStatus.DND,
+    ]);
+    const status = (body.status as PresenceStatus) || PresenceStatus.ONLINE;
+    if (!allowed.has(status)) {
+      return { status: 'error', message: 'Invalid presence status' };
+    }
+    const presence = await this.presence.setStatus(
+      userId,
+      status,
+      body.customStatus,
+    );
+    this.broadcastPresenceView(
+      presence,
+      client.data.conversationIds ?? [],
+    );
+    return presence;
   }
 
   // ── Voice call signaling (1:1 + group mesh via WebRTC) ────────────────────
@@ -724,6 +756,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         username: turnUsername,
         credential: turnCredential,
       });
+    } else if (this.config.get<string>('WEBRTC_USE_DEMO_TURN', 'true') !== 'false') {
+      // Open Relay free TURN for local/dev NAT traversal (replace in production).
+      servers.push({
+        urls: [
+          'turn:openrelay.metered.ca:80',
+          'turn:openrelay.metered.ca:443',
+          'turn:openrelay.metered.ca:443?transport=tcp',
+        ],
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+      });
     }
     return servers;
   }
@@ -735,6 +778,22 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       message.conversationId,
       recipientIds,
     );
+  }
+
+  emitReminder(
+    userId: string,
+    payload: {
+      id: string;
+      conversationId: string;
+      messageId: string;
+      bodySnippet: string;
+      remindAt: string;
+    },
+  ): void {
+    if (!this.server) {
+      return;
+    }
+    this.server.to(`user:${userId}`).emit('chat:reminder', payload);
   }
 
   broadcastMessageDeleted(
@@ -780,16 +839,52 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     status: PresenceStatus,
     lastSeenAt: string | null,
     conversationIds: string[],
+    customStatus: string | null = null,
+  ): void {
+    this.broadcastPresenceView(
+      { userId, status, lastSeenAt, customStatus },
+      conversationIds,
+    );
+  }
+
+  broadcastPresenceView(
+    presence: {
+      userId: string;
+      status: PresenceStatus;
+      lastSeenAt: string | null;
+      customStatus?: string | null;
+    },
+    conversationIds: string[],
   ): void {
     if (!this.server) {
       return;
     }
     const payload = {
-      userId,
-      status,
-      lastSeenAt,
+      userId: presence.userId,
+      status: presence.status,
+      lastSeenAt: presence.lastSeenAt,
+      customStatus: presence.customStatus ?? null,
     };
+    this.server.to(`user:${presence.userId}`).emit('chat:presence', payload);
     void this.fanOutPresence(payload, conversationIds);
+  }
+
+  /** Broadcast presence without known conversation list (REST). */
+  emitPresenceUpdate(presence: {
+    userId: string;
+    status: PresenceStatus;
+    lastSeenAt: string | null;
+    customStatus?: string | null;
+  }): void {
+    if (!this.server) {
+      return;
+    }
+    this.server.emit('chat:presence', {
+      userId: presence.userId,
+      status: presence.status,
+      lastSeenAt: presence.lastSeenAt,
+      customStatus: presence.customStatus ?? null,
+    });
   }
 
   private async fanOutPresence(
@@ -797,6 +892,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       userId: string;
       status: PresenceStatus;
       lastSeenAt: string | null;
+      customStatus?: string | null;
       conversationId?: string;
     },
     conversationIds: string[],

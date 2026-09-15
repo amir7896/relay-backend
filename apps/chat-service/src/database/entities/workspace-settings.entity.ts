@@ -1,5 +1,11 @@
 import { Column, Entity, PrimaryColumn, UpdateDateColumn } from 'typeorm';
 
+export type WorkspaceCustomEmojiRow = {
+  shortcode: string;
+  emoji?: string;
+  imageUrl?: string | null;
+};
+
 @Entity({ name: 'workspace_settings' })
 export class WorkspaceSettings {
   @PrimaryColumn({ type: 'uuid' })
@@ -16,6 +22,9 @@ export class WorkspaceSettings {
 
   @Column({ type: 'varchar', length: 500, nullable: true })
   logoUrl!: string | null;
+
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  customEmojis!: WorkspaceCustomEmojiRow[];
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;

@@ -2,7 +2,9 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
   IsEmail,
+  IsIn,
   IsInt,
+  IsJWT,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -74,10 +76,63 @@ export class CreateInviteDto {
   @Min(1)
   @Max(500)
   maxUses?: number;
+
+  @ApiPropertyOptional({
+    enum: ['member', 'guest'],
+    default: 'member',
+    description: 'Guest invites do not consume billed seats',
+  })
+  @IsOptional()
+  @IsIn(['member', 'guest'])
+  role?: 'member' | 'guest';
 }
 
 export class RevokeInviteDto {
   @ApiProperty()
   @IsUUID()
   inviteId!: string;
+}
+
+export class Verify2faLoginDto {
+  @ApiProperty()
+  @IsString()
+  @IsNotEmpty()
+  @IsJWT({ message: 'tempToken must be a valid JWT' })
+  tempToken!: string;
+
+  @ApiProperty({ example: '123456' })
+  @IsString()
+  @Matches(/^\d{6}$/, { message: 'code must be a 6-digit authenticator code' })
+  code!: string;
+}
+
+export class Confirm2faDto {
+  @ApiProperty({ example: '123456' })
+  @IsString()
+  @Matches(/^\d{6}$/, { message: 'code must be a 6-digit authenticator code' })
+  code!: string;
+}
+
+export class Disable2faDto {
+  @ApiProperty()
+  @IsString()
+  @MinLength(8)
+  @MaxLength(72)
+  password!: string;
+
+  @ApiPropertyOptional({ example: '123456' })
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{6}$/, { message: 'code must be a 6-digit authenticator code' })
+  code?: string;
+}
+
+export class SessionRefreshTokenDto {
+  @ApiPropertyOptional({
+    description: 'Current refresh token used to mark the active session',
+  })
+  @IsOptional()
+  @IsString()
+  @IsJWT({ message: 'refreshToken must be a valid JWT' })
+  refreshToken?: string;
 }

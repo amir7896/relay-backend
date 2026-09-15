@@ -7,11 +7,14 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
+  Query,
   Req,
+  Res,
 } from '@nestjs/common';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { AUTH_PATTERNS, CHAT_PATTERNS, USER_PATTERNS } from '@app/contracts';
 import type {
@@ -20,10 +23,15 @@ import type {
   AuthUserView,
   ForgotPasswordResult,
   InviteView,
+  LoginResult,
+  OrgSsoCredentialsView,
   PublicInviteView,
   RequestEmailVerificationResult,
+  SessionView,
+  Setup2faResult,
 } from '@app/contracts';
 import {
+  AppException,
   AuthenticatedUser,
   BadRequestAppException,
   CurrentUser,
@@ -31,11 +39,16 @@ import {
   AUTH_SUCCESS_MESSAGES,
 } from '@app/common';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
+import { AuditLoggerService } from '../infrastructure/audit/audit-logger.service';
 import { SkipOrg } from '../organizations/skip-org.decorator';
 import {
+  Confirm2faDto,
   CreateInviteDto,
+  Disable2faDto,
   ForgotPasswordDto,
   ResetPasswordDto,
+  SessionRefreshTokenDto,
+  Verify2faLoginDto,
   VerifyEmailDto,
 } from './dto/auth-extra.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -45,6 +58,7 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
 import { TokenBlacklistService } from './token-blacklist.service';
 import { AuthSessionCache } from './auth-session.cache';
+import { SsoOidcService } from './sso-oidc.service';
 import {
   AuthDocs,
   ChangePasswordDocs,
@@ -63,6 +77,8 @@ export class AuthController {
     private readonly proxy: MicroserviceProxy,
     private readonly blacklist: TokenBlacklistService,
     private readonly sessionCache: AuthSessionCache,
+    private readonly ssoOidc: SsoOidcService,
+    private readonly audit: AuditLoggerService,
   ) {}
 
   @Public()
@@ -91,14 +107,20 @@ export class AuthController {
           { skipTenant: true },
         );
         try {
-          await this.proxy.sendChat(
-            CHAT_PATTERNS.ENSURE_GENERAL_MEMBER,
-            {
-              userId: result.user.id,
-              organizationId,
-            },
-            { skipTenant: true },
+          const joinedAsGuest = result.organizations.some(
+            (org) =>
+              org.id === organizationId && org.role === 'guest',
           );
+          if (!joinedAsGuest) {
+            await this.proxy.sendChat(
+              CHAT_PATTERNS.ENSURE_GENERAL_MEMBER,
+              {
+                userId: result.user.id,
+                organizationId,
+              },
+              { skipTenant: true },
+            );
+          }
         } catch {
           // #general may not exist yet for legacy orgs — invite still succeeds.
         }
@@ -114,6 +136,18 @@ export class AuthController {
       throw error;
     }
     await this.sessionCache.set(result.user);
+    const orgId =
+      result.activeOrganizationId ?? result.organizations[0]?.id ?? undefined;
+    if (orgId) {
+      this.audit.log({
+        actorId: result.user.id,
+        organizationId: orgId,
+        action: 'auth.registered',
+        targetType: 'user',
+        targetId: result.user.id,
+        meta: { viaInvite: Boolean(dto.inviteToken) },
+      });
+    }
     return { message: AUTH_SUCCESS_MESSAGES.REGISTERED, data: result };
   }
 
@@ -123,13 +157,222 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @LoginDocs()
   async login(@Body() dto: LoginDto, @Req() request: Request) {
-    const result = await this.proxy.sendAuth<AuthResult>(AUTH_PATTERNS.LOGIN, {
+    const result = await this.proxy.sendAuth<LoginResult>(AUTH_PATTERNS.LOGIN, {
       ...dto,
       ip: request.ip,
       userAgent: request.headers['user-agent'],
     });
+    if (result && 'requires2fa' in result && result.requires2fa) {
+      return {
+        message: 'Two-factor authentication required',
+        data: result,
+      };
+    }
+    const auth = result as AuthResult;
+    await this.sessionCache.set(auth.user);
+    const orgId =
+      auth.activeOrganizationId ?? auth.organizations[0]?.id ?? undefined;
+    if (orgId) {
+      this.audit.log({
+        actorId: auth.user.id,
+        organizationId: orgId,
+        action: 'auth.login',
+        targetType: 'user',
+        targetId: auth.user.id,
+        meta: { method: 'password' },
+      });
+    }
+    return { message: AUTH_SUCCESS_MESSAGES.LOGGED_IN, data: auth };
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('login/2fa')
+  @HttpCode(HttpStatus.OK)
+  async verify2faLogin(
+    @Body() dto: Verify2faLoginDto,
+    @Req() request: Request,
+  ) {
+    const result = await this.proxy.sendAuth<AuthResult>(
+      AUTH_PATTERNS.VERIFY_2FA_LOGIN,
+      {
+        tempToken: dto.tempToken,
+        code: dto.code,
+        ip: request.ip,
+        userAgent: request.headers['user-agent'],
+      },
+    );
     await this.sessionCache.set(result.user);
+    const orgId =
+      result.activeOrganizationId ?? result.organizations[0]?.id ?? undefined;
+    if (orgId) {
+      this.audit.log({
+        actorId: result.user.id,
+        organizationId: orgId,
+        action: 'auth.login',
+        targetType: 'user',
+        targetId: result.user.id,
+        meta: { method: 'password_2fa' },
+      });
+    }
     return { message: AUTH_SUCCESS_MESSAGES.LOGGED_IN, data: result };
+  }
+  @HttpCode(HttpStatus.OK)
+  async setup2fa(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.proxy.sendAuth<Setup2faResult>(
+      AUTH_PATTERNS.SETUP_2FA,
+      { userId: user.id },
+    );
+    return { message: 'Two-factor authentication setup started', data };
+  }
+
+  @Post('2fa/confirm')
+  @HttpCode(HttpStatus.OK)
+  async confirm2fa(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: Confirm2faDto,
+  ) {
+    const data = await this.proxy.sendAuth(AUTH_PATTERNS.CONFIRM_2FA, {
+      userId: user.id,
+      code: dto.code,
+    });
+    await this.sessionCache.invalidate(user.id);
+    return { message: 'Two-factor authentication enabled', data };
+  }
+
+  @Post('2fa/disable')
+  @HttpCode(HttpStatus.OK)
+  async disable2fa(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: Disable2faDto,
+  ) {
+    const data = await this.proxy.sendAuth(AUTH_PATTERNS.DISABLE_2FA, {
+      userId: user.id,
+      password: dto.password,
+      code: dto.code,
+    });
+    await this.sessionCache.invalidate(user.id);
+    return { message: 'Two-factor authentication disabled', data };
+  }
+
+  @Get('sessions')
+  async listSessions(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: SessionRefreshTokenDto,
+    @Body() body: SessionRefreshTokenDto = {},
+  ) {
+    const data = await this.proxy.sendAuth<SessionView[]>(
+      AUTH_PATTERNS.LIST_SESSIONS,
+      {
+        userId: user.id,
+        currentRefreshToken: body.refreshToken ?? query.refreshToken,
+      },
+    );
+    return { message: 'Sessions retrieved successfully', data };
+  }
+
+  @Delete('sessions/:id')
+  async revokeSession(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    const data = await this.proxy.sendAuth(AUTH_PATTERNS.REVOKE_SESSION, {
+      userId: user.id,
+      sessionId: id,
+    });
+    return { message: 'Session revoked', data };
+  }
+
+  @Post('sessions/revoke-others')
+  @HttpCode(HttpStatus.OK)
+  async revokeOtherSessions(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: SessionRefreshTokenDto = {},
+  ) {
+    const data = await this.proxy.sendAuth(
+      AUTH_PATTERNS.REVOKE_OTHER_SESSIONS,
+      {
+        userId: user.id,
+        currentRefreshToken: dto.refreshToken,
+      },
+    );
+    return { message: 'Other sessions revoked', data };
+  }
+
+  @Public()
+  @Get('sso/status')
+  async ssoStatus(
+    @Query('organizationId') organizationId?: string,
+    @Query('slug') slug?: string,
+  ) {
+    if (!organizationId?.trim() && !slug?.trim()) {
+      throw new BadRequestAppException('organizationId or slug is required');
+    }
+    const data = await this.ssoOidc.resolveCredentials({
+      organizationId: organizationId?.trim(),
+      slug: slug?.trim(),
+    });
+    return {
+      message: 'SSO status',
+      data: {
+        organizationId: data.organizationId,
+        slug: data.slug,
+        name: data.name,
+        ssoEnabled: data.ssoEnabled,
+        ssoProvider: data.ssoProvider,
+        configured: data.configured,
+        hasClientSecret: data.hasClientSecret,
+        plan: data.plan,
+      },
+    };
+  }
+
+  @Public()
+  @Get('sso/:organizationId/start')
+  async startSsoGet(
+    @Param('organizationId', ParseUUIDPipe) organizationId: string,
+    @Query('returnPath') returnPath: string | undefined,
+    @Res() res: Response,
+  ) {
+    const url = await this.ssoOidc.buildAuthorizationRedirect({
+      organizationId,
+      returnPath,
+    });
+    return res.redirect(url);
+  }
+
+  @Public()
+  @Post('sso/:organizationId/start')
+  async startSsoPost(
+    @Param('organizationId', ParseUUIDPipe) organizationId: string,
+    @Body() body: { returnPath?: string } = {},
+  ) {
+    const url = await this.ssoOidc.buildAuthorizationRedirect({
+      organizationId,
+      returnPath: body.returnPath,
+    });
+    return { message: 'SSO redirect ready', data: { url } };
+  }
+
+  @Public()
+  @Get('sso/callback')
+  async ssoCallback(
+    @Query('code') code: string | undefined,
+    @Query('state') state: string | undefined,
+    @Query('error') error: string | undefined,
+    @Query('error_description') errorDescription: string | undefined,
+    @Req() request: Request,
+    @Res() res: Response,
+  ) {
+    const { redirectUrl } = await this.ssoOidc.handleCallback({
+      code,
+      state,
+      error,
+      errorDescription,
+      ip: request.ip,
+      userAgent: request.headers['user-agent'],
+    });
+    return res.redirect(redirectUrl);
   }
 
   @Public()
@@ -271,8 +514,20 @@ export class AuthController {
         email: dto.email,
         expiresInDays: dto.expiresInDays,
         maxUses: dto.maxUses,
+        role: dto.role === 'guest' ? 'guest' : 'member',
       },
     );
+    this.audit.log({
+      actorId: user.id,
+      organizationId: orgId,
+      action: 'invite.created',
+      targetType: 'invite',
+      targetId: data.id,
+      meta: {
+        email: data.email,
+        role: data.role ?? 'member',
+      },
+    });
     return { message: AUTH_SUCCESS_MESSAGES.INVITE_CREATED, data };
   }
 
@@ -340,18 +595,33 @@ export class AuthController {
     } catch {
       // Profile may already exist for this org.
     }
-    try {
-      await this.proxy.sendChat(
-        CHAT_PATTERNS.ENSURE_GENERAL_MEMBER,
-        {
-          userId: user.id,
-          organizationId: data.organizationId,
-        },
-        { skipTenant: true },
-      );
-    } catch {
-      // #general may not exist for legacy orgs.
+    // Guests only get channels they are explicitly invited to — never auto-join #general.
+    if (data.role !== 'guest') {
+      try {
+        await this.proxy.sendChat(
+          CHAT_PATTERNS.ENSURE_GENERAL_MEMBER,
+          {
+            userId: user.id,
+            organizationId: data.organizationId,
+          },
+          { skipTenant: true },
+        );
+      } catch {
+        // #general may not exist for legacy orgs.
+      }
     }
+
+    this.audit.log({
+      actorId: user.id,
+      organizationId: data.organizationId,
+      action: 'invite.accepted',
+      targetType: 'organization',
+      targetId: data.organizationId,
+      meta: {
+        role: data.role,
+        alreadyMember: data.alreadyMember,
+      },
+    });
 
     return { message: 'Joined workspace', data };
   }

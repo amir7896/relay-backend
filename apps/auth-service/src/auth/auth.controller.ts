@@ -1,14 +1,17 @@
 import { Controller } from '@nestjs/common';
 import { MessagePattern, Payload } from '@nestjs/microservices';
+import { RpcErrors } from '@app/common';
 import { AUTH_PATTERNS } from '@app/contracts';
 import type {
   AcceptInvitePayload,
   AddOrgMemberPayload,
   ChangePasswordPayload,
+  Confirm2faPayload,
   CreateInvitePayload,
   CreateOrganizationPayload,
   DeactivatePayload,
   DeleteOrganizationPayload,
+  Disable2faPayload,
   EnsureDefaultOrganizationPayload,
   ForgotPasswordPayload,
   GetInvitePayload,
@@ -17,6 +20,7 @@ import type {
   ListOrganizationsPayload,
   ListOrgMembersPayload,
   ListInvitesPayload,
+  ListSessionsPayload,
   LoginPayload,
   LogoutPayload,
   RefreshPayload,
@@ -26,10 +30,20 @@ import type {
   ResetPasswordPayload,
   ResolveTenantPayload,
   RevokeInvitePayload,
+  RevokeOtherSessionsPayload,
+  RevokeSessionPayload,
   SetOrgMemberRolePayload,
+  Setup2faPayload,
+  SsoCompletePayload,
   TransferOwnershipPayload,
+  UpdateOrgBillingPayload,
   UpdateOrganizationPayload,
+  UpdateOrgSsoPayload,
+  CreateBillingCheckoutPayload,
+  CreateBillingPortalPayload,
+  HandleStripeWebhookPayload,
   ValidatePayload,
+  Verify2faLoginPayload,
   VerifyEmailPayload,
 } from '@app/contracts';
 import { AuthService } from './auth.service';
@@ -50,6 +64,41 @@ export class AuthController {
   @MessagePattern(AUTH_PATTERNS.LOGIN)
   login(@Payload() payload: LoginPayload) {
     return this.authService.login(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.VERIFY_2FA_LOGIN)
+  verify2faLogin(@Payload() payload: Verify2faLoginPayload) {
+    return this.authService.verify2faLogin(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.SETUP_2FA)
+  setup2fa(@Payload() payload: Setup2faPayload) {
+    return this.authService.setup2fa(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.CONFIRM_2FA)
+  confirm2fa(@Payload() payload: Confirm2faPayload) {
+    return this.authService.confirm2fa(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.DISABLE_2FA)
+  disable2fa(@Payload() payload: Disable2faPayload) {
+    return this.authService.disable2fa(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.LIST_SESSIONS)
+  listSessions(@Payload() payload: ListSessionsPayload) {
+    return this.authService.listSessions(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.REVOKE_SESSION)
+  revokeSession(@Payload() payload: RevokeSessionPayload) {
+    return this.authService.revokeSession(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.REVOKE_OTHER_SESSIONS)
+  revokeOtherSessions(@Payload() payload: RevokeOtherSessionsPayload) {
+    return this.authService.revokeOtherSessions(payload);
   }
 
   @MessagePattern(AUTH_PATTERNS.REFRESH)
@@ -172,6 +221,57 @@ export class AuthController {
   @MessagePattern(AUTH_PATTERNS.UPDATE_ORGANIZATION)
   updateOrganization(@Payload() payload: UpdateOrganizationPayload) {
     return this.organizationService.updateOrganization(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.UPDATE_ORG_BILLING)
+  updateOrgBilling(@Payload() payload: UpdateOrgBillingPayload) {
+    return this.organizationService.updateBilling(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.CREATE_BILLING_CHECKOUT)
+  createBillingCheckout(@Payload() payload: CreateBillingCheckoutPayload) {
+    return this.organizationService.createCheckoutSession(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.CREATE_BILLING_PORTAL)
+  createBillingPortal(@Payload() payload: CreateBillingPortalPayload) {
+    return this.organizationService.createBillingPortalSession(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.HANDLE_STRIPE_WEBHOOK)
+  handleStripeWebhook(@Payload() payload: HandleStripeWebhookPayload) {
+    return this.organizationService.handleStripeWebhook(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.UPDATE_ORG_SSO)
+  updateOrgSso(@Payload() payload: UpdateOrgSsoPayload) {
+    return this.organizationService.updateSso(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.GET_ORG_SSO)
+  getOrgSso(
+    @Payload() payload: { organizationId: string; userId: string },
+  ) {
+    return this.organizationService.getSso(payload);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.GET_ORG_SSO_CREDENTIALS)
+  getOrgSsoCredentials(
+    @Payload()
+    payload: { organizationId?: string; slug?: string },
+  ) {
+    if (payload.slug?.trim()) {
+      return this.organizationService.getSsoCredentialsBySlug(payload.slug);
+    }
+    if (!payload.organizationId?.trim()) {
+      return RpcErrors.badRequest('organizationId or slug is required');
+    }
+    return this.organizationService.getSsoCredentials(payload.organizationId);
+  }
+
+  @MessagePattern(AUTH_PATTERNS.SSO_COMPLETE)
+  ssoComplete(@Payload() payload: SsoCompletePayload) {
+    return this.authService.ssoComplete(payload);
   }
 
   @MessagePattern(AUTH_PATTERNS.TRANSFER_OWNERSHIP)

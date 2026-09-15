@@ -140,6 +140,11 @@ export class AuthTokenService {
       userId: payload.createdByUserId,
     });
 
+    await this.organizationService.assertSeatAvailable(
+      payload.organizationId,
+      { role: payload.role === 'guest' ? 'guest' : 'member' },
+    );
+
     const email = payload.email?.toLowerCase().trim() || null;
     if (email) {
       const existing = await this.users.findOne({ where: { email } });
@@ -158,12 +163,14 @@ export class AuthTokenService {
     const maxUses = email
       ? 1
       : Math.min(Math.max(payload.maxUses ?? 25, 1), 500);
+    const inviteRole = payload.role === 'guest' ? 'guest' : 'member';
     const raw = await this.issueToken({
       type: AuthTokenType.INVITE,
       email,
       userId: null,
       createdByUserId: payload.createdByUserId,
       organizationId: payload.organizationId,
+      inviteRole,
       maxUses,
       ttlMs: days * 24 * 60 * 60 * 1000,
     });
@@ -303,6 +310,7 @@ export class AuthTokenService {
     userId: string | null;
     createdByUserId?: string | null;
     organizationId?: string | null;
+    inviteRole?: 'member' | 'guest';
     maxUses?: number;
     ttlMs: number;
   }): Promise<string> {
@@ -328,6 +336,7 @@ export class AuthTokenService {
       userId: input.userId,
       createdByUserId: input.createdByUserId ?? null,
       organizationId: input.organizationId ?? null,
+      inviteRole: input.inviteRole ?? 'member',
       maxUses: input.maxUses ?? 1,
       usedCount: 0,
       expiresAt: new Date(Date.now() + input.ttlMs),
@@ -398,6 +407,7 @@ export class AuthTokenService {
       revokedAt: row.revokedAt?.toISOString() ?? null,
       createdAt: row.createdAt.toISOString(),
       createdByUserId: row.createdByUserId,
+      role: row.inviteRole === 'guest' ? 'guest' : 'member',
     };
     if (rawToken) {
       view.token = rawToken;

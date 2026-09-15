@@ -9,9 +9,14 @@ import {
   Post,
   Query,
   Req,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import {
   AuthenticatedUser,
+  BadRequestAppException,
   CurrentUser,
   ForbiddenAppException,
   Public,
@@ -29,6 +34,7 @@ import type {
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
 import { PresenceService } from '../chat/presence.service';
 import { LinkPreviewService } from '../chat/link-preview.service';
+import { StorageService } from '../storage/storage.service';
 import { LinkPreviewDto, UpdateWorkspaceDto } from './dto/admin.dto';
 import { ChatPageQueryDto } from '../chat/dto/chat.dto';
 
@@ -37,6 +43,7 @@ const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettingsView = {
   tagline: 'Private team messenger',
   primaryColor: '#2563eb',
   logoUrl: null,
+  customEmojis: [],
 };
 
 @Controller()
@@ -45,6 +52,7 @@ export class AdminController {
     private readonly proxy: MicroserviceProxy,
     private readonly presence: PresenceService,
     private readonly linkPreview: LinkPreviewService,
+    private readonly storage: StorageService,
   ) {}
 
   @Get('admin/analytics')
@@ -79,9 +87,9 @@ export class AdminController {
   async auditExport(@CurrentUser() user: AuthenticatedUser) {
     const data = await this.proxy.sendChat<PaginatedResult<AuditEventView>>(
       CHAT_PATTERNS.LIST_AUDIT,
-      { actorId: user.id, page: 1, limit: 500 },
+      { actorId: user.id, page: 1, limit: 5_000 },
     );
-    const header = 'id,actorId,action,targetType,targetId,createdAt\n';
+    const header = 'id,actorId,action,targetType,targetId,meta,createdAt\n';
     const rows = data.items
       .map((item) =>
         [
@@ -90,6 +98,7 @@ export class AdminController {
           item.action,
           item.targetType ?? '',
           item.targetId ?? '',
+          JSON.stringify(item.meta ?? {}),
           item.createdAt,
         ]
           .map((value) => `"${String(value).replace(/"/g, '""')}"`)
@@ -119,6 +128,70 @@ export class AdminController {
       { skipTenant: true },
     );
     return { message: 'Workspace settings', data };
+  }
+
+  @Post('workspace/emojis/upload')
+  @HttpCode(HttpStatus.CREATED)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 512 * 1024 },
+    }),
+  )
+  async uploadCustomEmoji(
+    @CurrentUser() user: AuthenticatedUser,
+    @Headers('x-organization-id') organizationId: string | undefined,
+    @UploadedFile()
+    file:
+      | {
+          buffer: Buffer;
+          originalname: string;
+          mimetype: string;
+          size: number;
+        }
+      | undefined,
+  ) {
+    const orgId = organizationId?.trim();
+    if (!orgId) {
+      throw new ForbiddenAppException(
+        'X-Organization-Id is required to upload custom emoji',
+      );
+    }
+    if (!file?.buffer?.length) {
+      throw new BadRequestAppException('Image file is required');
+    }
+    if (!file.mimetype.startsWith('image/')) {
+      throw new BadRequestAppException('Custom emoji must be an image');
+    }
+
+    const isPlatformAdmin = user.role === UserRole.ADMIN;
+    if (!isPlatformAdmin) {
+      await this.proxy.sendAuth(
+        AUTH_PATTERNS.LIST_ORG_MEMBERS,
+        { organizationId: orgId, requestedByUserId: user.id },
+        { skipTenant: true },
+      );
+    }
+
+    const uploaded = await this.storage.upload({
+      buffer: file.buffer,
+      originalName: file.originalname,
+      mimeType: file.mimetype,
+      size: file.size,
+      purpose: 'emoji',
+      userName: user.email,
+    });
+    return {
+      message: 'Custom emoji uploaded',
+      data: {
+        url: uploaded.url,
+        key: uploaded.key,
+        provider: uploaded.provider,
+        mime: uploaded.mime,
+        name: uploaded.name,
+        size: uploaded.size,
+      },
+    };
   }
 
   @Patch('workspace/settings')

@@ -11,6 +11,7 @@ import {
   createRmqClientOptions,
 } from '@app/common';
 import { MicroserviceProxy } from './microservice.proxy';
+import { AuditLoggerService } from '../audit/audit-logger.service';
 
 @Global()
 @Module({
@@ -36,7 +37,7 @@ import { MicroserviceProxy } from './microservice.proxy';
       },
     ]),
   ],
-  providers: [MicroserviceProxy],
-  exports: [MicroserviceProxy],
+  providers: [MicroserviceProxy, AuditLoggerService],
+  exports: [MicroserviceProxy, AuditLoggerService],
 })
 export class ProxyModule {}

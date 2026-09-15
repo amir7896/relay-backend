@@ -52,6 +52,13 @@ export const RpcErrors = {
   conflict(message: string): never {
     return throwRpcError(HttpStatus.CONFLICT, message, 'Conflict');
   },
+  serviceUnavailable(message: string): never {
+    return throwRpcError(
+      HttpStatus.SERVICE_UNAVAILABLE,
+      message,
+      'Service Unavailable',
+    );
+  },
   validation(details?: unknown): never {
     return throwRpcError(
       HttpStatus.UNPROCESSABLE_ENTITY,

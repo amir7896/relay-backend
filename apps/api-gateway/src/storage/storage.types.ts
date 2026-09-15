@@ -7,8 +7,8 @@ export type UploadInput = {
   size: number;
   /** Used to build Cloudinary path relay/{userName}/files|images|voiceNotes/ */
   userName?: string;
-  /** Profile avatars go to relay/profilePictures/ */
-  purpose?: 'chat' | 'avatar';
+  /** Profile avatars go to relay/profilePictures/; custom emoji to customEmojis/ */
+  purpose?: 'chat' | 'avatar' | 'emoji';
 };
 
 export type UploadResult = {

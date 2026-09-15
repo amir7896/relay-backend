@@ -44,6 +44,11 @@ export class CloudinaryStorage implements ObjectStorage {
         throw new Error('Profile pictures must be image files');
       }
       publicId = [this.rootFolder, 'profilePictures', id].filter(Boolean).join('/');
+    } else if (file.purpose === 'emoji') {
+      if (!isImage) {
+        throw new Error('Custom emoji must be image files');
+      }
+      publicId = [this.rootFolder, 'customEmojis', id].filter(Boolean).join('/');
     } else {
       const mediaFolder = isAudio ? 'voiceNotes' : isImage ? 'images' : 'files';
       publicId =

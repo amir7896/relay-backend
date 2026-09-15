@@ -4,6 +4,7 @@ import webpush, { type PushSubscription } from 'web-push';
 import { PresenceStatus, REDIS_CLIENT } from '@app/common';
 import type Redis from 'ioredis';
 import { PresenceService } from './presence.service';
+import { NotificationPrefsService } from './notification-prefs.service';
 
 type StoredSubscription = PushSubscription & { endpoint: string };
 
@@ -16,6 +17,7 @@ export class PushService {
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
     private readonly config: ConfigService,
     private readonly presence: PresenceService,
+    private readonly prefs: NotificationPrefsService,
   ) {
     const publicKey = this.config.get<string>('VAPID_PUBLIC_KEY', '');
     const privateKey = this.config.get<string>('VAPID_PRIVATE_KEY', '');
@@ -92,6 +94,29 @@ export class PushService {
           if (muted.has(userId) && !isMentioned) {
             return;
           }
+
+          const prefs = await this.prefs.get(userId);
+          if (prefs.mode === 'none') {
+            return;
+          }
+          if (prefs.mode === 'mentions' && !isMentioned) {
+            return;
+          }
+          if (this.prefs.isInQuietHours(prefs) && !isMentioned) {
+            // Mentions still break through quiet hours (Slack-like).
+            return;
+          }
+          if (prefs.respectStatus) {
+            const mode = await this.presence.getManualMode(userId);
+            if (
+              mode === PresenceStatus.DND ||
+              mode === PresenceStatus.BUSY ||
+              (mode === PresenceStatus.AWAY && !isMentioned)
+            ) {
+              return;
+            }
+          }
+
           const presence = await this.presence.getPresence(userId);
           if (presence.status !== PresenceStatus.OFFLINE) {
             return;
@@ -128,8 +153,18 @@ export class PushService {
     await Promise.all(
       input.recipientIds
         .filter((id) => id !== input.senderId)
-        .map((userId) =>
-          this.sendToUser(userId, {
+        .map(async (userId) => {
+          const prefs = await this.prefs.get(userId);
+          if (prefs.mode === 'none') {
+            return;
+          }
+          if (prefs.respectStatus) {
+            const mode = await this.presence.getManualMode(userId);
+            if (mode === PresenceStatus.DND) {
+              return;
+            }
+          }
+          await this.sendToUser(userId, {
             title: input.title,
             body: input.body,
             conversationId: input.conversationId,
@@ -137,8 +172,8 @@ export class PushService {
             callId: input.callId,
             media: input.media,
             kind: input.kind,
-          }),
-        ),
+          });
+        }),
     );
   }
 

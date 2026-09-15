@@ -9,13 +9,15 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
+  Req,
   Res,
   StreamableFile,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import {
@@ -23,20 +25,29 @@ import {
   BadRequestAppException,
   CHAT_SUCCESS_MESSAGES,
   CurrentUser,
+  ForbiddenAppException,
   NotFoundAppException,
   ParseUuidPipe,
   PresenceStatus,
+  isUuidToken,
+  parseMessageSearchQuery,
 } from '@app/common';
 import type { PaginatedResult } from '@app/common';
 import { CHAT_PATTERNS, USER_PATTERNS } from '@app/contracts';
 import type {
   BlockView,
+  ChannelInviteView,
   ConversationView,
   DeleteMessageResult,
+  IncomingWebhookView,
+  InvokeSlashCommandResult,
   MessageView,
+  OrganizationView,
   PresenceView,
   SeenResultView,
   SendMessageResult,
+  SlashCommandView,
+  UserGroupView,
   UserProfileView,
 } from '@app/contracts';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
@@ -45,16 +56,25 @@ import { ChatGateway } from './chat.gateway';
 import { CallSessionService } from './call-session.service';
 import { ConversationCacheService } from './conversation-cache.service';
 import { PushService } from './push.service';
+import { NotificationPrefsService } from './notification-prefs.service';
 import {
+  AddChannelBookmarkDto,
   AddMembersDto,
   BlockUserDto,
   ChatPageQueryDto,
+  CreateChannelInviteDto,
   CreateGroupChatDto,
+  CreateIncomingWebhookDto,
   CreatePollDto,
   CreatePrivateChatDto,
+  CreateReminderDto,
+  CreateSidebarSectionDto,
+  CreateSlashCommandDto,
+  CreateUserGroupDto,
   DeleteMessageDto,
   EditMessageDto,
   ForwardMessageDto,
+  InvokeSlashCommandDto,
   ListMediaQueryDto,
   MarkSeenDto,
   MuteConversationDto,
@@ -69,6 +89,10 @@ import {
   SetMemberRoleDto,
   TypingDto,
   UpdateGroupDto,
+  UpdateSidebarSectionDto,
+  UpdateUserGroupDto,
+  UpsertDraftDto,
+  UpdateNotificationPrefsDto,
   VotePollDto,
 } from './dto/chat.dto';
 import { PresenceService } from './presence.service';
@@ -212,8 +236,69 @@ export class ChatController {
     private readonly ai: AiService,
     private readonly storage: StorageService,
     private readonly push: PushService,
+    private readonly notificationPrefs: NotificationPrefsService,
     private readonly calls: CallSessionService,
   ) {}
+
+  private assertFullMember(request: Request & { organization?: OrganizationView }) {
+    if (request.organization?.role === 'guest') {
+      throw new ForbiddenAppException(
+        'Guests can only access channels they are invited to',
+      );
+    }
+  }
+
+  private assertWorkspaceManager(
+    request: Request & { organization?: OrganizationView },
+  ) {
+    const role = request.organization?.role;
+    if (role !== 'owner' && role !== 'admin') {
+      throw new ForbiddenAppException(
+        'Only workspace owners and admins can manage slash commands',
+      );
+    }
+  }
+
+  /** Resolve from:name|email tokens to userIds via the directory. */
+  private async resolveSearchSenderIds(rawQuery: string): Promise<string[]> {
+    const parsed = parseMessageSearchQuery(rawQuery);
+    if (parsed.fromTokens.length === 0) {
+      return [];
+    }
+    const ids = new Set<string>();
+    for (const token of parsed.fromTokens) {
+      if (isUuidToken(token)) {
+        ids.add(token);
+        continue;
+      }
+      try {
+        const page = await this.proxy.sendUser<PaginatedResult<UserProfileView>>(
+          USER_PATTERNS.FIND_ALL,
+          {
+            page: 1,
+            limit: 40,
+            search: token,
+            sortBy: 'firstName',
+            order: 'ASC',
+          },
+        );
+        for (const profile of page.items) {
+          const hay = `${profile.firstName} ${profile.lastName} ${profile.email}`.toLowerCase();
+          if (
+            hay.includes(token) ||
+            profile.email.toLowerCase().startsWith(token) ||
+            profile.firstName.toLowerCase().startsWith(token) ||
+            profile.lastName.toLowerCase().startsWith(token)
+          ) {
+            ids.add(profile.userId);
+          }
+        }
+      } catch {
+        // Directory lookup is best-effort; chat still accepts UUID from: tokens.
+      }
+    }
+    return [...ids];
+  }
 
   @Post('private')
   @HttpCode(HttpStatus.CREATED)
@@ -221,7 +306,9 @@ export class ChatController {
   async createPrivate(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreatePrivateChatDto,
+    @Req() request: Request & { organization?: OrganizationView },
   ) {
+    this.assertFullMember(request);
     if (dto.userId === user.id) {
       throw new BadRequestAppException(
         'You cannot start a private chat with yourself',
@@ -242,11 +329,19 @@ export class ChatController {
   async createGroup(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateGroupChatDto,
+    @Req() request: Request & { organization?: OrganizationView },
   ) {
+    this.assertFullMember(request);
     await this.assertUsersExist(dto.memberIds.filter((id) => id !== user.id));
     const data = await this.proxy.sendChat<ConversationView>(
       CHAT_PATTERNS.CREATE_GROUP,
-      { actorId: user.id, name: dto.name, memberIds: dto.memberIds },
+      {
+        actorId: user.id,
+        name: dto.name,
+        memberIds: dto.memberIds,
+        visibility: dto.visibility,
+        announceOnly: dto.announceOnly,
+      },
     );
     await this.presence.attachToConversations([data]);
     const memberIds = data.members.map((member) => member.userId);
@@ -279,11 +374,13 @@ export class ChatController {
     @CurrentUser() user: AuthenticatedUser,
     @Query() query: SearchMessagesQueryDto,
   ) {
+    const senderIds = await this.resolveSearchSenderIds(query.q);
     const data = await this.proxy.sendChat(CHAT_PATTERNS.SEARCH_GLOBAL, {
       actorId: user.id,
       query: query.q,
       page: query.page,
       limit: query.limit,
+      senderIds,
     });
     return { message: CHAT_SUCCESS_MESSAGES.GLOBAL_SEARCHED, data };
   }
@@ -294,6 +391,30 @@ export class ChatController {
     const data = await this.presence.getPresence(userId);
     await this.stripLastSeenIfHidden(data);
     return { message: CHAT_SUCCESS_MESSAGES.PRESENCE_FETCHED, data };
+  }
+
+  @Patch('presence')
+  async setMyPresence(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: { status?: string; customStatus?: string | null },
+  ) {
+    const allowed = new Set([
+      PresenceStatus.ONLINE,
+      PresenceStatus.AWAY,
+      PresenceStatus.BUSY,
+      PresenceStatus.DND,
+    ]);
+    const status = (body.status as PresenceStatus) || PresenceStatus.ONLINE;
+    if (!allowed.has(status)) {
+      throw new BadRequestException('Invalid presence status');
+    }
+    const data = await this.presence.setStatus(
+      user.id,
+      status,
+      body.customStatus,
+    );
+    this.chatGateway.emitPresenceUpdate(data);
+    return { message: 'Presence updated', data };
   }
 
   @Get('conversations/:id')
@@ -317,14 +438,359 @@ export class ChatController {
     @Param('id', ParseUuidPipe) id: string,
     @Query() query: SearchMessagesQueryDto,
   ) {
+    const senderIds = await this.resolveSearchSenderIds(query.q);
     const data = await this.proxy.sendChat(CHAT_PATTERNS.SEARCH_MESSAGES, {
       actorId: user.id,
       conversationId: id,
       query: query.q,
       page: query.page,
       limit: query.limit,
+      senderIds,
     });
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGES_SEARCHED, data };
+  }
+
+  @Get('conversations/:id/messages/thread/:threadRootId')
+  async listThreadReplies(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('threadRootId', ParseUuidPipe) threadRootId: string,
+    @Query() query: ChatPageQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_THREAD_REPLIES, {
+      actorId: user.id,
+      conversationId: id,
+      threadRootId,
+      page: query.page,
+      limit: query.limit,
+    });
+    return { message: CHAT_SUCCESS_MESSAGES.MESSAGES_FETCHED, data };
+  }
+
+  @Get('conversations/:id/messages/:messageId')
+  async getMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('messageId', ParseUuidPipe) messageId: string,
+  ) {
+    const data = await this.proxy.sendChat<MessageView>(
+      CHAT_PATTERNS.GET_MESSAGE,
+      {
+        actorId: user.id,
+        conversationId: id,
+        messageId,
+      },
+    );
+    return { message: CHAT_SUCCESS_MESSAGES.MESSAGES_FETCHED, data };
+  }
+
+  @Get('channels/public')
+  async listPublicChannels(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: Request & { organization?: OrganizationView },
+  ) {
+    this.assertFullMember(request);
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_PUBLIC_CHANNELS, {
+      actorId: user.id,
+    });
+    return { message: CHAT_SUCCESS_MESSAGES.CONVERSATIONS_FETCHED, data };
+  }
+
+  @Post('conversations/:id/join')
+  @HttpCode(HttpStatus.OK)
+  async joinChannel(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Req() request: Request & { organization?: OrganizationView },
+  ) {
+    this.assertFullMember(request);
+    const data = await this.proxy.sendChat<ConversationView>(
+      CHAT_PATTERNS.JOIN_CHANNEL,
+      { actorId: user.id, conversationId: id },
+    );
+    await this.presence.attachToConversations([data]);
+    const memberIds = data.members.map((member) => member.userId);
+    await this.conversationCache.setMemberIds(data.id, memberIds);
+    this.chatGateway.broadcastConversationUpdated(data, memberIds);
+    return { message: CHAT_SUCCESS_MESSAGES.MEMBERS_ADDED, data };
+  }
+
+  @Post('conversations/:id/invites')
+  @HttpCode(HttpStatus.CREATED)
+  async createChannelInvite(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: CreateChannelInviteDto,
+  ) {
+    const data = await this.proxy.sendChat<ChannelInviteView>(
+      CHAT_PATTERNS.CREATE_CHANNEL_INVITE,
+      {
+        actorId: user.id,
+        conversationId: id,
+        expiresInHours: dto.expiresInHours,
+        maxUses: dto.maxUses,
+      },
+    );
+    return { message: 'Channel invite created successfully', data };
+  }
+
+  @Get('conversations/:id/invites')
+  async listChannelInvites(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    const data = await this.proxy.sendChat<ChannelInviteView[]>(
+      CHAT_PATTERNS.LIST_CHANNEL_INVITES,
+      { actorId: user.id, conversationId: id },
+    );
+    return { message: 'Channel invites retrieved successfully', data };
+  }
+
+  @Delete('conversations/:id/invites/:inviteId')
+  @HttpCode(HttpStatus.OK)
+  async revokeChannelInvite(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('inviteId', ParseUuidPipe) inviteId: string,
+  ) {
+    const data = await this.proxy.sendChat<ChannelInviteView>(
+      CHAT_PATTERNS.REVOKE_CHANNEL_INVITE,
+      {
+        actorId: user.id,
+        conversationId: id,
+        inviteId,
+      },
+    );
+    return { message: 'Channel invite revoked successfully', data };
+  }
+
+  @Post('channel-invites/:token/accept')
+  @HttpCode(HttpStatus.OK)
+  async acceptChannelInvite(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('token') token: string,
+  ) {
+    const data = await this.proxy.sendChat<ConversationView>(
+      CHAT_PATTERNS.ACCEPT_CHANNEL_INVITE,
+      { actorId: user.id, token },
+    );
+    await this.presence.attachToConversations([data]);
+    const memberIds = data.members.map((member) => member.userId);
+    await this.conversationCache.setMemberIds(data.id, memberIds);
+    this.chatGateway.broadcastConversationUpdated(data, memberIds);
+    return { message: CHAT_SUCCESS_MESSAGES.MEMBERS_ADDED, data };
+  }
+
+  @Post('conversations/:id/incoming-webhooks')
+  @HttpCode(HttpStatus.CREATED)
+  async createIncomingWebhook(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: CreateIncomingWebhookDto,
+  ) {
+    const data = await this.proxy.sendChat<IncomingWebhookView>(
+      CHAT_PATTERNS.CREATE_INCOMING_WEBHOOK,
+      {
+        actorId: user.id,
+        conversationId: id,
+        name: dto.name,
+        defaultUsername: dto.defaultUsername,
+        defaultIconUrl: dto.defaultIconUrl ?? null,
+      },
+    );
+    return { message: 'Incoming webhook created successfully', data };
+  }
+
+  @Get('conversations/:id/incoming-webhooks')
+  async listIncomingWebhooks(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    const data = await this.proxy.sendChat<IncomingWebhookView[]>(
+      CHAT_PATTERNS.LIST_INCOMING_WEBHOOKS,
+      { actorId: user.id, conversationId: id },
+    );
+    return { message: 'Incoming webhooks retrieved successfully', data };
+  }
+
+  @Delete('conversations/:id/incoming-webhooks/:webhookId')
+  @HttpCode(HttpStatus.OK)
+  async revokeIncomingWebhook(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('webhookId', ParseUuidPipe) webhookId: string,
+  ) {
+    const data = await this.proxy.sendChat<IncomingWebhookView>(
+      CHAT_PATTERNS.REVOKE_INCOMING_WEBHOOK,
+      {
+        actorId: user.id,
+        conversationId: id,
+        webhookId,
+      },
+    );
+    return { message: 'Incoming webhook revoked successfully', data };
+  }
+
+  @Get('slash-commands')
+  async listSlashCommands(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.proxy.sendChat<SlashCommandView[]>(
+      CHAT_PATTERNS.LIST_SLASH_COMMANDS,
+      { actorId: user.id },
+    );
+    return { message: 'Slash commands retrieved successfully', data };
+  }
+
+  @Post('slash-commands')
+  @HttpCode(HttpStatus.CREATED)
+  async createSlashCommand(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateSlashCommandDto,
+    @Req() request: Request & { organization?: OrganizationView },
+  ) {
+    this.assertWorkspaceManager(request);
+    const data = await this.proxy.sendChat<SlashCommandView>(
+      CHAT_PATTERNS.CREATE_SLASH_COMMAND,
+      {
+        actorId: user.id,
+        name: dto.name,
+        description: dto.description,
+        responseTemplate: dto.responseTemplate,
+      },
+    );
+    return { message: 'Slash command created successfully', data };
+  }
+
+  @Delete('slash-commands/:commandId')
+  @HttpCode(HttpStatus.OK)
+  async revokeSlashCommand(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('commandId', ParseUuidPipe) commandId: string,
+    @Req() request: Request & { organization?: OrganizationView },
+  ) {
+    this.assertWorkspaceManager(request);
+    const data = await this.proxy.sendChat<SlashCommandView>(
+      CHAT_PATTERNS.REVOKE_SLASH_COMMAND,
+      { actorId: user.id, commandId },
+    );
+    return { message: 'Slash command revoked successfully', data };
+  }
+
+  @Post('conversations/:id/slash')
+  @HttpCode(HttpStatus.OK)
+  async invokeSlashCommand(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: InvokeSlashCommandDto,
+  ) {
+    const result = await this.proxy.sendChat<InvokeSlashCommandResult>(
+      CHAT_PATTERNS.INVOKE_SLASH_COMMAND,
+      {
+        actorId: user.id,
+        conversationId: id,
+        raw: dto.raw,
+      },
+    );
+
+    if (result.kind === 'status') {
+      const presence = await this.presence.setStatus(
+        user.id,
+        PresenceStatus.ONLINE,
+        result.customStatus ?? null,
+      );
+      this.chatGateway.emitPresenceUpdate(presence);
+      return {
+        message: 'Status updated',
+        data: {
+          kind: result.kind,
+          ephemeral: result.ephemeral ?? null,
+          customStatus: result.customStatus ?? null,
+        },
+      };
+    }
+
+    if (result.kind === 'ephemeral') {
+      return {
+        message: 'Slash command executed',
+        data: { kind: result.kind, ephemeral: result.ephemeral ?? '' },
+      };
+    }
+
+    const messageResult = result.message;
+    if (!messageResult) {
+      throw new BadRequestAppException('Slash command produced no message');
+    }
+    const { recipientIds, ...message } = messageResult;
+    this.chatGateway.broadcastMessage(message, recipientIds);
+    return {
+      message: 'Slash command executed',
+      data: { kind: 'message' as const, message },
+    };
+  }
+
+  @Get('user-groups')
+  async listUserGroups(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.proxy.sendChat<UserGroupView[]>(
+      CHAT_PATTERNS.LIST_USER_GROUPS,
+      { actorId: user.id },
+    );
+    return { message: 'User groups retrieved successfully', data };
+  }
+
+  @Post('user-groups')
+  @HttpCode(HttpStatus.CREATED)
+  async createUserGroup(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateUserGroupDto,
+    @Req() request: Request & { organization?: OrganizationView },
+  ) {
+    this.assertWorkspaceManager(request);
+    const data = await this.proxy.sendChat<UserGroupView>(
+      CHAT_PATTERNS.CREATE_USER_GROUP,
+      {
+        actorId: user.id,
+        name: dto.name,
+        displayName: dto.displayName,
+        description: dto.description ?? null,
+        memberIds: dto.memberIds,
+      },
+    );
+    return { message: 'User group created successfully', data };
+  }
+
+  @Patch('user-groups/:groupId')
+  async updateUserGroup(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('groupId', ParseUuidPipe) groupId: string,
+    @Body() dto: UpdateUserGroupDto,
+    @Req() request: Request & { organization?: OrganizationView },
+  ) {
+    this.assertWorkspaceManager(request);
+    const data = await this.proxy.sendChat<UserGroupView>(
+      CHAT_PATTERNS.UPDATE_USER_GROUP,
+      {
+        actorId: user.id,
+        groupId,
+        displayName: dto.displayName,
+        description: dto.description,
+        memberIds: dto.memberIds,
+      },
+    );
+    return { message: 'User group updated successfully', data };
+  }
+
+  @Delete('user-groups/:groupId')
+  @HttpCode(HttpStatus.OK)
+  async deleteUserGroup(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('groupId', ParseUuidPipe) groupId: string,
+    @Req() request: Request & { organization?: OrganizationView },
+  ) {
+    this.assertWorkspaceManager(request);
+    const data = await this.proxy.sendChat<{ deleted: boolean }>(
+      CHAT_PATTERNS.DELETE_USER_GROUP,
+      { actorId: user.id, groupId },
+    );
+    return { message: 'User group deleted successfully', data };
   }
 
   @Get('conversations/:id/media')
@@ -422,6 +888,27 @@ export class ChatController {
         'Call history messages are system-generated only',
       );
     }
+
+    let onlineUserIds: string[] | undefined;
+    const bodyText = dto.body ?? '';
+    if (/(^|[\s([{])@here\b/i.test(bodyText)) {
+      let memberIds = await this.conversationCache.getMemberIds(id);
+      if (!memberIds || memberIds.length === 0) {
+        const conversation = await this.proxy.sendChat<ConversationView>(
+          CHAT_PATTERNS.GET_CONVERSATION,
+          { actorId: user.id, conversationId: id },
+        );
+        memberIds = conversation.members.map((member) => member.userId);
+        await this.conversationCache.setMemberIds(id, memberIds);
+      }
+      const presence = await this.presence.getPresenceMap(
+        memberIds.filter((memberId) => memberId !== user.id),
+      );
+      onlineUserIds = [...presence.entries()]
+        .filter(([, view]) => view.status !== PresenceStatus.OFFLINE)
+        .map(([memberId]) => memberId);
+    }
+
     const result = await this.proxy.sendChat<SendMessageResult>(
       CHAT_PATTERNS.SEND_MESSAGE,
       {
@@ -430,21 +917,33 @@ export class ChatController {
         body: dto.body,
         type: dto.type,
         replyToMessageId: dto.replyToMessageId,
+        threadRootId: dto.threadRootId,
         attachmentUrl: dto.attachmentUrl,
         attachmentMime: dto.attachmentMime,
         attachmentName: dto.attachmentName,
         attachmentSize: dto.attachmentSize,
         mentionUserIds: dto.mentionUserIds,
+        onlineUserIds,
+        alsoSendToChannel: dto.alsoSendToChannel,
         linkPreview: dto.linkPreview ?? null,
       },
     );
-    const { recipientIds, mutedRecipientIds, ...data } = result;
+    const {
+      recipientIds,
+      mutedRecipientIds,
+      pushRecipientIds,
+      channelBroadcast,
+      ...data
+    } = result;
     await this.conversationCache.setMemberIds(id, recipientIds);
     this.chatGateway.broadcastMessage(data, recipientIds);
+    if (channelBroadcast) {
+      this.chatGateway.broadcastMessage(channelBroadcast, recipientIds);
+    }
     void this.push.notifyOfflineRecipients({
-      recipientIds,
+      recipientIds: pushRecipientIds ?? recipientIds,
       senderId: user.id,
-      title: 'New Relay message',
+      title: data.threadRootId ? 'New thread reply' : 'New Relay message',
       body: (data.body || 'Attachment').slice(0, 120),
       conversationId: id,
       mentionUserIds: data.mentions ?? dto.mentionUserIds ?? [],
@@ -459,6 +958,21 @@ export class ChatController {
       message: 'Push public key',
       data: { publicKey: this.push.getPublicKey(), enabled: this.push.isEnabled() },
     };
+  }
+
+  @Get('notification-prefs')
+  async getNotificationPrefs(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.notificationPrefs.get(user.id);
+    return { message: 'Notification preferences retrieved', data };
+  }
+
+  @Patch('notification-prefs')
+  async updateNotificationPrefs(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: UpdateNotificationPrefsDto,
+  ) {
+    const data = await this.notificationPrefs.set(user.id, dto);
+    return { message: 'Notification preferences updated', data };
   }
 
   /** ICE servers for WebRTC voice calls (STUN always; TURN only if configured). */
@@ -554,6 +1068,20 @@ export class ChatController {
     await this.conversationCache.setMemberIds(id, recipientIds);
     this.chatGateway.broadcastMessage(data, recipientIds);
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_EDITED, data };
+  }
+
+  @Get('conversations/:id/messages/:messageId/edits')
+  async listMessageEdits(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('messageId', ParseUuidPipe) messageId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_MESSAGE_EDITS, {
+      actorId: user.id,
+      conversationId: id,
+      messageId,
+    });
+    return { message: 'Message edit history loaded', data };
   }
 
   @Post('conversations/:id/messages/:messageId/reactions')
@@ -669,6 +1197,64 @@ export class ChatController {
     return { message: 'Bookmarks retrieved', data };
   }
 
+  @Get('threads')
+  async listMyThreads(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ChatPageQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_MY_THREADS, {
+      actorId: user.id,
+      page: query.page,
+      limit: query.limit,
+    });
+    return { message: 'Threads retrieved', data };
+  }
+
+  @Post('conversations/:id/threads/:threadRootId/follow')
+  @HttpCode(HttpStatus.OK)
+  async followThread(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('threadRootId', ParseUuidPipe) threadRootId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.FOLLOW_THREAD, {
+      actorId: user.id,
+      conversationId: id,
+      threadRootId,
+    });
+    return { message: 'Thread followed', data };
+  }
+
+  @Delete('conversations/:id/threads/:threadRootId/follow')
+  @HttpCode(HttpStatus.OK)
+  async unfollowThread(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('threadRootId', ParseUuidPipe) threadRootId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.UNFOLLOW_THREAD, {
+      actorId: user.id,
+      conversationId: id,
+      threadRootId,
+    });
+    return { message: 'Thread unfollowed', data };
+  }
+
+  @Post('conversations/:id/threads/:threadRootId/read')
+  @HttpCode(HttpStatus.OK)
+  async markThreadRead(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('threadRootId', ParseUuidPipe) threadRootId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.MARK_THREAD_READ, {
+      actorId: user.id,
+      conversationId: id,
+      threadRootId,
+    });
+    return { message: 'Thread marked read', data };
+  }
+
   @Post('bookmarks')
   @HttpCode(HttpStatus.CREATED)
   async saveBookmark(
@@ -764,6 +1350,81 @@ export class ChatController {
     return { message: CHAT_SUCCESS_MESSAGES.SCHEDULED_MESSAGE_CANCELLED, data };
   }
 
+  @Put('conversations/:id/draft')
+  async upsertDraft(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: UpsertDraftDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.UPSERT_DRAFT, {
+      actorId: user.id,
+      conversationId: id,
+      body: dto.body,
+    });
+    return { message: 'Draft saved', data };
+  }
+
+  @Get('conversations/:id/draft')
+  async getDraft(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.GET_DRAFT, {
+      actorId: user.id,
+      conversationId: id,
+    });
+    return { message: 'Draft retrieved', data };
+  }
+
+  @Delete('conversations/:id/draft')
+  async clearDraft(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.CLEAR_DRAFT, {
+      actorId: user.id,
+      conversationId: id,
+    });
+    return { message: 'Draft cleared', data };
+  }
+
+  @Post('conversations/:id/messages/:messageId/remind')
+  @HttpCode(HttpStatus.CREATED)
+  async createReminder(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('messageId', ParseUuidPipe) messageId: string,
+    @Body() dto: CreateReminderDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.CREATE_REMINDER, {
+      actorId: user.id,
+      conversationId: id,
+      messageId,
+      remindAt: dto.remindAt,
+    });
+    return { message: 'Reminder created', data };
+  }
+
+  @Get('reminders')
+  async listReminders(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_REMINDERS, {
+      actorId: user.id,
+    });
+    return { message: 'Reminders retrieved', data };
+  }
+
+  @Delete('reminders/:id')
+  async cancelReminder(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) reminderId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.CANCEL_REMINDER, {
+      actorId: user.id,
+      reminderId,
+    });
+    return { message: 'Reminder cancelled', data };
+  }
+
   @Post('conversations/:id/messages/:messageId/forward')
   @HttpCode(HttpStatus.CREATED)
   async forwardMessage(
@@ -807,6 +1468,23 @@ export class ChatController {
   ) {
     const data = await this.ai.smartReplies(user.id, id);
     return { message: 'Smart replies ready', data };
+  }
+
+  @Post('conversations/:id/messages/:messageId/translate')
+  @HttpCode(HttpStatus.OK)
+  async translateMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('messageId', ParseUuidPipe) messageId: string,
+    @Body() body: { targetLanguage?: string },
+  ) {
+    const data = await this.ai.translateMessage(
+      user.id,
+      id,
+      messageId,
+      body?.targetLanguage ?? 'en',
+    );
+    return { message: 'Translation ready', data };
   }
 
   @Post('uploads')
@@ -1118,12 +1796,106 @@ export class ChatController {
         actorId: user.id,
         conversationId: id,
         name: dto.name,
+        visibility: dto.visibility,
+        announceOnly: dto.announceOnly,
+        topic: dto.topic,
+        description: dto.description,
       },
     );
     await this.presence.attachToConversations([data]);
     const memberIds = data.members.map((member) => member.userId);
     this.chatGateway.broadcastConversationUpdated(data, memberIds);
     return { message: CHAT_SUCCESS_MESSAGES.GROUP_UPDATED, data };
+  }
+
+  @Post('conversations/:id/channel-bookmarks')
+  @HttpCode(HttpStatus.CREATED)
+  async addChannelBookmark(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: AddChannelBookmarkDto,
+  ) {
+    const data = await this.proxy.sendChat<ConversationView>(
+      CHAT_PATTERNS.ADD_CHANNEL_BOOKMARK,
+      {
+        actorId: user.id,
+        conversationId: id,
+        title: dto.title,
+        url: dto.url,
+      },
+    );
+    await this.presence.attachToConversations([data]);
+    const memberIds = data.members.map((member) => member.userId);
+    this.chatGateway.broadcastConversationUpdated(data, memberIds);
+    return { message: 'Channel bookmark added', data };
+  }
+
+  @Delete('conversations/:id/channel-bookmarks/:bookmarkId')
+  @HttpCode(HttpStatus.OK)
+  async removeChannelBookmark(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('bookmarkId', ParseUuidPipe) bookmarkId: string,
+  ) {
+    const data = await this.proxy.sendChat<ConversationView>(
+      CHAT_PATTERNS.REMOVE_CHANNEL_BOOKMARK,
+      {
+        actorId: user.id,
+        conversationId: id,
+        bookmarkId,
+      },
+    );
+    await this.presence.attachToConversations([data]);
+    const memberIds = data.members.map((member) => member.userId);
+    this.chatGateway.broadcastConversationUpdated(data, memberIds);
+    return { message: 'Channel bookmark removed', data };
+  }
+
+  @Get('sidebar/sections')
+  async listSidebarSections(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_SIDEBAR_SECTIONS, {
+      actorId: user.id,
+    });
+    return { message: 'Sidebar sections loaded', data };
+  }
+
+  @Post('sidebar/sections')
+  @HttpCode(HttpStatus.CREATED)
+  async createSidebarSection(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateSidebarSectionDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.CREATE_SIDEBAR_SECTION, {
+      actorId: user.id,
+      name: dto.name,
+    });
+    return { message: 'Sidebar section created', data };
+  }
+
+  @Patch('sidebar/sections/:sectionId')
+  async updateSidebarSection(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('sectionId', ParseUuidPipe) sectionId: string,
+    @Body() dto: UpdateSidebarSectionDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.UPDATE_SIDEBAR_SECTION, {
+      actorId: user.id,
+      sectionId,
+      ...dto,
+    });
+    return { message: 'Sidebar section updated', data };
+  }
+
+  @Delete('sidebar/sections/:sectionId')
+  async deleteSidebarSection(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('sectionId', ParseUuidPipe) sectionId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.DELETE_SIDEBAR_SECTION, {
+      actorId: user.id,
+      sectionId,
+    });
+    return { message: 'Sidebar section deleted', data };
   }
 
   @Delete('conversations/:id')

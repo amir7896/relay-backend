@@ -12,6 +12,9 @@ import { CreateAuthTokens1730000000000 } from './migrations/1730000000000-Create
 import { CreateOrganizations1741000000000 } from './migrations/1741000000000-CreateOrganizations';
 import { DropOrganizationDatabaseColumns1742000000000 } from './migrations/1742000000000-DropOrganizationDatabaseColumns';
 import { AddInviteOrganizationId1743000000000 } from './migrations/1743000000000-AddInviteOrganizationId';
+import { AddTwoFactorSessionsBillingSso1743000002000 } from './migrations/1743000002000-AddTwoFactorSessionsBillingSso';
+import { AddStripeBillingColumns1743000003000 } from './migrations/1743000003000-AddStripeBillingColumns';
+import { AddSsoSecretInviteRoleGuest1743000004000 } from './migrations/1743000004000-AddSsoSecretInviteRoleGuest';
 
 config({
   path: [
@@ -41,6 +44,9 @@ export default new DataSource({
     CreateOrganizations1741000000000,
     DropOrganizationDatabaseColumns1742000000000,
     AddInviteOrganizationId1743000000000,
+    AddTwoFactorSessionsBillingSso1743000002000,
+    AddStripeBillingColumns1743000003000,
+    AddSsoSecretInviteRoleGuest1743000004000,
   ],
   synchronize: false,
 });

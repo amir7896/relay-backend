@@ -1,4 +1,4 @@
-export type OrgMemberRole = 'owner' | 'admin' | 'member';
+export type OrgMemberRole = 'owner' | 'admin' | 'member' | 'guest';
 
 export interface OrganizationView {
   id: string;
@@ -7,6 +7,10 @@ export interface OrganizationView {
   status: 'active' | 'suspended';
   isDefault: boolean;
   role?: OrgMemberRole;
+  plan: 'free' | 'pro' | 'enterprise';
+  maxSeats: number;
+  seatCount?: number;
+  ssoEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -81,6 +85,8 @@ export interface AcceptInviteResult {
   organizations: OrganizationView[];
   activeOrganizationId: string;
   alreadyMember: boolean;
+  /** Membership role granted by the invite (guests skip #general). */
+  role: OrgMemberRole;
 }
 
 export interface OrgMemberView {
@@ -98,7 +104,7 @@ export interface SetOrgMemberRolePayload {
   organizationId: string;
   actorId: string;
   memberId: string;
-  role: 'admin' | 'member';
+  role: 'admin' | 'member' | 'guest';
 }
 
 export interface RemoveOrgMemberPayload {
@@ -111,6 +117,92 @@ export interface UpdateOrganizationPayload {
   organizationId: string;
   actorId: string;
   name: string;
+}
+
+export interface UpdateOrgBillingPayload {
+  organizationId: string;
+  actorId: string;
+  plan?: 'free' | 'pro' | 'enterprise';
+  maxSeats?: number;
+}
+
+export interface CreateBillingCheckoutPayload {
+  organizationId: string;
+  actorId: string;
+  plan: 'pro' | 'enterprise';
+  successUrl: string;
+  cancelUrl: string;
+}
+
+export interface BillingCheckoutResult {
+  url: string;
+}
+
+export interface CreateBillingPortalPayload {
+  organizationId: string;
+  actorId: string;
+  returnUrl: string;
+}
+
+export interface BillingPortalResult {
+  url: string;
+}
+
+export interface ApplyStripeSubscriptionPayload {
+  customerId: string;
+  subscriptionId: string | null;
+  priceId: string | null;
+  status: string;
+}
+
+export interface HandleStripeWebhookPayload {
+  /** Raw body string for signature verification when secret is set */
+  rawBody?: string;
+  signature?: string;
+  /** Unsigned / parsed event for local testing without webhook secret */
+  type?: string;
+  data?: Record<string, unknown>;
+}
+
+export interface UpdateOrgSsoPayload {
+  organizationId: string;
+  actorId: string;
+  ssoEnabled: boolean;
+  ssoProvider?: 'oidc' | 'saml' | null;
+  ssoIssuerUrl?: string | null;
+  ssoClientId?: string | null;
+  /** Write-only; omit to keep existing secret. */
+  ssoClientSecret?: string | null;
+}
+
+export interface OrgSsoView {
+  organizationId: string;
+  ssoEnabled: boolean;
+  ssoProvider: 'oidc' | 'saml' | null;
+  ssoIssuerUrl: string | null;
+  ssoClientId: string | null;
+  hasClientSecret: boolean;
+  /** Workspace billing plan — SSO login requires pro or enterprise. */
+  plan: 'free' | 'pro' | 'enterprise';
+  /** True when OIDC login can start (paid plan + enabled + issuer + client id + secret). */
+  configured: boolean;
+}
+
+/** Gateway-only: includes client secret for token exchange. */
+export interface OrgSsoCredentialsView extends OrgSsoView {
+  ssoClientSecret: string | null;
+  slug: string;
+  name: string;
+}
+
+export interface SsoCompletePayload {
+  organizationId: string;
+  email: string;
+  emailVerified?: boolean;
+  firstName?: string;
+  lastName?: string;
+  ip?: string;
+  userAgent?: string;
 }
 
 export interface TransferOwnershipPayload {

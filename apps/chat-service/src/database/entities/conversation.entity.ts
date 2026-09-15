@@ -46,6 +46,32 @@ export class Conversation {
   @Column({ type: 'int', default: 0 })
   disappearingDurationSeconds!: number;
 
+  /** public = any org member can browse/join; private = invite/add only */
+  @Column({ type: 'varchar', length: 16, default: 'private' })
+  visibility!: 'public' | 'private';
+
+  /** When true, only owner/admin may post in the channel */
+  @Column({ type: 'boolean', default: false })
+  announceOnly!: boolean;
+
+  /** Short Slack-style topic shown under the channel name */
+  @Column({ type: 'varchar', length: 250, nullable: true })
+  topic!: string | null;
+
+  /** Longer channel purpose / description */
+  @Column({ type: 'varchar', length: 2000, nullable: true })
+  description!: string | null;
+
+  /** Channel header bookmark links */
+  @Column({ type: 'jsonb', default: [] })
+  bookmarks!: Array<{
+    id: string;
+    title: string;
+    url: string;
+    createdBy: string;
+    createdAt: string;
+  }>;
+
   @OneToMany(() => ConversationMember, (member) => member.conversation)
   members!: ConversationMember[];
 

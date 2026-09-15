@@ -41,6 +41,7 @@ export const gatewayEnvSchema = Joi.object({
   GATEWAY_WORKERS: Joi.number().integer().min(0).default(1),
   AUTH_VALIDATE_CACHE_SECONDS: Joi.number().integer().min(1).max(60).default(15),
   CORS_ORIGIN: Joi.string().default('*'),
+  API_PUBLIC_URL: Joi.string().uri().optional().allow(''),
   STORAGE_DRIVER: Joi.string()
     .valid('local', 's3', 'cloudinary')
     .default('local'),

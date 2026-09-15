@@ -38,6 +38,10 @@ export class AuthToken {
   @Column({ type: 'uuid', nullable: true })
   organizationId!: string | null;
 
+  /** Workspace invite role: member (default) or guest. */
+  @Column({ type: 'varchar', length: 20, default: 'member' })
+  inviteRole!: 'member' | 'guest';
+
   @Column({ type: 'int', default: 1 })
   maxUses!: number;
 

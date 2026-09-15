@@ -35,6 +35,12 @@ export class AuthUser {
   @Column({ type: 'boolean', default: false })
   isEmailVerified!: boolean;
 
+  @Column({ type: 'varchar', length: 128, nullable: true, select: false })
+  totpSecret!: string | null;
+
+  @Column({ type: 'boolean', default: false })
+  totpEnabled!: boolean;
+
   @OneToMany(() => RefreshToken, (token) => token.user)
   refreshTokens!: RefreshToken[];
 

@@ -11,7 +11,7 @@ import {
 } from 'typeorm';
 import { Organization } from './organization.entity';
 
-export type OrgMemberRole = 'owner' | 'admin' | 'member';
+export type OrgMemberRole = 'owner' | 'admin' | 'member' | 'guest';
 
 @Entity({ name: 'organization_members' })
 @Unique('UQ_organization_members_org_user', ['organizationId', 'userId'])
