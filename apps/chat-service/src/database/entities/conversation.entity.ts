@@ -72,6 +72,12 @@ export class Conversation {
     createdAt: string;
   }>;
 
+  @Column({ type: 'boolean', default: false })
+  isShared!: boolean;
+
+  @Column({ type: 'varchar', length: 320, nullable: true })
+  sharedExternalLabel!: string | null;
+
   @OneToMany(() => ConversationMember, (member) => member.conversation)
   members!: ConversationMember[];
 

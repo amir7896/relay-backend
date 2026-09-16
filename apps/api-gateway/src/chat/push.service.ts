@@ -91,43 +91,39 @@ export class PushService {
         .filter((id) => id !== input.senderId)
         .map(async (userId) => {
           const isMentioned = mentioned.has(userId);
-          if (muted.has(userId) && !isMentioned) {
-            return;
-          }
-
           const prefs = await this.prefs.get(userId);
-          if (prefs.mode === 'none') {
+          const myStatus = prefs.respectStatus
+            ? await this.presence.getManualMode(userId)
+            : null;
+          const decision = this.prefs.shouldNotifyMessage(prefs, {
+            conversationId: input.conversationId,
+            mentionsMe: isMentioned,
+            muted: muted.has(userId),
+            body: input.body,
+            myStatus,
+          });
+          if (!decision.notify) {
             return;
-          }
-          if (prefs.mode === 'mentions' && !isMentioned) {
-            return;
-          }
-          if (this.prefs.isInQuietHours(prefs) && !isMentioned) {
-            // Mentions still break through quiet hours (Slack-like).
-            return;
-          }
-          if (prefs.respectStatus) {
-            const mode = await this.presence.getManualMode(userId);
-            if (
-              mode === PresenceStatus.DND ||
-              mode === PresenceStatus.BUSY ||
-              (mode === PresenceStatus.AWAY && !isMentioned)
-            ) {
-              return;
-            }
           }
 
           const presence = await this.presence.getPresence(userId);
           if (presence.status !== PresenceStatus.OFFLINE) {
             return;
           }
+          const highlightLabel = isMentioned
+            ? 'mentioned you'
+            : decision.matchedKeyword
+              ? 'keyword match'
+              : null;
           await this.sendToUser(userId, {
-            title: isMentioned
-              ? `${input.title} · mentioned you`
+            title: highlightLabel
+              ? `${input.title} · ${highlightLabel}`
               : input.title,
             body: isMentioned
               ? `Mention: ${input.body}`.slice(0, 120)
-              : input.body,
+              : decision.matchedKeyword
+                ? `Keyword: ${input.body}`.slice(0, 120)
+                : input.body,
             conversationId: input.conversationId,
           });
         }),

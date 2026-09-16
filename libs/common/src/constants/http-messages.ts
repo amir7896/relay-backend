@@ -78,6 +78,7 @@ export const CHAT_SUCCESS_MESSAGES = {
   GROUP_DELETED: 'Group deleted successfully',
   TYPING_UPDATED: 'Typing status updated',
   SEEN_UPDATED: 'Messages marked as seen',
+  UNREAD_UPDATED: 'Conversation marked as unread',
   PRESENCE_FETCHED: 'Presence retrieved successfully',
   USER_BLOCKED: 'User blocked successfully',
   USER_UNBLOCKED: 'User unblocked successfully',

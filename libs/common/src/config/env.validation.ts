@@ -18,6 +18,22 @@ const postgresSchema = {
   POSTGRES_POOL_MIN: Joi.number().integer().min(0).max(20).default(2),
 };
 
+const mailSchema = {
+  APP_PUBLIC_URL: Joi.string().uri().optional().allow(''),
+  FRONTEND_URL: Joi.string().uri().optional().allow(''),
+  SMTP_HOST: Joi.string().optional().allow(''),
+  SMTP_PORT: Joi.number().port().default(587),
+  SMTP_SECURE: Joi.boolean()
+    .truthy('true', '1', 'yes')
+    .falsy('false', '0', 'no')
+    .default(false),
+  SMTP_USER: Joi.string().optional().allow(''),
+  SMTP_PASS: Joi.string().optional().allow(''),
+  SMTP_FROM: Joi.string().optional().allow(''),
+  EMAIL_VERIFY_TTL_HOURS: Joi.number().integer().min(1).max(168).default(48),
+  PASSWORD_RESET_TTL_HOURS: Joi.number().integer().min(1).max(48).default(2),
+};
+
 export const gatewayEnvSchema = Joi.object({
   NODE_ENV: Joi.string()
     .valid('development', 'test', 'production')
@@ -86,26 +102,12 @@ export const gatewayEnvSchema = Joi.object({
     otherwise: Joi.string().optional().allow(''),
   }),
   STORAGE_CLOUDINARY_FOLDER: Joi.string().allow('').default('relay'),
-  APP_PUBLIC_URL: Joi.string().uri().optional().allow(''),
-  FRONTEND_URL: Joi.string().uri().optional().allow(''),
   VAPID_PUBLIC_KEY: Joi.string().optional().allow(''),
   VAPID_PRIVATE_KEY: Joi.string().optional().allow(''),
   VAPID_SUBJECT: Joi.string().default('mailto:admin@relay.local'),
+  ...mailSchema,
   ...rabbitMqSchema,
 });
-
-const mailSchema = {
-  APP_PUBLIC_URL: Joi.string().uri().optional().allow(''),
-  FRONTEND_URL: Joi.string().uri().optional().allow(''),
-  SMTP_HOST: Joi.string().optional().allow(''),
-  SMTP_PORT: Joi.number().port().default(587),
-  SMTP_SECURE: Joi.boolean().default(false),
-  SMTP_USER: Joi.string().optional().allow(''),
-  SMTP_PASS: Joi.string().optional().allow(''),
-  SMTP_FROM: Joi.string().optional().allow(''),
-  EMAIL_VERIFY_TTL_HOURS: Joi.number().integer().min(1).max(168).default(48),
-  PASSWORD_RESET_TTL_HOURS: Joi.number().integer().min(1).max(48).default(2),
-};
 
 export const authEnvSchema = Joi.object({
   NODE_ENV: Joi.string()
@@ -142,6 +144,8 @@ export const chatEnvSchema = Joi.object({
     .default('development'),
   CHAT_HTTP_PORT: Joi.number().port().default(3004),
   CHAT_POSTGRES_DATABASE: Joi.string().required(),
+  APP_PUBLIC_URL: Joi.string().uri().optional().allow(''),
+  FRONTEND_URL: Joi.string().uri().optional().allow(''),
   ...postgresSchema,
   ...rabbitMqSchema,
 });

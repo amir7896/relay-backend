@@ -35,6 +35,7 @@ import { AddMentionsGinIndex1743000011000 } from './migrations/1743000011000-Add
 import { AddIncomingWebhooks1743000012000 } from './migrations/1743000012000-AddIncomingWebhooks';
 import { AddSlashCommands1743000013000 } from './migrations/1743000013000-AddSlashCommands';
 import { AddUserGroups1743000014000 } from './migrations/1743000014000-AddUserGroups';
+import { AddOutgoingWebhooksAndSlashInteractive1743000015000 } from './migrations/1743000015000-AddOutgoingWebhooksAndSlashInteractive';
 
 import { ScheduledMessage } from './entities/scheduled-message.entity';
 import { MessageBookmark } from './entities/message-bookmark.entity';
@@ -45,8 +46,11 @@ import { ThreadFollow } from './entities/thread-follow.entity';
 import { MessageEdit } from './entities/message-edit.entity';
 import { SidebarSection } from './entities/sidebar-section.entity';
 import { IncomingWebhook } from './entities/incoming-webhook.entity';
+import { OutgoingWebhook } from './entities/outgoing-webhook.entity';
 import { SlashCommand } from './entities/slash-command.entity';
 import { UserGroup } from './entities/user-group.entity';
+import { SLACK_PRODUCT_ENTITIES } from './entities/slack-product.entities';
+import { AddSlackProducts1743000016000 } from './migrations/1743000016000-AddSlackProducts';
 
 config({
   path: [
@@ -80,8 +84,10 @@ export default new DataSource({
     MessageEdit,
     SidebarSection,
     IncomingWebhook,
+    OutgoingWebhook,
     SlashCommand,
     UserGroup,
+    ...SLACK_PRODUCT_ENTITIES,
   ],
   migrations: [
     CreateChatSchema1730000000000,
@@ -110,6 +116,8 @@ export default new DataSource({
     AddIncomingWebhooks1743000012000,
     AddSlashCommands1743000013000,
     AddUserGroups1743000014000,
+    AddOutgoingWebhooksAndSlashInteractive1743000015000,
+    AddSlackProducts1743000016000,
   ],
   synchronize: false,
 });

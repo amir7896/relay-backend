@@ -3,7 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import Stripe from 'stripe';
-import { RpcErrors, UserRole } from '@app/common';
+import { RpcErrors, UserRole, buildPaginatedResult, getSkipTake } from '@app/common';
+import type { PaginatedResult } from '@app/common';
 import type {
   AddOrgMemberPayload,
   ApplyStripeSubscriptionPayload,
@@ -383,20 +384,44 @@ export class OrganizationService {
 
   async listMembers(
     payload: ListOrgMembersPayload,
-  ): Promise<OrgMemberView[]> {
+  ): Promise<PaginatedResult<OrgMemberView>> {
     await this.requireOrgAdmin({
       organizationId: payload.organizationId,
       userId: payload.requestedByUserId,
     });
-    const rows = await this.members.find({
-      where: { organizationId: payload.organizationId },
-      order: { createdAt: 'ASC' },
-    });
-    return rows.map((row) => ({
-      userId: row.userId,
-      role: row.role,
-      joinedAt: row.createdAt.toISOString(),
-    }));
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 20));
+    const { skip, take } = getSkipTake(page, limit);
+
+    const qb = this.members
+      .createQueryBuilder('member')
+      .where('member.organizationId = :organizationId', {
+        organizationId: payload.organizationId,
+      })
+      .orderBy('member.createdAt', 'ASC')
+      .skip(skip)
+      .take(take);
+
+    const search = payload.search?.trim();
+    if (search) {
+      qb.innerJoin(
+        AuthUser,
+        'user',
+        'user.id = member.userId AND user.deletedAt IS NULL',
+      ).andWhere('user.email ILIKE :search', { search: `%${search}%` });
+    }
+
+    const [rows, total] = await qb.getManyAndCount();
+    return buildPaginatedResult(
+      rows.map((row) => ({
+        userId: row.userId,
+        role: row.role,
+        joinedAt: row.createdAt.toISOString(),
+      })),
+      total,
+      page,
+      limit,
+    );
   }
 
   async setMemberRole(
@@ -883,9 +908,12 @@ export class OrganizationService {
       organizationId: payload.organizationId,
       userId: payload.actorId,
     });
-    const org = await this.organizations.findOne({
-      where: { id: payload.organizationId },
-    });
+    const org = await this.organizations
+      .createQueryBuilder('org')
+      .addSelect('org.ssoClientSecret')
+      .addSelect('org.ssoIdpCertificate')
+      .where('org.id = :id', { id: payload.organizationId })
+      .getOne();
     if (!org) {
       return RpcErrors.notFound('Organization');
     }
@@ -910,6 +938,12 @@ export class OrganizationService {
     if (payload.ssoClientSecret !== undefined) {
       org.ssoClientSecret = payload.ssoClientSecret?.trim() || null;
     }
+    if (payload.ssoIdpSsoUrl !== undefined) {
+      org.ssoIdpSsoUrl = payload.ssoIdpSsoUrl?.trim() || null;
+    }
+    if (payload.ssoIdpCertificate !== undefined) {
+      org.ssoIdpCertificate = payload.ssoIdpCertificate?.trim() || null;
+    }
 
     const saved = await this.organizations.save(org);
     return this.toSsoView(saved);
@@ -926,6 +960,7 @@ export class OrganizationService {
     const org = await this.organizations
       .createQueryBuilder('org')
       .addSelect('org.ssoClientSecret')
+      .addSelect('org.ssoIdpCertificate')
       .where('org.id = :id', { id: input.organizationId })
       .getOne();
     if (!org) {
@@ -934,11 +969,12 @@ export class OrganizationService {
     return this.toSsoView(org);
   }
 
-  /** Public/gateway: load OIDC credentials by organization id (no user auth). */
+  /** Public/gateway: load SSO credentials by organization id (no user auth). */
   async getSsoCredentials(organizationId: string) {
     const org = await this.organizations
       .createQueryBuilder('org')
       .addSelect('org.ssoClientSecret')
+      .addSelect('org.ssoIdpCertificate')
       .where('org.id = :id', { id: organizationId })
       .getOne();
     if (!org) {
@@ -948,6 +984,7 @@ export class OrganizationService {
     return {
       ...view,
       ssoClientSecret: org.ssoClientSecret ?? null,
+      ssoIdpCertificate: org.ssoIdpCertificate ?? null,
       slug: org.slug,
       name: org.name,
     };
@@ -959,6 +996,7 @@ export class OrganizationService {
     const org = await this.organizations
       .createQueryBuilder('org')
       .addSelect('org.ssoClientSecret')
+      .addSelect('org.ssoIdpCertificate')
       .where('org.slug = :slug', { slug: normalized })
       .getOne();
     if (!org) {
@@ -968,6 +1006,7 @@ export class OrganizationService {
     return {
       ...view,
       ssoClientSecret: org.ssoClientSecret ?? null,
+      ssoIdpCertificate: org.ssoIdpCertificate ?? null,
       slug: org.slug,
       name: org.name,
     };
@@ -988,8 +1027,19 @@ export class OrganizationService {
 
   private toSsoView(org: Organization): OrgSsoView {
     const hasClientSecret = Boolean(org.ssoClientSecret);
+    const hasIdpCertificate = Boolean(org.ssoIdpCertificate);
     const plan = (org.plan ?? 'free') as 'free' | 'pro' | 'enterprise';
     const paidPlan = plan === 'pro' || plan === 'enterprise';
+    const oidcConfigured =
+      org.ssoProvider === 'oidc' &&
+      Boolean(org.ssoIssuerUrl) &&
+      Boolean(org.ssoClientId) &&
+      hasClientSecret;
+    const samlConfigured =
+      org.ssoProvider === 'saml' &&
+      Boolean(org.ssoIssuerUrl) &&
+      Boolean(org.ssoIdpSsoUrl) &&
+      hasIdpCertificate;
     return {
       organizationId: org.id,
       ssoEnabled: Boolean(org.ssoEnabled),
@@ -997,14 +1047,11 @@ export class OrganizationService {
       ssoIssuerUrl: org.ssoIssuerUrl ?? null,
       ssoClientId: org.ssoClientId ?? null,
       hasClientSecret,
+      ssoIdpSsoUrl: org.ssoIdpSsoUrl ?? null,
+      hasIdpCertificate,
       plan,
       configured:
-        paidPlan &&
-        Boolean(org.ssoEnabled) &&
-        org.ssoProvider === 'oidc' &&
-        Boolean(org.ssoIssuerUrl) &&
-        Boolean(org.ssoClientId) &&
-        hasClientSecret,
+        paidPlan && Boolean(org.ssoEnabled) && (oidcConfigured || samlConfigured),
     };
   }
 

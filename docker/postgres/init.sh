@@ -13,3 +13,5 @@ create_db_if_needed() {
 
 create_db_if_needed "${USER_POSTGRES_DATABASE:-}"
 create_db_if_needed "${CHAT_POSTGRES_DATABASE:-}"
+# Monolith node-backend database (single DB, independent of Nest services)
+create_db_if_needed "${POSTGRES_DATABASE:-relay}"

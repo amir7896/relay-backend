@@ -39,6 +39,7 @@ export const CHAT_PATTERNS = {
   DISPATCH_DUE_REMINDERS: 'chat.dispatch_due_reminders',
   FORWARD_MESSAGE: 'chat.forward_message',
   MARK_SEEN: 'chat.mark_seen',
+  MARK_UNREAD: 'chat.mark_unread',
   MUTE_CONVERSATION: 'chat.mute_conversation',
   PIN_CONVERSATION: 'chat.pin_conversation',
   SET_DISAPPEARING: 'chat.set_disappearing',
@@ -60,6 +61,8 @@ export const CHAT_PATTERNS = {
   GET_WORKSPACE: 'chat.get_workspace',
   UPDATE_WORKSPACE: 'chat.update_workspace',
   ENSURE_GENERAL_MEMBER: 'chat.ensure_general_member',
+  /** Add a user to a channel without requiring channel-admin actor (invite accept). */
+  ENSURE_CHANNEL_MEMBER: 'chat.ensure_channel_member',
   PURGE_ORGANIZATION: 'chat.purge_organization',
   LIST_THREAD_REPLIES: 'chat.list_thread_replies',
   LIST_MY_THREADS: 'chat.list_my_threads',
@@ -68,7 +71,9 @@ export const CHAT_PATTERNS = {
   MARK_THREAD_READ: 'chat.mark_thread_read',
   LIST_PUBLIC_CHANNELS: 'chat.list_public_channels',
   JOIN_CHANNEL: 'chat.join_channel',
+  LIST_CONVERSATION_MEMBERS: 'chat.list_conversation_members',
   CREATE_CHANNEL_INVITE: 'chat.create_channel_invite',
+  PREVIEW_CHANNEL_INVITE: 'chat.preview_channel_invite',
   ACCEPT_CHANNEL_INVITE: 'chat.accept_channel_invite',
   REVOKE_CHANNEL_INVITE: 'chat.revoke_channel_invite',
   LIST_CHANNEL_INVITES: 'chat.list_channel_invites',
@@ -82,6 +87,10 @@ export const CHAT_PATTERNS = {
   LIST_INCOMING_WEBHOOKS: 'chat.list_incoming_webhooks',
   REVOKE_INCOMING_WEBHOOK: 'chat.revoke_incoming_webhook',
   POST_INCOMING_WEBHOOK: 'chat.post_incoming_webhook',
+  CREATE_OUTGOING_WEBHOOK: 'chat.create_outgoing_webhook',
+  LIST_OUTGOING_WEBHOOKS: 'chat.list_outgoing_webhooks',
+  REVOKE_OUTGOING_WEBHOOK: 'chat.revoke_outgoing_webhook',
+  DISPATCH_OUTGOING_WEBHOOKS: 'chat.dispatch_outgoing_webhooks',
   CREATE_SLASH_COMMAND: 'chat.create_slash_command',
   LIST_SLASH_COMMANDS: 'chat.list_slash_commands',
   REVOKE_SLASH_COMMAND: 'chat.revoke_slash_command',
@@ -90,6 +99,41 @@ export const CHAT_PATTERNS = {
   CREATE_USER_GROUP: 'chat.create_user_group',
   UPDATE_USER_GROUP: 'chat.update_user_group',
   DELETE_USER_GROUP: 'chat.delete_user_group',
+  GET_CANVAS: 'chat.get_canvas',
+  PUT_CANVAS: 'chat.put_canvas',
+  LIST_CHANNEL_LISTS: 'chat.list_channel_lists',
+  GET_CHANNEL_LIST: 'chat.get_channel_list',
+  CREATE_CHANNEL_LIST: 'chat.create_channel_list',
+  UPDATE_CHANNEL_LIST: 'chat.update_channel_list',
+  DELETE_CHANNEL_LIST: 'chat.delete_channel_list',
+  CREATE_CHANNEL_LIST_ITEM: 'chat.create_channel_list_item',
+  UPDATE_CHANNEL_LIST_ITEM: 'chat.update_channel_list_item',
+  DELETE_CHANNEL_LIST_ITEM: 'chat.delete_channel_list_item',
+  LIST_CLIPS: 'chat.list_clips',
+  CREATE_CLIP: 'chat.create_clip',
+  DELETE_CLIP: 'chat.delete_clip',
+  GET_HUDDLE: 'chat.get_huddle',
+  START_HUDDLE: 'chat.start_huddle',
+  JOIN_HUDDLE: 'chat.join_huddle',
+  LEAVE_HUDDLE: 'chat.leave_huddle',
+  END_HUDDLE: 'chat.end_huddle',
+  LIST_WORKFLOWS: 'chat.list_workflows',
+  CREATE_WORKFLOW: 'chat.create_workflow',
+  UPDATE_WORKFLOW: 'chat.update_workflow',
+  DELETE_WORKFLOW: 'chat.delete_workflow',
+  RUN_WORKFLOW: 'chat.run_workflow',
+  EVALUATE_WORKFLOWS: 'chat.evaluate_workflows',
+  CREATE_SHARED_INVITE: 'chat.create_shared_invite',
+  GET_SHARED_INFO: 'chat.get_shared_info',
+  ACCEPT_SHARED_INVITE: 'chat.accept_shared_invite',
+  PREVIEW_SHARED_INVITE: 'chat.preview_shared_invite',
+  REVOKE_SHARED_INVITE: 'chat.revoke_shared_invite',
+  MARK_SHARED_INVITE_ACCEPTED: 'chat.mark_shared_invite_accepted',
+  BIND_SHARED_INVITE_TOKEN: 'chat.bind_shared_invite_token',
+  LIST_APP_CATALOG: 'chat.list_app_catalog',
+  INSTALL_APP: 'chat.install_app',
+  UNINSTALL_APP: 'chat.uninstall_app',
+  LIST_INSTALLED_APPS: 'chat.list_installed_apps',
 } as const;
 
 export interface CreatePrivateChatPayload {
@@ -367,6 +411,11 @@ export interface MarkSeenPayload extends ConversationActorPayload {
   messageId?: string;
 }
 
+/** Slack-style: rewind read cursor so this message (and later) are unread. */
+export interface MarkUnreadPayload extends ConversationActorPayload {
+  messageId: string;
+}
+
 export interface MuteConversationPayload extends ConversationActorPayload {
   muted: boolean;
 }
@@ -440,9 +489,30 @@ export interface JoinChannelPayload {
   conversationId: string;
 }
 
+export interface ListConversationMembersPayload {
+  actorId: string;
+  conversationId: string;
+  page?: number;
+  limit?: number;
+  search?: string;
+}
+
 export interface CreateChannelInvitePayload extends ConversationActorPayload {
   expiresInHours?: number;
   maxUses?: number;
+}
+
+export interface PreviewChannelInvitePayload {
+  token: string;
+}
+
+export interface ChannelInvitePreviewView {
+  valid: boolean;
+  conversationId: string | null;
+  conversationName: string | null;
+  organizationId: string | null;
+  expiresAt: string | null;
+  message?: string;
 }
 
 export interface AcceptChannelInvitePayload {
@@ -457,6 +527,7 @@ export interface RevokeChannelInvitePayload extends ConversationActorPayload {
 export interface ChannelInviteView {
   id: string;
   conversationId: string;
+  conversationName?: string | null;
   token: string | null;
   inviteUrl: string | null;
   expiresAt: string | null;
@@ -465,6 +536,8 @@ export interface ChannelInviteView {
   revokedAt: string | null;
   createdBy: string;
   createdAt: string;
+  emailSent?: boolean;
+  debugInviteUrl?: string;
 }
 
 export interface BlockUserPayload {
@@ -620,6 +693,9 @@ export interface ConversationView {
   /** Oldest unread message that @mentions the current user (for jump). */
   firstUnreadMentionMessageId: string | null;
   members: ConversationMemberView[];
+  /** Slack Connect: channel is shared with external collaborators. */
+  isShared?: boolean;
+  sharedExternalLabel?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -772,6 +848,8 @@ export interface CreateIncomingWebhookPayload {
 export interface ListIncomingWebhooksPayload {
   actorId: string;
   conversationId: string;
+  page?: number;
+  limit?: number;
 }
 
 export interface RevokeIncomingWebhookPayload {
@@ -786,11 +864,62 @@ export interface PostIncomingWebhookPayload {
   username?: string;
 }
 
+export interface OutgoingWebhookView {
+  id: string;
+  conversationId: string;
+  name: string;
+  targetUrl: string;
+  excludeBots: boolean;
+  /** Present only on create — signing secret shown once. */
+  signingSecret?: string | null;
+  createdBy: string;
+  revokedAt: string | null;
+  lastDeliveredAt: string | null;
+  failureCount: number;
+  createdAt: string;
+}
+
+export interface CreateOutgoingWebhookPayload {
+  actorId: string;
+  conversationId: string;
+  name: string;
+  targetUrl: string;
+  excludeBots?: boolean;
+}
+
+export interface ListOutgoingWebhooksPayload {
+  actorId: string;
+  conversationId: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface RevokeOutgoingWebhookPayload {
+  actorId: string;
+  conversationId: string;
+  webhookId: string;
+}
+
+export interface DispatchOutgoingWebhooksPayload {
+  conversationId: string;
+  event: 'message.created';
+  message: {
+    id: string;
+    body: string | null;
+    senderId: string;
+    type: string;
+    createdAt: string;
+    botUsername?: string | null;
+  };
+}
+
 export interface SlashCommandView {
   id: string;
   name: string;
   description: string;
   responseTemplate: string;
+  responseMode: 'in_channel' | 'ephemeral';
+  requestUrl: string | null;
   /** True for built-in commands that cannot be revoked. */
   builtin: boolean;
   createdBy: string | null;
@@ -802,11 +931,15 @@ export interface CreateSlashCommandPayload {
   actorId: string;
   name: string;
   description: string;
-  responseTemplate: string;
+  responseTemplate?: string;
+  responseMode?: 'in_channel' | 'ephemeral';
+  requestUrl?: string | null;
 }
 
 export interface ListSlashCommandsPayload {
   actorId: string;
+  page?: number;
+  limit?: number;
 }
 
 export interface RevokeSlashCommandPayload {
@@ -842,6 +975,8 @@ export interface UserGroupView {
 
 export interface ListUserGroupsPayload {
   actorId: string;
+  page?: number;
+  limit?: number;
 }
 
 export interface CreateUserGroupPayload {
@@ -865,3 +1000,84 @@ export interface DeleteUserGroupPayload {
   actorId: string;
   groupId: string;
 }
+
+export interface ChannelCanvasView { id: string; organizationId: string; conversationId: string; title: string; body: string; updatedBy: string; createdAt: string; updatedAt: string }
+export interface PutChannelCanvasPayload extends ConversationActorPayload { title?: string; body?: string }
+export type ChannelListItemStatus = 'todo' | 'doing' | 'done';
+export interface ChannelListItemView { id: string; listId: string; title: string; status: ChannelListItemStatus; assigneeId: string | null; sortOrder: number; createdAt: string }
+export interface ChannelListView { id: string; organizationId: string; conversationId: string; name: string; createdBy: string; createdAt: string; items: ChannelListItemView[] }
+export interface CreateChannelListPayload extends ConversationActorPayload { name: string }
+export interface UpdateChannelListPayload extends ConversationActorPayload { listId: string; name?: string }
+export interface DeleteChannelListPayload extends ConversationActorPayload { listId: string }
+export interface CreateChannelListItemPayload extends ConversationActorPayload { listId: string; title: string; status?: ChannelListItemStatus; assigneeId?: string | null; sortOrder?: number }
+export interface UpdateChannelListItemPayload extends Omit<CreateChannelListItemPayload, 'title'> { itemId: string; title?: string }
+export interface DeleteChannelListItemPayload extends ConversationActorPayload { listId: string; itemId: string }
+export interface ChannelClipView { id: string; organizationId: string; conversationId: string; messageId: string | null; createdBy: string; mediaUrl: string; mediaType: 'audio' | 'video'; durationSeconds: number | null; createdAt: string }
+export interface CreateChannelClipPayload extends ConversationActorPayload { messageId?: string | null; mediaUrl: string; mediaType: 'audio' | 'video'; durationSeconds?: number | null }
+export interface DeleteChannelClipPayload extends ConversationActorPayload { clipId: string }
+export interface ChannelHuddleView { id: string; organizationId: string; conversationId: string; status: 'active' | 'ended'; startedBy: string; participantIds: string[]; startedAt: string; endedAt: string | null }
+export type WorkflowTriggerType = 'message_contains' | 'channel_created' | 'manual';
+export type WorkflowActionType = 'post_message' | 'webhook' | 'set_reminder';
+export interface ChannelWorkflowView { id: string; organizationId: string; conversationId: string | null; name: string; enabled: boolean; triggerType: WorkflowTriggerType; triggerConfig: Record<string, unknown>; actionType: WorkflowActionType; actionConfig: Record<string, unknown>; createdBy: string; createdAt: string }
+export interface CreateWorkflowPayload { actorId: string; conversationId?: string | null; name: string; enabled?: boolean; triggerType: WorkflowTriggerType; triggerConfig?: Record<string, unknown>; actionType: WorkflowActionType; actionConfig?: Record<string, unknown> }
+export interface UpdateWorkflowPayload extends Partial<Omit<CreateWorkflowPayload, 'actorId'>> { actorId: string; workflowId: string; conversationId?: string | null }
+export interface DeleteWorkflowPayload { actorId: string; workflowId: string; conversationId?: string | null }
+export interface ListWorkflowsPayload { actorId: string; conversationId?: string | null }
+export interface RunWorkflowPayload { actorId: string; workflowId: string; conversationId?: string | null }
+export interface EvaluateWorkflowsPayload {
+  actorId: string;
+  conversationId: string;
+  triggerType: 'message_contains' | 'channel_created';
+  message?: {
+    id: string;
+    body: string;
+    senderId: string;
+    botUsername?: string | null;
+    conversationId: string;
+  } | null;
+}
+export interface EvaluateWorkflowsResult {
+  messages: Array<Record<string, unknown> & { conversationId: string; recipientIds?: string[] }>;
+}
+export interface SharedChannelInviteView {
+  id: string;
+  organizationId: string;
+  conversationId: string;
+  email: string;
+  token?: string;
+  status: 'pending' | 'accepted' | 'revoked';
+  createdBy: string;
+  createdAt: string;
+  acceptedAt: string | null;
+  inviteUrl?: string | null;
+}
+export interface CreateSharedChannelInvitePayload extends ConversationActorPayload { email: string }
+export interface AcceptSharedChannelInvitePayload { actorId: string; token: string }
+export interface SharedChannelInfoView {
+  conversationId: string;
+  isShared: boolean;
+  sharedExternalLabel: string | null;
+  conversationName?: string | null;
+  organizationName?: string | null;
+  invites: SharedChannelInviteView[];
+}
+export interface SharedChannelInvitePreviewView {
+  valid: boolean;
+  message?: string;
+  email: string | null;
+  conversationId: string | null;
+  conversationName: string | null;
+  organizationId: string | null;
+  organizationName: string | null;
+  status?: 'pending' | 'accepted' | 'revoked';
+}
+export interface RevokeSharedChannelInvitePayload extends ConversationActorPayload { inviteId: string }
+export interface MarkSharedInviteAcceptedPayload {
+  conversationId: string;
+  email: string;
+  externalLabel?: string | null;
+}
+export interface AppCatalogView { key: string; name: string; description: string; icon: string; installed: boolean }
+export interface InstalledAppView { id: string; organizationId: string; appKey: string; config: Record<string, unknown>; installedBy: string; createdAt: string }
+export interface AppActorPayload { actorId: string }
+export interface InstallAppPayload extends AppActorPayload { appKey: string; config?: Record<string, unknown> }

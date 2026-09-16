@@ -44,6 +44,13 @@ export interface CreateInvitePayload {
   maxUses?: number;
   /** Full member (default) or guest with limited channel access. */
   role?: 'member' | 'guest';
+  /** When true, create the invite token but do not send the default email. */
+  skipEmail?: boolean;
+  /**
+   * Channel to auto-join after workspace invite accept (Slack-style channel invite
+   * for people who are not yet in the workspace).
+   */
+  pendingChannelId?: string | null;
 }
 
 export interface InviteView {
@@ -76,11 +83,15 @@ export interface PublicInviteView {
   valid: boolean;
   organizationId?: string | null;
   organizationName?: string | null;
+  /** Present when this invite also grants a specific channel after accept. */
+  pendingChannelId?: string | null;
 }
 
 export interface ListInvitesPayload {
   organizationId: string;
   requestedByUserId: string;
+  page?: number;
+  limit?: number;
 }
 
 export interface RevokeInvitePayload {
@@ -146,6 +157,8 @@ export interface AuthResult {
   organizations: import('./organization.contracts').OrganizationView[];
   /** Suggested active org (first membership / default). */
   activeOrganizationId: string | null;
+  /** Set when registration completed a workspace invite tied to a channel. */
+  pendingChannelId?: string | null;
 }
 
 /** Returned when password is correct but TOTP is required */

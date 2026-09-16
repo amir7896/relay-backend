@@ -87,6 +87,8 @@ export interface AcceptInviteResult {
   alreadyMember: boolean;
   /** Membership role granted by the invite (guests skip #general). */
   role: OrgMemberRole;
+  /** Channel to auto-join after accept (from channel email invite). */
+  pendingChannelId?: string | null;
 }
 
 export interface OrgMemberView {
@@ -98,6 +100,9 @@ export interface OrgMemberView {
 export interface ListOrgMembersPayload {
   organizationId: string;
   requestedByUserId: string;
+  page?: number;
+  limit?: number;
+  search?: string;
 }
 
 export interface SetOrgMemberRolePayload {
@@ -173,6 +178,10 @@ export interface UpdateOrgSsoPayload {
   ssoClientId?: string | null;
   /** Write-only; omit to keep existing secret. */
   ssoClientSecret?: string | null;
+  /** SAML IdP SSO URL (HTTP-Redirect). */
+  ssoIdpSsoUrl?: string | null;
+  /** Write-only SAML IdP X.509 certificate (PEM). */
+  ssoIdpCertificate?: string | null;
 }
 
 export interface OrgSsoView {
@@ -182,15 +191,22 @@ export interface OrgSsoView {
   ssoIssuerUrl: string | null;
   ssoClientId: string | null;
   hasClientSecret: boolean;
+  ssoIdpSsoUrl: string | null;
+  hasIdpCertificate: boolean;
   /** Workspace billing plan — SSO login requires pro or enterprise. */
   plan: 'free' | 'pro' | 'enterprise';
-  /** True when OIDC login can start (paid plan + enabled + issuer + client id + secret). */
+  /**
+   * True when login can start:
+   * - OIDC: paid + enabled + issuer + client id + secret
+   * - SAML: paid + enabled + IdP entity/issuer + SSO URL + certificate
+   */
   configured: boolean;
 }
 
-/** Gateway-only: includes client secret for token exchange. */
+/** Gateway-only: includes secrets for token/assertion verification. */
 export interface OrgSsoCredentialsView extends OrgSsoView {
   ssoClientSecret: string | null;
+  ssoIdpCertificate: string | null;
   slug: string;
   name: string;
 }

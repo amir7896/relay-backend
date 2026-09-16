@@ -37,6 +37,8 @@ import {
   CurrentUser,
   Public,
   AUTH_SUCCESS_MESSAGES,
+  PaginationQueryDto,
+  type PaginatedResult,
 } from '@app/common';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
 import { AuditLoggerService } from '../infrastructure/audit/audit-logger.service';
@@ -59,6 +61,7 @@ import { RegisterDto } from './dto/register.dto';
 import { TokenBlacklistService } from './token-blacklist.service';
 import { AuthSessionCache } from './auth-session.cache';
 import { SsoOidcService } from './sso-oidc.service';
+import { SsoSamlService } from './sso-saml.service';
 import {
   AuthDocs,
   ChangePasswordDocs,
@@ -78,6 +81,7 @@ export class AuthController {
     private readonly blacklist: TokenBlacklistService,
     private readonly sessionCache: AuthSessionCache,
     private readonly ssoOidc: SsoOidcService,
+    private readonly ssoSaml: SsoSamlService,
     private readonly audit: AuditLoggerService,
   ) {}
 
@@ -120,6 +124,32 @@ export class AuthController {
               },
               { skipTenant: true },
             );
+          }
+          if (result.pendingChannelId) {
+            try {
+              await this.proxy.sendChat(
+                CHAT_PATTERNS.ENSURE_CHANNEL_MEMBER,
+                {
+                  userId: result.user.id,
+                  conversationId: result.pendingChannelId,
+                  organizationId,
+                },
+                { skipTenant: true },
+              );
+            } catch {
+              // Channel may have been deleted; workspace join still succeeds.
+            }
+            await this.proxy
+              .sendChat(
+                CHAT_PATTERNS.MARK_SHARED_INVITE_ACCEPTED,
+                {
+                  conversationId: result.pendingChannelId,
+                  email: result.user.email,
+                  externalLabel: result.user.email,
+                },
+                { skipTenant: true },
+              )
+              .catch(() => undefined);
           }
         } catch {
           // #general may not exist yet for legacy orgs — invite still succeeds.
@@ -334,10 +364,19 @@ export class AuthController {
     @Query('returnPath') returnPath: string | undefined,
     @Res() res: Response,
   ) {
-    const url = await this.ssoOidc.buildAuthorizationRedirect({
+    const credentials = await this.ssoOidc.resolveCredentials({
       organizationId,
-      returnPath,
     });
+    const url =
+      credentials.ssoProvider === 'saml'
+        ? await this.ssoSaml.buildAuthorizationRedirect({
+            organizationId,
+            returnPath,
+          })
+        : await this.ssoOidc.buildAuthorizationRedirect({
+            organizationId,
+            returnPath,
+          });
     return res.redirect(url);
   }
 
@@ -347,10 +386,19 @@ export class AuthController {
     @Param('organizationId', ParseUUIDPipe) organizationId: string,
     @Body() body: { returnPath?: string } = {},
   ) {
-    const url = await this.ssoOidc.buildAuthorizationRedirect({
+    const credentials = await this.ssoOidc.resolveCredentials({
       organizationId,
-      returnPath: body.returnPath,
     });
+    const url =
+      credentials.ssoProvider === 'saml'
+        ? await this.ssoSaml.buildAuthorizationRedirect({
+            organizationId,
+            returnPath: body.returnPath,
+          })
+        : await this.ssoOidc.buildAuthorizationRedirect({
+            organizationId,
+            returnPath: body.returnPath,
+          });
     return { message: 'SSO redirect ready', data: { url } };
   }
 
@@ -369,6 +417,34 @@ export class AuthController {
       state,
       error,
       errorDescription,
+      ip: request.ip,
+      userAgent: request.headers['user-agent'],
+    });
+    return res.redirect(redirectUrl);
+  }
+
+  @Public()
+  @Get('sso/saml/:organizationId/metadata')
+  async samlMetadata(
+    @Param('organizationId', ParseUUIDPipe) organizationId: string,
+    @Res() res: Response,
+  ) {
+    const xml = await this.ssoSaml.getServiceProviderMetadata(organizationId);
+    res.setHeader('Content-Type', 'application/samlmetadata+xml');
+    return res.send(xml);
+  }
+
+  @Public()
+  @Post('sso/saml/:organizationId/acs')
+  async samlAcs(
+    @Param('organizationId', ParseUUIDPipe) organizationId: string,
+    @Body() body: Record<string, string>,
+    @Req() request: Request,
+    @Res() res: Response,
+  ) {
+    const { redirectUrl } = await this.ssoSaml.handleAcs({
+      organizationId,
+      body,
       ip: request.ip,
       userAgent: request.headers['user-agent'],
     });
@@ -534,6 +610,7 @@ export class AuthController {
   @Get('invites')
   async listInvites(
     @CurrentUser() user: AuthenticatedUser,
+    @Query() query: PaginationQueryDto,
     @Headers('x-organization-id') organizationId?: string,
   ) {
     const orgId = organizationId?.trim();
@@ -542,11 +619,13 @@ export class AuthController {
         'X-Organization-Id header is required to list invites',
       );
     }
-    const data = await this.proxy.sendAuth<InviteView[]>(
+    const data = await this.proxy.sendAuth<PaginatedResult<InviteView>>(
       AUTH_PATTERNS.LIST_INVITES,
       {
         organizationId: orgId,
         requestedByUserId: user.id,
+        page: query.page,
+        limit: query.limit,
       },
     );
     return { message: AUTH_SUCCESS_MESSAGES.INVITES_FETCHED, data };
@@ -611,6 +690,33 @@ export class AuthController {
       }
     }
 
+    if (data.pendingChannelId) {
+      try {
+        await this.proxy.sendChat(
+          CHAT_PATTERNS.ENSURE_CHANNEL_MEMBER,
+          {
+            userId: user.id,
+            conversationId: data.pendingChannelId,
+            organizationId: data.organizationId,
+          },
+          { skipTenant: true },
+        );
+      } catch {
+        // Channel may have been deleted; workspace join still succeeds.
+      }
+      await this.proxy
+        .sendChat(
+          CHAT_PATTERNS.MARK_SHARED_INVITE_ACCEPTED,
+          {
+            conversationId: data.pendingChannelId,
+            email: user.email,
+            externalLabel: user.email,
+          },
+          { skipTenant: true },
+        )
+        .catch(() => undefined);
+    }
+
     this.audit.log({
       actorId: user.id,
       organizationId: data.organizationId,
@@ -620,6 +726,7 @@ export class AuthController {
       meta: {
         role: data.role,
         alreadyMember: data.alreadyMember,
+        pendingChannelId: data.pendingChannelId ?? null,
       },
     });
 

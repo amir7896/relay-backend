@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { createHash, randomBytes, randomUUID } from 'crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'crypto';
 import { In, IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import {
   ConversationMemberRole,
@@ -26,19 +27,24 @@ import type {
   ChatAnalyticsView,
   AuditEventView,
   ChannelInviteView,
+  ChannelInvitePreviewView,
   ConversationActorPayload,
   ConversationView,
   CreateChannelInvitePayload,
+  PreviewChannelInvitePayload,
   CreateGroupChatPayload,
   CreateIncomingWebhookPayload,
+  CreateOutgoingWebhookPayload,
   CreatePollPayload,
   CreatePrivateChatPayload,
   CreateSlashCommandPayload,
   DeleteMessagePayload,
   DeleteMessageResult,
+  DispatchOutgoingWebhooksPayload,
   EditMessagePayload,
   ForwardMessagePayload,
   IncomingWebhookView,
+  OutgoingWebhookView,
   InvokeSlashCommandPayload,
   InvokeSlashCommandResult,
   JoinChannelPayload,
@@ -46,7 +52,10 @@ import type {
   ListBookmarksPayload,
   ListConversationsPayload,
   ListIncomingWebhooksPayload,
+  ListOutgoingWebhooksPayload,
   ListSlashCommandsPayload,
+  ListConversationMembersPayload,
+  ListUserGroupsPayload,
   ListMediaPayload,
   ListMessageEditsPayload,
   ListMessagesPayload,
@@ -58,6 +67,7 @@ import type {
   GetMessagePayload,
   LogAuditPayload,
   MarkSeenPayload,
+  MarkUnreadPayload,
   MessageEditHistoryView,
   MessageReactionView,
   MessageReplyView,
@@ -73,6 +83,7 @@ import type {
   RemoveMemberPayload,
   RevokeChannelInvitePayload,
   RevokeIncomingWebhookPayload,
+  RevokeOutgoingWebhookPayload,
   RevokeSlashCommandPayload,
   GlobalSearchHitView,
   GlobalSearchMessagesPayload,
@@ -90,7 +101,6 @@ import type {
   DeleteSidebarSectionPayload,
   CreateUserGroupPayload,
   DeleteUserGroupPayload,
-  ListUserGroupsPayload,
   UpdateUserGroupPayload,
   UserGroupView,
   MessageReminderView,
@@ -123,6 +133,7 @@ import { ThreadFollow } from '../database/entities/thread-follow.entity';
 import { MessageEdit } from '../database/entities/message-edit.entity';
 import { SidebarSection } from '../database/entities/sidebar-section.entity';
 import { IncomingWebhook } from '../database/entities/incoming-webhook.entity';
+import { OutgoingWebhook } from '../database/entities/outgoing-webhook.entity';
 import { SlashCommand } from '../database/entities/slash-command.entity';
 import { UserGroup } from '../database/entities/user-group.entity';
 import { UserBlock } from '../database/entities/user-block.entity';
@@ -209,10 +220,13 @@ export class ChatService {
     private readonly channelInvites: Repository<ChannelInvite>,
     @InjectRepository(IncomingWebhook)
     private readonly incomingWebhooks: Repository<IncomingWebhook>,
+    @InjectRepository(OutgoingWebhook)
+    private readonly outgoingWebhooks: Repository<OutgoingWebhook>,
     @InjectRepository(SlashCommand)
     private readonly slashCommands: Repository<SlashCommand>,
     @InjectRepository(UserGroup)
     private readonly userGroups: Repository<UserGroup>,
+    private readonly config: ConfigService,
   ) {}
 
   async createPrivate(
@@ -2494,6 +2508,32 @@ export class ChatService {
       return RpcErrors.notFound('Message');
     }
 
+    const pending = await this.messageReminders.find({
+      where: {
+        organizationId: requireOrganizationId(),
+        userId: payload.actorId,
+        messageId: message.id,
+        status: 'pending',
+      },
+      order: { createdAt: 'DESC' },
+    });
+
+    // Keep a single pending reminder per user + message.
+    if (pending.length > 1) {
+      for (const extra of pending.slice(1)) {
+        extra.status = 'cancelled';
+        await this.messageReminders.save(extra);
+      }
+    }
+
+    if (pending[0]) {
+      pending[0].remindAt = remindAt;
+      pending[0].notifiedAt = null;
+      pending[0].conversationId = payload.conversationId;
+      const saved = await this.messageReminders.save(pending[0]);
+      return this.toReminderView(saved, message.body);
+    }
+
     const saved = await this.messageReminders.save(
       this.messageReminders.create({
         organizationId: requireOrganizationId(),
@@ -2511,18 +2551,43 @@ export class ChatService {
 
   async listReminders(payload: {
     actorId: string;
-  }): Promise<MessageReminderView[]> {
-    const items = await this.messageReminders.find({
+    page?: number;
+    limit?: number;
+  }) {
+    const orgId = requireOrganizationId();
+    const duplicates = await this.messageReminders.find({
       where: {
-        organizationId: requireOrganizationId(),
+        organizationId: orgId,
+        userId: payload.actorId,
+        status: 'pending',
+      },
+      order: { createdAt: 'DESC' },
+    });
+    const seenMessageIds = new Set<string>();
+    for (const row of duplicates) {
+      if (seenMessageIds.has(row.messageId)) {
+        row.status = 'cancelled';
+        await this.messageReminders.save(row);
+        continue;
+      }
+      seenMessageIds.add(row.messageId);
+    }
+
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 20));
+    const { skip, take } = getSkipTake(page, limit);
+    const [items, total] = await this.messageReminders.findAndCount({
+      where: {
+        organizationId: orgId,
         userId: payload.actorId,
         status: 'pending',
       },
       order: { remindAt: 'ASC' },
-      take: 50,
+      skip,
+      take,
     });
     if (items.length === 0) {
-      return [];
+      return buildPaginatedResult([], total, page, limit);
     }
     const messageIds = [...new Set(items.map((item) => item.messageId))];
     const conversationIds = [
@@ -2532,14 +2597,14 @@ export class ChatService {
       this.messages.find({
         where: {
           id: In(messageIds),
-          organizationId: requireOrganizationId(),
+          organizationId: orgId,
         },
         select: { id: true, body: true },
       }),
       this.conversations.find({
         where: {
           id: In(conversationIds),
-          organizationId: requireOrganizationId(),
+          organizationId: orgId,
         },
         select: { id: true, name: true, type: true },
       }),
@@ -2548,15 +2613,20 @@ export class ChatService {
     const conversationById = new Map(
       conversations.map((item) => [item.id, item]),
     );
-    return items.map((item) => {
-      const conversation = conversationById.get(item.conversationId);
-      return this.toReminderView(
-        item,
-        bodyById.get(item.messageId) ?? '',
-        conversation?.name ?? null,
-        conversation?.type,
-      );
-    });
+    return buildPaginatedResult(
+      items.map((item) => {
+        const conversation = conversationById.get(item.conversationId);
+        return this.toReminderView(
+          item,
+          bodyById.get(item.messageId) ?? '',
+          conversation?.name ?? null,
+          conversation?.type,
+        );
+      }),
+      total,
+      page,
+      limit,
+    );
   }
 
   async cancelReminder(
@@ -2796,6 +2866,42 @@ export class ChatService {
       userId: payload.actorId,
       lastReadAt: membership.lastReadAt.toISOString(),
       messageId,
+      recipientIds: this.recipientIds(conversation),
+    };
+  }
+
+  async markUnread(payload: MarkUnreadPayload): Promise<SeenResultView> {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const membership = conversation.members.find(
+      (member) => member.userId === payload.actorId && !member.leftAt,
+    );
+    if (!membership) {
+      return RpcErrors.notFound('Membership');
+    }
+
+    const message = await this.messages.findOne({
+      where: {
+        id: payload.messageId,
+        conversationId: conversation.id,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (!message) {
+      return RpcErrors.notFound('Message');
+    }
+
+    // Place the read cursor just before this message so it becomes first unread.
+    membership.lastReadAt = new Date(message.createdAt.getTime() - 1);
+    await this.members.save(membership);
+
+    return {
+      conversationId: conversation.id,
+      userId: payload.actorId,
+      lastReadAt: membership.lastReadAt.toISOString(),
+      messageId: message.id,
       recipientIds: this.recipientIds(conversation),
     };
   }
@@ -3106,6 +3212,85 @@ export class ChatService {
     return { joined: true, conversationId: general.id };
   }
 
+  async ensureChannelMembership(payload: {
+    userId: string;
+    conversationId: string;
+  }): Promise<{ joined: boolean; conversationId: string | null }> {
+    const organizationId = requireOrganizationId();
+    const conversation = await this.conversations.findOne({
+      where: {
+        id: payload.conversationId,
+        organizationId,
+        type: ConversationType.GROUP,
+        deletedAt: IsNull(),
+      },
+      relations: { members: true },
+    });
+    if (!conversation) {
+      return { joined: false, conversationId: null };
+    }
+
+    const existing = conversation.members.find(
+      (member) => member.userId === payload.userId,
+    );
+    if (existing && !existing.leftAt) {
+      return { joined: true, conversationId: conversation.id };
+    }
+    if (existing?.leftAt) {
+      existing.leftAt = null;
+      existing.role = ConversationMemberRole.MEMBER;
+      await this.members.save(existing);
+      return { joined: true, conversationId: conversation.id };
+    }
+
+    await this.members.save(
+      this.members.create({
+        conversationId: conversation.id,
+        userId: payload.userId,
+        role: ConversationMemberRole.MEMBER,
+      }),
+    );
+    return { joined: true, conversationId: conversation.id };
+  }
+
+  async listConversationMembers(payload: ListConversationMembersPayload) {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 50));
+    const active = (conversation.members ?? []).filter(
+      (member) => !member.leftAt,
+    );
+    const search = payload.search?.trim().toLowerCase();
+    const filtered = search
+      ? active.filter((member) =>
+          member.userId.toLowerCase().includes(search),
+        )
+      : active;
+    filtered.sort((a, b) => {
+      const roleRank = (role: string) =>
+        role === 'owner' ? 0 : role === 'admin' ? 1 : 2;
+      return (
+        roleRank(a.role) - roleRank(b.role) ||
+        a.joinedAt.getTime() - b.joinedAt.getTime()
+      );
+    });
+    const { skip, take } = getSkipTake(page, limit);
+    const slice = filtered.slice(skip, skip + take);
+    return buildPaginatedResult(
+      slice.map((member) => ({
+        userId: member.userId,
+        role: member.role,
+        joinedAt: member.joinedAt.toISOString(),
+      })),
+      filtered.length,
+      page,
+      limit,
+    );
+  }
+
   async addMembers(payload: AddMembersPayload): Promise<ConversationView> {
     const conversation = await this.requireMembership(
       payload.conversationId,
@@ -3404,26 +3589,39 @@ export class ChatService {
 
   async listPublicChannels(payload: {
     actorId: string;
-  }): Promise<Array<ConversationView & { isMember: boolean }>> {
-    const items = await this.conversations.find({
+    page?: number;
+    limit?: number;
+  }) {
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 20));
+    const { skip, take } = getSkipTake(page, limit);
+    const [items, total] = await this.conversations.findAndCount({
       where: {
         organizationId: requireOrganizationId(),
         type: ConversationType.GROUP,
         visibility: 'public',
+        deletedAt: IsNull(),
       },
       relations: { members: true },
       order: { name: 'ASC' },
+      skip,
+      take,
     });
 
-    return items.map((item) => {
-      const isMember = (item.members ?? []).some(
-        (member) => member.userId === payload.actorId && !member.leftAt,
-      );
-      return {
-        ...this.toConversationView(item, payload.actorId),
-        isMember,
-      };
-    });
+    return buildPaginatedResult(
+      items.map((item) => {
+        const isMember = (item.members ?? []).some(
+          (member) => member.userId === payload.actorId && !member.leftAt,
+        );
+        return {
+          ...this.toConversationView(item, payload.actorId),
+          isMember,
+        };
+      }),
+      total,
+      page,
+      limit,
+    );
   }
 
   async joinChannel(payload: JoinChannelPayload): Promise<ConversationView> {
@@ -3528,7 +3726,92 @@ export class ChatService {
       }),
     );
 
-    return this.toChannelInviteView(invite, rawToken);
+    return this.toChannelInviteView(invite, rawToken, conversation.name);
+  }
+
+  async previewChannelInvite(
+    payload: PreviewChannelInvitePayload,
+  ): Promise<ChannelInvitePreviewView> {
+    const token = payload.token?.trim();
+    if (!token) {
+      return {
+        valid: false,
+        conversationId: null,
+        conversationName: null,
+        organizationId: null,
+        expiresAt: null,
+        message: 'Invite token is required',
+      };
+    }
+
+    const invite = await this.channelInvites.findOne({
+      where: { tokenHash: hashInviteToken(token) },
+    });
+    if (!invite) {
+      return {
+        valid: false,
+        conversationId: null,
+        conversationName: null,
+        organizationId: null,
+        expiresAt: null,
+        message: 'This invite link is invalid or has been removed',
+      };
+    }
+    if (invite.revokedAt) {
+      return {
+        valid: false,
+        conversationId: invite.conversationId,
+        conversationName: null,
+        organizationId: invite.organizationId,
+        expiresAt: invite.expiresAt?.toISOString() ?? null,
+        message: 'This invite has been revoked',
+      };
+    }
+    if (invite.expiresAt && invite.expiresAt.getTime() <= Date.now()) {
+      return {
+        valid: false,
+        conversationId: invite.conversationId,
+        conversationName: null,
+        organizationId: invite.organizationId,
+        expiresAt: invite.expiresAt.toISOString(),
+        message: 'This invite has expired',
+      };
+    }
+    if (invite.maxUses != null && invite.useCount >= invite.maxUses) {
+      return {
+        valid: false,
+        conversationId: invite.conversationId,
+        conversationName: null,
+        organizationId: invite.organizationId,
+        expiresAt: invite.expiresAt?.toISOString() ?? null,
+        message: 'This invite has reached its use limit',
+      };
+    }
+
+    const conversation = await this.conversations.findOne({
+      where: {
+        id: invite.conversationId,
+        organizationId: invite.organizationId,
+      },
+    });
+    if (!conversation || conversation.type !== ConversationType.GROUP) {
+      return {
+        valid: false,
+        conversationId: invite.conversationId,
+        conversationName: null,
+        organizationId: invite.organizationId,
+        expiresAt: invite.expiresAt?.toISOString() ?? null,
+        message: 'Channel not found',
+      };
+    }
+
+    return {
+      valid: true,
+      conversationId: conversation.id,
+      conversationName: conversation.name || 'channel',
+      organizationId: invite.organizationId,
+      expiresAt: invite.expiresAt?.toISOString() ?? null,
+    };
   }
 
   async acceptChannelInvite(
@@ -3539,11 +3822,9 @@ export class ChatService {
       return RpcErrors.badRequest('Invite token is required');
     }
 
+    // Resolve invite first (token is global) — do not require caller's active org.
     const invite = await this.channelInvites.findOne({
-      where: {
-        tokenHash: hashInviteToken(token),
-        organizationId: requireOrganizationId(),
-      },
+      where: { tokenHash: hashInviteToken(token) },
     });
     if (!invite) {
       return RpcErrors.notFound('Channel invite');
@@ -3561,7 +3842,7 @@ export class ChatService {
     const conversation = await this.conversations.findOne({
       where: {
         id: invite.conversationId,
-        organizationId: requireOrganizationId(),
+        organizationId: invite.organizationId,
       },
       relations: { members: true },
     });
@@ -3590,10 +3871,13 @@ export class ChatService {
       await this.channelInvites.save(invite);
     }
 
-    return this.getConversation({
-      actorId: payload.actorId,
-      conversationId: conversation.id,
-    });
+    // Tenant ALS must match invite org for getConversation / membership checks.
+    return runWithOrganization(invite.organizationId, () =>
+      this.getConversation({
+        actorId: payload.actorId,
+        conversationId: conversation.id,
+      }),
+    );
   }
 
   async revokeChannelInvite(
@@ -3622,23 +3906,34 @@ export class ChatService {
     return this.toChannelInviteView(invite, null);
   }
 
-  async listChannelInvites(
-    payload: ConversationActorPayload,
-  ): Promise<ChannelInviteView[]> {
+  async listChannelInvites(payload: ConversationActorPayload & {
+    page?: number;
+    limit?: number;
+  }) {
     const conversation = await this.requireMembership(
       payload.conversationId,
       payload.actorId,
     );
     this.assertGroupAdmin(conversation, payload.actorId);
 
-    const invites = await this.channelInvites.find({
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 20));
+    const { skip, take } = getSkipTake(page, limit);
+    const [invites, total] = await this.channelInvites.findAndCount({
       where: {
         conversationId: conversation.id,
         organizationId: requireOrganizationId(),
       },
       order: { createdAt: 'DESC' },
+      skip,
+      take,
     });
-    return invites.map((invite) => this.toChannelInviteView(invite, null));
+    return buildPaginatedResult(
+      invites.map((invite) => this.toChannelInviteView(invite, null)),
+      total,
+      page,
+      limit,
+    );
   }
 
   async createIncomingWebhook(
@@ -3698,23 +3993,31 @@ export class ChatService {
     return this.toIncomingWebhookView(webhook, rawToken);
   }
 
-  async listIncomingWebhooks(
-    payload: ListIncomingWebhooksPayload,
-  ): Promise<IncomingWebhookView[]> {
+  async listIncomingWebhooks(payload: ListIncomingWebhooksPayload) {
     const conversation = await this.requireMembership(
       payload.conversationId,
       payload.actorId,
     );
     this.assertGroupAdmin(conversation, payload.actorId);
 
-    const rows = await this.incomingWebhooks.find({
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 20));
+    const { skip, take } = getSkipTake(page, limit);
+    const [rows, total] = await this.incomingWebhooks.findAndCount({
       where: {
         conversationId: conversation.id,
         organizationId: requireOrganizationId(),
       },
       order: { createdAt: 'DESC' },
+      skip,
+      take,
     });
-    return rows.map((row) => this.toIncomingWebhookView(row, null));
+    return buildPaginatedResult(
+      rows.map((row) => this.toIncomingWebhookView(row, null)),
+      total,
+      page,
+      limit,
+    );
   }
 
   async revokeIncomingWebhook(
@@ -3748,6 +4051,138 @@ export class ChatService {
       );
     }
     return this.toIncomingWebhookView(webhook, null);
+  }
+
+  async createOutgoingWebhook(
+    payload: CreateOutgoingWebhookPayload,
+  ): Promise<OutgoingWebhookView> {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    this.assertGroupAdmin(conversation, payload.actorId);
+
+    const name = payload.name?.trim() ?? '';
+    if (!name || name.length > 80) {
+      return RpcErrors.badRequest('Webhook name is required (max 80 chars)');
+    }
+    const targetUrl = payload.targetUrl?.trim() ?? '';
+    if (!targetUrl || targetUrl.length > 500) {
+      return RpcErrors.badRequest('targetUrl is required (max 500 chars)');
+    }
+    if (!/^https:\/\//i.test(targetUrl)) {
+      return RpcErrors.badRequest('targetUrl must start with https://');
+    }
+
+    const signingSecret = randomBytes(32).toString('hex');
+    const webhook = await this.outgoingWebhooks.save(
+      this.outgoingWebhooks.create({
+        organizationId: requireOrganizationId(),
+        conversationId: conversation.id,
+        name,
+        targetUrl,
+        signingSecret,
+        excludeBots: payload.excludeBots ?? true,
+        createdBy: payload.actorId,
+        revokedAt: null,
+        lastDeliveredAt: null,
+        failureCount: 0,
+      }),
+    );
+
+    await this.recordAudit(
+      payload.actorId,
+      'webhook.created',
+      'outgoing_webhook',
+      webhook.id,
+      { conversationId: conversation.id, name },
+    );
+
+    return this.toOutgoingWebhookView(webhook, true);
+  }
+
+  async listOutgoingWebhooks(payload: ListOutgoingWebhooksPayload) {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    this.assertGroupAdmin(conversation, payload.actorId);
+
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 20));
+    const { skip, take } = getSkipTake(page, limit);
+    const [rows, total] = await this.outgoingWebhooks.findAndCount({
+      where: {
+        conversationId: conversation.id,
+        organizationId: requireOrganizationId(),
+      },
+      order: { createdAt: 'DESC' },
+      skip,
+      take,
+    });
+    return buildPaginatedResult(
+      rows.map((row) => this.toOutgoingWebhookView(row)),
+      total,
+      page,
+      limit,
+    );
+  }
+
+  async revokeOutgoingWebhook(
+    payload: RevokeOutgoingWebhookPayload,
+  ): Promise<OutgoingWebhookView> {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    this.assertGroupAdmin(conversation, payload.actorId);
+
+    const webhook = await this.outgoingWebhooks.findOne({
+      where: {
+        id: payload.webhookId,
+        conversationId: conversation.id,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (!webhook) {
+      return RpcErrors.notFound('Outgoing webhook');
+    }
+    if (!webhook.revokedAt) {
+      webhook.revokedAt = new Date();
+      await this.outgoingWebhooks.save(webhook);
+      await this.recordAudit(
+        payload.actorId,
+        'webhook.revoked',
+        'outgoing_webhook',
+        webhook.id,
+        { conversationId: conversation.id },
+      );
+    }
+    return this.toOutgoingWebhookView(webhook);
+  }
+
+  async dispatchOutgoingWebhooks(
+    payload: DispatchOutgoingWebhooksPayload,
+  ): Promise<{ dispatched: number }> {
+    const webhooks = await this.outgoingWebhooks.find({
+      where: {
+        conversationId: payload.conversationId,
+        revokedAt: IsNull(),
+      },
+    });
+
+    const eligible = webhooks.filter((webhook) => {
+      if (webhook.excludeBots && payload.message.botUsername) {
+        return false;
+      }
+      return true;
+    });
+
+    for (const webhook of eligible) {
+      void this.deliverOutgoingWebhook(webhook, payload);
+    }
+
+    return { dispatched: eligible.length };
   }
 
   async postIncomingWebhook(
@@ -3844,14 +4279,14 @@ export class ChatService {
     });
   }
 
-  async listSlashCommands(
-    _payload: ListSlashCommandsPayload,
-  ): Promise<SlashCommandView[]> {
+  private async collectSlashCommands(): Promise<SlashCommandView[]> {
     const builtins = BUILTIN_SLASH_COMMANDS.map((item) => ({
       id: `builtin:${item.name}`,
       name: item.name,
       description: item.description,
       responseTemplate: '',
+      responseMode: 'in_channel' as const,
+      requestUrl: null,
       builtin: true,
       createdBy: null,
       revokedAt: null,
@@ -3866,10 +4301,15 @@ export class ChatService {
       order: { name: 'ASC' },
     });
 
-    return [
-      ...builtins,
-      ...custom.map((row) => this.toSlashCommandView(row)),
-    ];
+    return [...builtins, ...custom.map((row) => this.toSlashCommandView(row))];
+  }
+
+  async listSlashCommands(payload: ListSlashCommandsPayload) {
+    const all = await this.collectSlashCommands();
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 50));
+    const { skip, take } = getSkipTake(page, limit);
+    return buildPaginatedResult(all.slice(skip, skip + take), all.length, page, limit);
   }
 
   async createSlashCommand(
@@ -3888,10 +4328,28 @@ export class ChatService {
     if (!description || description.length > 160) {
       return RpcErrors.badRequest('Description is required (max 160 chars)');
     }
+    const requestUrl = payload.requestUrl?.trim() || null;
+    if (requestUrl) {
+      if (requestUrl.length > 500) {
+        return RpcErrors.badRequest('requestUrl is too long');
+      }
+      if (!/^https:\/\//i.test(requestUrl)) {
+        return RpcErrors.badRequest('requestUrl must start with https://');
+      }
+    }
     const responseTemplate = payload.responseTemplate?.trim() ?? '';
-    if (!responseTemplate || responseTemplate.length > 2000) {
+    if (!requestUrl && (!responseTemplate || responseTemplate.length > 2000)) {
       return RpcErrors.badRequest(
-        'Response template is required (max 2000 chars)',
+        'Response template is required unless requestUrl is set (max 2000 chars)',
+      );
+    }
+    if (responseTemplate.length > 2000) {
+      return RpcErrors.badRequest('Response template is too long');
+    }
+    const responseMode = payload.responseMode ?? 'in_channel';
+    if (responseMode !== 'in_channel' && responseMode !== 'ephemeral') {
+      return RpcErrors.badRequest(
+        'responseMode must be in_channel or ephemeral',
       );
     }
 
@@ -3912,6 +4370,8 @@ export class ChatService {
         name,
         description,
         responseTemplate,
+        responseMode,
+        requestUrl,
         createdBy: payload.actorId,
         revokedAt: null,
       }),
@@ -3969,9 +4429,7 @@ export class ChatService {
     const { name, text } = parsed;
 
     if (name === 'help') {
-      const commands = await this.listSlashCommands({
-        actorId: payload.actorId,
-      });
+      const commands = await this.collectSlashCommands();
       const lines = commands.map(
         (item) =>
           `/${item.name} — ${item.description}${item.builtin ? '' : ' (custom)'}`,
@@ -3994,6 +4452,7 @@ export class ChatService {
     }
 
     let body: string | null = null;
+    let ephemeralResponse = false;
     if (name === 'shrug') {
       body = text ? `${text} ¯\\_(ツ)_/¯` : '¯\\_(ツ)_/¯';
     } else if (name === 'me') {
@@ -4014,17 +4473,54 @@ export class ChatService {
           `Unknown command /${name}. Try /help`,
         );
       }
-      body = custom.responseTemplate
-        .replace(/\{text\}/gi, text)
-        .replace(/\{user\}/gi, payload.actorId)
-        .trim();
+
+      let effectiveMode: 'in_channel' | 'ephemeral' =
+        custom.responseMode ?? 'in_channel';
+      body = this.renderSlashTemplate(custom.responseTemplate, text, payload.actorId);
+
+      if (custom.requestUrl) {
+        const remote = await this.fetchSlashCommandResponse(
+          custom.requestUrl,
+          name,
+          text,
+          payload.actorId,
+          conversation.id,
+        );
+        if (remote) {
+          if (remote.responseType) {
+            effectiveMode = remote.responseType;
+          }
+          if (remote.text) {
+            body = remote.text;
+          }
+        }
+        if (!body) {
+          body = this.renderSlashTemplate(
+            custom.responseTemplate,
+            text,
+            payload.actorId,
+          );
+        }
+      }
+
       if (!body) {
         return RpcErrors.badRequest('Command produced an empty message');
+      }
+
+      if (effectiveMode === 'ephemeral') {
+        ephemeralResponse = true;
       }
     }
 
     if (body.length > 4000) {
       return RpcErrors.badRequest('Resulting message is too long');
+    }
+
+    if (ephemeralResponse) {
+      return {
+        kind: 'ephemeral',
+        ephemeral: body,
+      };
     }
 
     if (conversation.announceOnly) {
@@ -4107,6 +4603,8 @@ export class ChatService {
       name: row.name,
       description: row.description,
       responseTemplate: row.responseTemplate,
+      responseMode: row.responseMode ?? 'in_channel',
+      requestUrl: row.requestUrl,
       builtin: false,
       createdBy: row.createdBy,
       revokedAt: row.revokedAt?.toISOString() ?? null,
@@ -4114,14 +4612,118 @@ export class ChatService {
     };
   }
 
-  async listUserGroups(
-    _payload: ListUserGroupsPayload,
-  ): Promise<UserGroupView[]> {
-    const rows = await this.userGroups.find({
+  private renderSlashTemplate(
+    template: string,
+    text: string,
+    userId: string,
+  ): string {
+    return template
+      .replace(/\{text\}/gi, text)
+      .replace(/\{user\}/gi, userId)
+      .trim();
+  }
+
+  private async fetchSlashCommandResponse(
+    requestUrl: string,
+    command: string,
+    text: string,
+    userId: string,
+    channelId: string,
+  ): Promise<{ text: string; responseType?: 'ephemeral' | 'in_channel' } | null> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(requestUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command,
+          text,
+          user_id: userId,
+          channel_id: channelId,
+          response_url: null,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!response.ok) {
+        return null;
+      }
+      const json = (await response.json()) as {
+        text?: unknown;
+        response_type?: unknown;
+      };
+      const parsedText =
+        typeof json.text === 'string' ? json.text.trim() : '';
+      const responseType =
+        json.response_type === 'ephemeral' ||
+        json.response_type === 'in_channel'
+          ? json.response_type
+          : undefined;
+      return { text: parsedText, responseType };
+    } catch {
+      clearTimeout(timeout);
+      return null;
+    }
+  }
+
+  private async deliverOutgoingWebhook(
+    webhook: OutgoingWebhook,
+    payload: DispatchOutgoingWebhooksPayload,
+  ): Promise<void> {
+    const body = JSON.stringify({
+      event: payload.event,
+      message: payload.message,
+    });
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const signature = createHmac('sha256', webhook.signingSecret)
+      .update(`${timestamp}.${body}`)
+      .digest('hex');
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(webhook.targetUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Relay-Signature': `v1=${signature}`,
+          'X-Relay-Timestamp': timestamp,
+        },
+        body,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (response.ok) {
+        webhook.lastDeliveredAt = new Date();
+        await this.outgoingWebhooks.save(webhook);
+        return;
+      }
+    } catch {
+      clearTimeout(timeout);
+    }
+
+    webhook.failureCount += 1;
+    await this.outgoingWebhooks.save(webhook);
+  }
+
+  async listUserGroups(payload: ListUserGroupsPayload) {
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 50));
+    const { skip, take } = getSkipTake(page, limit);
+    const [rows, total] = await this.userGroups.findAndCount({
       where: { organizationId: requireOrganizationId() },
       order: { handle: 'ASC' },
+      skip,
+      take,
     });
-    return rows.map((row) => this.toUserGroupView(row));
+    return buildPaginatedResult(
+      rows.map((row) => this.toUserGroupView(row)),
+      total,
+      page,
+      limit,
+    );
   }
 
   async createUserGroup(
@@ -4418,18 +5020,32 @@ export class ChatService {
     return { unblocked: (result.affected ?? 0) > 0 };
   }
 
-  async listBlocks(payload: { actorId: string }): Promise<BlockView[]> {
-    const blocks = await this.userBlocks.find({
+  async listBlocks(payload: {
+    actorId: string;
+    page?: number;
+    limit?: number;
+  }) {
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 50));
+    const { skip, take } = getSkipTake(page, limit);
+    const [blocks, total] = await this.userBlocks.findAndCount({
       where: {
         organizationId: requireOrganizationId(),
         blockerId: payload.actorId,
       },
       order: { createdAt: 'DESC' },
+      skip,
+      take,
     });
-    return blocks.map((block) => ({
-      userId: block.blockedId,
-      createdAt: block.createdAt.toISOString(),
-    }));
+    return buildPaginatedResult(
+      blocks.map((block) => ({
+        userId: block.blockedId,
+        createdAt: block.createdAt.toISOString(),
+      })),
+      total,
+      page,
+      limit,
+    );
   }
 
   /** Validates membership + blocks before WebRTC signaling starts (private or group). */
@@ -5605,16 +6221,26 @@ export class ChatService {
     return counts;
   }
 
+  private frontendBaseUrl(): string {
+    return (
+      this.config.get<string>('APP_PUBLIC_URL') ||
+      this.config.get<string>('FRONTEND_URL') ||
+      'http://127.0.0.1:5173'
+    ).replace(/\/$/, '');
+  }
+
   private toChannelInviteView(
     invite: ChannelInvite,
     rawToken: string | null,
+    conversationName?: string | null,
   ): ChannelInviteView {
+    const path = rawToken ? `/channel-invite/${rawToken}` : null;
     return {
       id: invite.id,
       conversationId: invite.conversationId,
+      conversationName: conversationName ?? null,
       token: rawToken,
-      // Frontend route recipients open in the browser (API accept is POST).
-      inviteUrl: rawToken ? `/channel-invite/${rawToken}` : null,
+      inviteUrl: path ? `${this.frontendBaseUrl()}${path}` : null,
       expiresAt: invite.expiresAt?.toISOString() ?? null,
       maxUses: invite.maxUses,
       useCount: invite.useCount,
@@ -5639,6 +6265,25 @@ export class ChatService {
       createdBy: webhook.createdBy,
       revokedAt: webhook.revokedAt?.toISOString() ?? null,
       lastUsedAt: webhook.lastUsedAt?.toISOString() ?? null,
+      createdAt: webhook.createdAt.toISOString(),
+    };
+  }
+
+  private toOutgoingWebhookView(
+    webhook: OutgoingWebhook,
+    includeSecret = false,
+  ): OutgoingWebhookView {
+    return {
+      id: webhook.id,
+      conversationId: webhook.conversationId,
+      name: webhook.name,
+      targetUrl: webhook.targetUrl,
+      excludeBots: webhook.excludeBots,
+      signingSecret: includeSecret ? webhook.signingSecret : null,
+      createdBy: webhook.createdBy,
+      revokedAt: webhook.revokedAt?.toISOString() ?? null,
+      lastDeliveredAt: webhook.lastDeliveredAt?.toISOString() ?? null,
+      failureCount: webhook.failureCount,
       createdAt: webhook.createdAt.toISOString(),
     };
   }
@@ -5694,6 +6339,8 @@ export class ChatService {
         status: PresenceStatus.OFFLINE,
         lastSeenAt: null,
       })),
+      isShared: Boolean(conversation.isShared),
+      sharedExternalLabel: conversation.sharedExternalLabel ?? null,
       createdAt: conversation.createdAt.toISOString(),
       updatedAt: conversation.updatedAt.toISOString(),
     };

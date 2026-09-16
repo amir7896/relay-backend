@@ -15,6 +15,7 @@ import { Server, Socket } from 'socket.io';
 import { MessageType, PresenceStatus } from '@app/common';
 import { AUTH_PATTERNS, CHAT_PATTERNS } from '@app/contracts';
 import type {
+  ChannelCanvasView,
   ConversationView,
   MessageView,
   OrganizationView,
@@ -44,6 +45,8 @@ type CallSignalBody = {
   toUserId?: string;
   userIds?: string[];
   media?: 'audio' | 'video';
+  /** Ambient channel huddle (no ring) vs normal ringing call. */
+  mode?: 'ring' | 'huddle';
   onHold?: boolean;
   muted?: boolean;
   active?: boolean;
@@ -240,6 +243,19 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const { recipientIds, mutedRecipientIds: _muted, ...message } = result;
     await this.conversationCache.setMemberIds(conversationId, recipientIds);
     this.broadcastMessage(message, recipientIds);
+    void this.sendChatFor(client, CHAT_PATTERNS.DISPATCH_OUTGOING_WEBHOOKS, {
+      conversationId: message.conversationId,
+      event: 'message.created' as const,
+      message: {
+        id: message.id,
+        body: message.body ?? null,
+        senderId: message.senderId,
+        type: message.type,
+        createdAt: message.createdAt,
+        botUsername: message.botUsername ?? null,
+      },
+    }).catch(() => undefined);
+    void this.evaluateChannelWorkflows(client, userId, conversationId, message);
     return message;
   }
 
@@ -336,12 +352,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
 
     const media = body.media === 'video' ? 'video' : 'audio';
+    const mode = body.mode === 'huddle' ? 'huddle' : 'ring';
+    if (mode === 'huddle' && prepared.kind !== 'group' && prepared.kind !== 'private') {
+      return { status: 'error', message: 'Huddles are only available in channels and DMs' };
+    }
     const created = await this.calls.createCall({
       conversationId: prepared.conversationId,
       kind: prepared.kind,
       hostId: userId,
       memberIds: prepared.memberIds,
-      media,
+      media: mode === 'huddle' ? 'audio' : media,
+      mode,
     });
     // Return error via ACK (Nest WsException emits "exception" and never nacks the ACK,
     // which left the caller UI stuck on "Calling…" with no peer ring).
@@ -350,47 +371,53 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     this.logger.log(
-      `call:invite ${created.callId} kind=${created.kind} media=${created.media} host=${userId} peers=${prepared.peerIds.join(',')}`,
+      `call:invite ${created.callId} kind=${created.kind} mode=${created.mode} media=${created.media} host=${userId} peers=${prepared.peerIds.join(',')}`,
     );
 
-    const incoming = {
-      callId: created.callId,
-      conversationId: created.conversationId,
-      fromUserId: userId,
-      kind: created.kind,
-      media: created.media,
-      memberIds: created.memberIds,
-      joinedIds: created.joinedIds,
-    };
-    // User rooms only — conversation rooms can retain removed members.
-    this.broadcastToCallMembers(prepared.peerIds, 'call:incoming', incoming);
+    // Huddles: silent hop-in — lobby only, no ring / push / timeout.
     this.emitCallLobby(created);
     this.emitCallRoster(created);
 
-    const mediaLabel = created.media === 'video' ? 'Video' : 'Voice';
-    const kindLabel = created.kind === 'group' ? 'group ' : '';
-    void this.push.notifyCallInvite({
-      recipientIds: prepared.peerIds,
-      senderId: userId,
-      title: `Incoming ${kindLabel}${mediaLabel.toLowerCase()} call`,
-      body: `${mediaLabel} call — tap to open Relay`,
-      conversationId: created.conversationId,
-      callId: created.callId,
-      media: created.media,
-      kind: created.kind,
-    });
+    if (mode !== 'huddle') {
+      const incoming = {
+        callId: created.callId,
+        conversationId: created.conversationId,
+        fromUserId: userId,
+        kind: created.kind,
+        media: created.media,
+        mode: created.mode,
+        memberIds: created.memberIds,
+        joinedIds: created.joinedIds,
+      };
+      // User rooms only — conversation rooms can retain removed members.
+      this.broadcastToCallMembers(prepared.peerIds, 'call:incoming', incoming);
 
-    this.clearRingTimer(created.callId);
-    const timer = setTimeout(() => {
-      void this.timeoutRingingCall(created.callId);
-    }, RING_TIMEOUT_MS);
-    this.ringTimers.set(created.callId, timer);
+      const mediaLabel = created.media === 'video' ? 'Video' : 'Voice';
+      const kindLabel = created.kind === 'group' ? 'group ' : '';
+      void this.push.notifyCallInvite({
+        recipientIds: prepared.peerIds,
+        senderId: userId,
+        title: `Incoming ${kindLabel}${mediaLabel.toLowerCase()} call`,
+        body: `${mediaLabel} call — tap to open Relay`,
+        conversationId: created.conversationId,
+        callId: created.callId,
+        media: created.media,
+        kind: created.kind,
+      });
+
+      this.clearRingTimer(created.callId);
+      const timer = setTimeout(() => {
+        void this.timeoutRingingCall(created.callId);
+      }, RING_TIMEOUT_MS);
+      this.ringTimers.set(created.callId, timer);
+    }
 
     return {
       callId: created.callId,
       conversationId: created.conversationId,
       kind: created.kind,
       media: created.media,
+      mode: created.mode,
       peerIds: prepared.peerIds,
       memberIds: created.memberIds,
       joinedIds: created.joinedIds,
@@ -808,6 +835,48 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
   }
 
+  broadcastCanvas(
+    canvas: ChannelCanvasView,
+    recipientIds: string[] = [],
+  ): void {
+    this.emitToMembers(
+      'chat:canvas',
+      canvas,
+      canvas.conversationId,
+      recipientIds,
+    );
+  }
+
+  private async evaluateChannelWorkflows(
+    client: AuthedSocket,
+    actorId: string,
+    conversationId: string,
+    message: MessageView,
+  ): Promise<void> {
+    try {
+      const result = await this.sendChatFor<{
+        messages?: Array<MessageView & { recipientIds?: string[] }>;
+      }>(client, CHAT_PATTERNS.EVALUATE_WORKFLOWS, {
+        actorId,
+        conversationId,
+        triggerType: 'message_contains',
+        message: {
+          id: message.id,
+          body: message.body ?? '',
+          senderId: message.senderId,
+          botUsername: message.botUsername ?? null,
+          conversationId: message.conversationId,
+        },
+      });
+      for (const item of result.messages ?? []) {
+        const { recipientIds, ...view } = item;
+        this.broadcastMessage(view, recipientIds ?? []);
+      }
+    } catch {
+      // ignore workflow failures on the socket path
+    }
+  }
+
   broadcastTyping(
     conversationId: string,
     userId: string,
@@ -828,6 +897,19 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ): void {
     this.emitToMembers(
       'chat:seen',
+      result,
+      result.conversationId,
+      recipientIds,
+    );
+  }
+
+  /** Peer marked unread — rewind their read receipts on open threads. */
+  broadcastUnseen(
+    result: Omit<SeenResultView, 'recipientIds'>,
+    recipientIds: string[] = [],
+  ): void {
+    this.emitToMembers(
+      'chat:unseen',
       result,
       result.conversationId,
       recipientIds,

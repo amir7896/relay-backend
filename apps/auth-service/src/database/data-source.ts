@@ -15,6 +15,8 @@ import { AddInviteOrganizationId1743000000000 } from './migrations/1743000000000
 import { AddTwoFactorSessionsBillingSso1743000002000 } from './migrations/1743000002000-AddTwoFactorSessionsBillingSso';
 import { AddStripeBillingColumns1743000003000 } from './migrations/1743000003000-AddStripeBillingColumns';
 import { AddSsoSecretInviteRoleGuest1743000004000 } from './migrations/1743000004000-AddSsoSecretInviteRoleGuest';
+import { AddPendingChannelIdToAuthTokens1743000005000 } from './migrations/1743000005000-AddPendingChannelIdToAuthTokens';
+import { AddSamlSsoFields1743000006000 } from './migrations/1743000006000-AddSamlSsoFields';
 
 config({
   path: [
@@ -47,6 +49,8 @@ export default new DataSource({
     AddTwoFactorSessionsBillingSso1743000002000,
     AddStripeBillingColumns1743000003000,
     AddSsoSecretInviteRoleGuest1743000004000,
+    AddPendingChannelIdToAuthTokens1743000005000,
+    AddSamlSsoFields1743000006000,
   ],
   synchronize: false,
 });

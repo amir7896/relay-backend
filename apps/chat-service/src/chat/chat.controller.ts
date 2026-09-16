@@ -9,6 +9,7 @@ import type {
   BlockUserPayload,
   ConversationActorPayload,
   CreateChannelInvitePayload,
+  PreviewChannelInvitePayload,
   CreateGroupChatPayload,
   CreatePollPayload,
   CreatePrivateChatPayload,
@@ -19,6 +20,7 @@ import type {
   ForwardMessagePayload,
   JoinChannelPayload,
   ListBookmarksPayload,
+  ListConversationMembersPayload,
   ListConversationsPayload,
   ListMessagesPayload,
   ListMediaPayload,
@@ -30,6 +32,7 @@ import type {
   MarkThreadReadPayload,
   GetMessagePayload,
   MarkSeenPayload,
+  MarkUnreadPayload,
   MuteConversationPayload,
   PinConversationPayload,
   PinMessagePayload,
@@ -56,8 +59,12 @@ import type {
   UpdateWorkspacePayload,
   VotePollPayload,
   CreateIncomingWebhookPayload,
+  CreateOutgoingWebhookPayload,
+  DispatchOutgoingWebhooksPayload,
   ListIncomingWebhooksPayload,
+  ListOutgoingWebhooksPayload,
   RevokeIncomingWebhookPayload,
+  RevokeOutgoingWebhookPayload,
   PostIncomingWebhookPayload,
   CreateSlashCommandPayload,
   ListSlashCommandsPayload,
@@ -70,6 +77,7 @@ import type {
 } from '@app/contracts';
 import { runWithOrganization } from '@app/database';
 import { ChatService } from './chat.service';
+import { SlackProductsService } from './slack-products.service';
 
 type TenantChatPayload = {
   organizationId?: string;
@@ -77,7 +85,7 @@ type TenantChatPayload = {
 
 @Controller()
 export class ChatController {
-  constructor(private readonly chatService: ChatService) {}
+  constructor(private readonly chatService: ChatService, private readonly slackProducts: SlackProductsService) {}
 
   private withOrg<T>(
     payload: TenantChatPayload,
@@ -272,7 +280,12 @@ export class ChatController {
 
   @MessagePattern(CHAT_PATTERNS.LIST_REMINDERS)
   listReminders(
-    @Payload() payload: { actorId: string } & TenantChatPayload,
+    @Payload()
+    payload: {
+      actorId: string;
+      page?: number;
+      limit?: number;
+    } & TenantChatPayload,
   ) {
     return this.withOrg(payload, () =>
       this.chatService.listReminders(payload),
@@ -306,6 +319,11 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.MARK_SEEN)
   markSeen(@Payload() payload: MarkSeenPayload & TenantChatPayload) {
     return this.withOrg(payload, () => this.chatService.markSeen(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.MARK_UNREAD)
+  markUnread(@Payload() payload: MarkUnreadPayload & TenantChatPayload) {
+    return this.withOrg(payload, () => this.chatService.markUnread(payload));
   }
 
   @MessagePattern(CHAT_PATTERNS.MUTE_CONVERSATION)
@@ -353,6 +371,22 @@ export class ChatController {
   ) {
     return this.withOrg(payload, () =>
       this.chatService.ensureGeneralMembership({ userId: payload.userId }),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.ENSURE_CHANNEL_MEMBER)
+  ensureChannelMember(
+    @Payload()
+    payload: {
+      userId: string;
+      conversationId: string;
+    } & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.ensureChannelMembership({
+        userId: payload.userId,
+        conversationId: payload.conversationId,
+      }),
     );
   }
 
@@ -478,7 +512,12 @@ export class ChatController {
 
   @MessagePattern(CHAT_PATTERNS.LIST_PUBLIC_CHANNELS)
   listPublicChannels(
-    @Payload() payload: { actorId: string } & TenantChatPayload,
+    @Payload()
+    payload: {
+      actorId: string;
+      page?: number;
+      limit?: number;
+    } & TenantChatPayload,
   ) {
     return this.withOrg(payload, () =>
       this.chatService.listPublicChannels(payload),
@@ -490,6 +529,15 @@ export class ChatController {
     return this.withOrg(payload, () => this.chatService.joinChannel(payload));
   }
 
+  @MessagePattern(CHAT_PATTERNS.LIST_CONVERSATION_MEMBERS)
+  listConversationMembers(
+    @Payload() payload: ListConversationMembersPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listConversationMembers(payload),
+    );
+  }
+
   @MessagePattern(CHAT_PATTERNS.CREATE_CHANNEL_INVITE)
   createChannelInvite(
     @Payload() payload: CreateChannelInvitePayload & TenantChatPayload,
@@ -499,13 +547,16 @@ export class ChatController {
     );
   }
 
+  @MessagePattern(CHAT_PATTERNS.PREVIEW_CHANNEL_INVITE)
+  previewChannelInvite(@Payload() payload: PreviewChannelInvitePayload) {
+    // Token is globally unique — no tenant context required.
+    return this.chatService.previewChannelInvite(payload);
+  }
+
   @MessagePattern(CHAT_PATTERNS.ACCEPT_CHANNEL_INVITE)
-  acceptChannelInvite(
-    @Payload() payload: AcceptChannelInvitePayload & TenantChatPayload,
-  ) {
-    return this.withOrg(payload, () =>
-      this.chatService.acceptChannelInvite(payload),
-    );
+  acceptChannelInvite(@Payload() payload: AcceptChannelInvitePayload) {
+    // Resolves invite org internally; do not bind to caller's active org first.
+    return this.chatService.acceptChannelInvite(payload);
   }
 
   @MessagePattern(CHAT_PATTERNS.REVOKE_CHANNEL_INVITE)
@@ -519,7 +570,11 @@ export class ChatController {
 
   @MessagePattern(CHAT_PATTERNS.LIST_CHANNEL_INVITES)
   listChannelInvites(
-    @Payload() payload: ConversationActorPayload & TenantChatPayload,
+    @Payload()
+    payload: ConversationActorPayload & {
+      page?: number;
+      limit?: number;
+    } & TenantChatPayload,
   ) {
     return this.withOrg(payload, () =>
       this.chatService.listChannelInvites(payload),
@@ -556,6 +611,40 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.POST_INCOMING_WEBHOOK)
   postIncomingWebhook(@Payload() payload: PostIncomingWebhookPayload) {
     return this.chatService.postIncomingWebhook(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_OUTGOING_WEBHOOK)
+  createOutgoingWebhook(
+    @Payload() payload: CreateOutgoingWebhookPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.createOutgoingWebhook(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_OUTGOING_WEBHOOKS)
+  listOutgoingWebhooks(
+    @Payload() payload: ListOutgoingWebhooksPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.listOutgoingWebhooks(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.REVOKE_OUTGOING_WEBHOOK)
+  revokeOutgoingWebhook(
+    @Payload() payload: RevokeOutgoingWebhookPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.revokeOutgoingWebhook(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.DISPATCH_OUTGOING_WEBHOOKS)
+  dispatchOutgoingWebhooks(
+    @Payload() payload: DispatchOutgoingWebhooksPayload,
+  ) {
+    return this.chatService.dispatchOutgoingWebhooks(payload);
   }
 
   @MessagePattern(CHAT_PATTERNS.LIST_SLASH_COMMANDS)
@@ -630,6 +719,42 @@ export class ChatController {
     );
   }
 
+  @MessagePattern(CHAT_PATTERNS.GET_CANVAS) getCanvas(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getCanvas(p)); }
+  @MessagePattern(CHAT_PATTERNS.PUT_CANVAS) putCanvas(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.putCanvas(p)); }
+  @MessagePattern(CHAT_PATTERNS.LIST_CHANNEL_LISTS) listChannelLists(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listLists(p)); }
+  @MessagePattern(CHAT_PATTERNS.GET_CHANNEL_LIST) getChannelList(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getList(p)); }
+  @MessagePattern(CHAT_PATTERNS.CREATE_CHANNEL_LIST) createChannelList(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createList(p)); }
+  @MessagePattern(CHAT_PATTERNS.UPDATE_CHANNEL_LIST) updateChannelList(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.updateList(p)); }
+  @MessagePattern(CHAT_PATTERNS.DELETE_CHANNEL_LIST) deleteChannelList(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.deleteList(p)); }
+  @MessagePattern(CHAT_PATTERNS.CREATE_CHANNEL_LIST_ITEM) createChannelListItem(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createListItem(p)); }
+  @MessagePattern(CHAT_PATTERNS.UPDATE_CHANNEL_LIST_ITEM) updateChannelListItem(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.updateListItem(p)); }
+  @MessagePattern(CHAT_PATTERNS.DELETE_CHANNEL_LIST_ITEM) deleteChannelListItem(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.deleteListItem(p)); }
+  @MessagePattern(CHAT_PATTERNS.LIST_CLIPS) listClips(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listClips(p)); }
+  @MessagePattern(CHAT_PATTERNS.CREATE_CLIP) createClip(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createClip(p)); }
+  @MessagePattern(CHAT_PATTERNS.DELETE_CLIP) deleteClip(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.deleteClip(p)); }
+  @MessagePattern(CHAT_PATTERNS.GET_HUDDLE) getHuddle(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getHuddle(p)); }
+  @MessagePattern(CHAT_PATTERNS.START_HUDDLE) startHuddle(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.startHuddle(p)); }
+  @MessagePattern(CHAT_PATTERNS.JOIN_HUDDLE) joinHuddle(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.joinHuddle(p)); }
+  @MessagePattern(CHAT_PATTERNS.LEAVE_HUDDLE) leaveHuddle(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.leaveHuddle(p)); }
+  @MessagePattern(CHAT_PATTERNS.END_HUDDLE) endHuddle(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.endHuddle(p)); }
+  @MessagePattern(CHAT_PATTERNS.LIST_WORKFLOWS) listWorkflows(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listWorkflows(p)); }
+  @MessagePattern(CHAT_PATTERNS.CREATE_WORKFLOW) createWorkflow(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createWorkflow(p)); }
+  @MessagePattern(CHAT_PATTERNS.UPDATE_WORKFLOW) updateWorkflow(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.updateWorkflow(p)); }
+  @MessagePattern(CHAT_PATTERNS.DELETE_WORKFLOW) deleteWorkflow(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.deleteWorkflow(p)); }
+  @MessagePattern(CHAT_PATTERNS.RUN_WORKFLOW) runWorkflow(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.runWorkflow(p)); }
+  @MessagePattern(CHAT_PATTERNS.EVALUATE_WORKFLOWS) evaluateWorkflows(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.evaluateWorkflows(p)); }
+  @MessagePattern(CHAT_PATTERNS.CREATE_SHARED_INVITE) createSharedInvite(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createSharedInvite(p)); }
+  @MessagePattern(CHAT_PATTERNS.GET_SHARED_INFO) getSharedInfo(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getSharedInfo(p)); }
+  @MessagePattern(CHAT_PATTERNS.ACCEPT_SHARED_INVITE) acceptSharedInvite(@Payload() p: any) { return this.slackProducts.acceptSharedInvite(p); }
+  @MessagePattern(CHAT_PATTERNS.PREVIEW_SHARED_INVITE) previewSharedInvite(@Payload() p: any) { return this.slackProducts.previewSharedInvite(p); }
+  @MessagePattern(CHAT_PATTERNS.REVOKE_SHARED_INVITE) revokeSharedInvite(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.revokeSharedInvite(p)); }
+  @MessagePattern(CHAT_PATTERNS.MARK_SHARED_INVITE_ACCEPTED) markSharedInviteAccepted(@Payload() p: any) { return this.slackProducts.markSharedInviteAccepted(p); }
+  @MessagePattern(CHAT_PATTERNS.BIND_SHARED_INVITE_TOKEN) bindSharedInviteToken(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.bindSharedInviteToken(p)); }
+  @MessagePattern(CHAT_PATTERNS.LIST_APP_CATALOG) listAppCatalog(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listAppCatalog()); }
+  @MessagePattern(CHAT_PATTERNS.INSTALL_APP) installApp(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.installApp(p)); }
+  @MessagePattern(CHAT_PATTERNS.UNINSTALL_APP) uninstallApp(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.uninstallApp(p)); }
+  @MessagePattern(CHAT_PATTERNS.LIST_INSTALLED_APPS) listInstalledApps(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listInstalledApps()); }
+
   @MessagePattern(CHAT_PATTERNS.DELETE_GROUP)
   deleteGroup(
     @Payload() payload: ConversationActorPayload & TenantChatPayload,
@@ -648,7 +773,14 @@ export class ChatController {
   }
 
   @MessagePattern(CHAT_PATTERNS.LIST_BLOCKS)
-  listBlocks(@Payload() payload: { actorId: string } & TenantChatPayload) {
+  listBlocks(
+    @Payload()
+    payload: {
+      actorId: string;
+      page?: number;
+      limit?: number;
+    } & TenantChatPayload,
+  ) {
     return this.withOrg(payload, () => this.chatService.listBlocks(payload));
   }
 

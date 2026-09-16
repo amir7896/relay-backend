@@ -23,11 +23,22 @@ export class SlashCommand {
   description!: string;
 
   /**
-   * In-channel reply template. Supports `{text}` and `{user}`.
-   * Example: "Ship it: {text}"
+   * In-channel / ephemeral reply template. Supports `{text}` and `{user}`.
+   * Optional when `requestUrl` is set (remote handler provides text).
    */
-  @Column({ type: 'varchar', length: 2000 })
+  @Column({ type: 'varchar', length: 2000, default: '' })
   responseTemplate!: string;
+
+  /** `in_channel` posts a visible message; `ephemeral` returns only to the invoker. */
+  @Column({ type: 'varchar', length: 20, default: 'in_channel' })
+  responseMode!: 'in_channel' | 'ephemeral';
+
+  /**
+   * Optional HTTPS URL. When set, Relay POSTs the slash payload and uses the
+   * JSON response (`text` + optional `response_type`).
+   */
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  requestUrl!: string | null;
 
   @Column({ type: 'uuid' })
   createdBy!: string;

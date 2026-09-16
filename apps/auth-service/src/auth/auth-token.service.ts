@@ -3,7 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes } from 'crypto';
 import { IsNull, Repository } from 'typeorm';
-import { MailService, RpcErrors } from '@app/common';
+import { MailService, RpcErrors, resetPasswordTemplate, verifyEmailTemplate, workspaceInviteTemplate, buildPaginatedResult, getSkipTake } from '@app/common';
+import type { PaginatedResult } from '@app/common';
 import type {
   CreateInvitePayload,
   ForgotPasswordResult,
@@ -56,11 +57,14 @@ export class AuthTokenService {
     });
 
     const verifyUrl = `${this.mail.publicAppUrl}/verify-email?token=${raw}`;
+    const content = verifyEmailTemplate({
+      appUrl: this.mail.publicAppUrl,
+      verifyUrl,
+      expiresHours: 48,
+    });
     const result = await this.mail.send({
       to: user.email,
-      subject: 'Verify your Relay email',
-      text: `Verify your email by opening this link:\n${verifyUrl}\n\nThis link expires in 48 hours.`,
-      html: `<p>Verify your email by opening this link:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p>This link expires in 48 hours.</p>`,
+      ...content,
     });
 
     return {
@@ -99,11 +103,14 @@ export class AuthTokenService {
     });
 
     const resetUrl = `${this.mail.publicAppUrl}/reset-password?token=${raw}`;
+    const content = resetPasswordTemplate({
+      appUrl: this.mail.publicAppUrl,
+      resetUrl,
+      expiresHours: 2,
+    });
     const result = await this.mail.send({
       to: user.email,
-      subject: 'Reset your Relay password',
-      text: `Reset your password by opening this link:\n${resetUrl}\n\nIf you did not request this, ignore this email.`,
-      html: `<p>Reset your password:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>If you did not request this, ignore this email.</p>`,
+      ...content,
     });
 
     return {
@@ -171,6 +178,7 @@ export class AuthTokenService {
       createdByUserId: payload.createdByUserId,
       organizationId: payload.organizationId,
       inviteRole,
+      pendingChannelId: payload.pendingChannelId ?? null,
       maxUses,
       ttlMs: days * 24 * 60 * 60 * 1000,
     });
@@ -180,12 +188,17 @@ export class AuthTokenService {
     });
     const view = this.toInviteView(saved, raw, org.name);
 
-    if (email) {
+    if (email && !payload.skipEmail) {
+      const content = workspaceInviteTemplate({
+        appUrl: this.mail.publicAppUrl,
+        inviteUrl: view.inviteUrl,
+        organizationName: org.name,
+        expiresAt: view.expiresAt,
+        role: inviteRole,
+      });
       const mailResult = await this.mail.send({
         to: email,
-        subject: `You're invited to ${org.name} on Relay`,
-        text: `Join ${org.name} on Relay:\n${view.inviteUrl}\n\nThis link expires on ${view.expiresAt}.`,
-        html: `<p>You are invited to <strong>${org.name}</strong> on Relay.</p><p><a href="${view.inviteUrl}">Accept invite</a></p><p>Expires: ${view.expiresAt}</p>`,
+        ...content,
       });
       view.emailSent = mailResult.delivered;
       view.debugInviteUrl =
@@ -200,6 +213,12 @@ export class AuthTokenService {
           `Workspace invite email NOT delivered | org=${org.name} | to=${email} | use copy-link fallback`,
         );
       }
+    } else if (email && payload.skipEmail) {
+      view.debugInviteUrl = view.inviteUrl;
+      view.emailSent = false;
+      this.logger.log(
+        `Workspace invite created without email (skipEmail) | org=${org.name} | to=${email}`,
+      );
     } else {
       view.debugInviteUrl = view.inviteUrl;
       view.emailSent = false;
@@ -211,23 +230,34 @@ export class AuthTokenService {
     return view;
   }
 
-  async listInvites(payload: ListInvitesPayload): Promise<InviteView[]> {
+  async listInvites(
+    payload: ListInvitesPayload,
+  ): Promise<PaginatedResult<InviteView>> {
     await this.organizationService.requireOrgAdmin({
       organizationId: payload.organizationId,
       userId: payload.requestedByUserId,
     });
-    const rows = await this.tokens.find({
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 20));
+    const { skip, take } = getSkipTake(page, limit);
+    const [rows, total] = await this.tokens.findAndCount({
       where: {
         type: AuthTokenType.INVITE,
         organizationId: payload.organizationId,
       },
       order: { createdAt: 'DESC' },
-      take: 100,
+      skip,
+      take,
     });
     const org = await this.organizations.findOne({
       where: { id: payload.organizationId },
     });
-    return rows.map((row) => this.toInviteView(row, undefined, org?.name));
+    return buildPaginatedResult(
+      rows.map((row) => this.toInviteView(row, undefined, org?.name)),
+      total,
+      page,
+      limit,
+    );
   }
 
   async getInvite(token: string): Promise<PublicInviteView> {
@@ -248,6 +278,7 @@ export class AuthTokenService {
       valid: true,
       organizationId: record.organizationId,
       organizationName,
+      pendingChannelId: record.pendingChannelId ?? null,
     };
   }
 
@@ -311,6 +342,7 @@ export class AuthTokenService {
     createdByUserId?: string | null;
     organizationId?: string | null;
     inviteRole?: 'member' | 'guest';
+    pendingChannelId?: string | null;
     maxUses?: number;
     ttlMs: number;
   }): Promise<string> {
@@ -337,6 +369,10 @@ export class AuthTokenService {
       createdByUserId: input.createdByUserId ?? null,
       organizationId: input.organizationId ?? null,
       inviteRole: input.inviteRole ?? 'member',
+      pendingChannelId:
+        input.type === AuthTokenType.INVITE
+          ? input.pendingChannelId ?? null
+          : null,
       maxUses: input.maxUses ?? 1,
       usedCount: 0,
       expiresAt: new Date(Date.now() + input.ttlMs),

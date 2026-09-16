@@ -6,6 +6,7 @@ import {
   IsArray,
   IsBoolean,
   IsDateString,
+  IsEmail,
   IsEnum,
   IsIn,
   IsInt,
@@ -274,6 +275,28 @@ export class UpdateNotificationPrefsDto {
   @IsOptional()
   @IsBoolean()
   respectStatus?: boolean;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Keyword / phrase highlights (max 50)',
+    example: ['urgent', 'P0'],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(40, { each: true })
+  @ArrayMaxSize(50)
+  keywords?: string[];
+}
+
+export class UpdateChannelNotificationPrefsDto {
+  @ApiProperty({
+    enum: ['default', 'all', 'mentions', 'none'],
+    description:
+      'Per-channel override. default = use global Message alerts setting.',
+  })
+  @IsIn(['default', 'all', 'mentions', 'none'])
+  mode!: 'default' | 'all' | 'mentions' | 'none';
 }
 
 export class CreateReminderDto {
@@ -326,6 +349,16 @@ export class MarkSeenDto {
   @IsOptional()
   @IsUUID('4')
   messageId?: string;
+}
+
+export class MarkUnreadDto {
+  @ApiProperty({
+    format: 'uuid',
+    description:
+      'Mark this message (and everything after it) as unread — Slack-style triage.',
+  })
+  @IsUUID('4')
+  messageId!: string;
 }
 
 export class AddMembersDto {
@@ -424,6 +457,21 @@ export class CreateChannelInviteDto {
   @Min(1)
   @Max(10000)
   maxUses?: number;
+}
+
+export class EmailChannelInviteDto {
+  @ApiProperty({ example: 'teammate@example.com' })
+  @IsEmail({}, { message: 'email must be a valid email address' })
+  @MaxLength(255)
+  email!: string;
+
+  @ApiPropertyOptional({ example: 168 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(8760)
+  expiresInHours?: number;
 }
 
 export class CreatePollDto {
@@ -559,6 +607,28 @@ export class CreateIncomingWebhookDto {
   defaultIconUrl?: string;
 }
 
+export class CreateOutgoingWebhookDto {
+  @ApiProperty({ example: 'PagerDuty' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  name!: string;
+
+  @ApiProperty({ example: 'https://hooks.example.com/relay' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(500)
+  @Matches(/^https:\/\//i, {
+    message: 'targetUrl must start with https://',
+  })
+  targetUrl!: string;
+
+  @ApiPropertyOptional({ default: true })
+  @IsOptional()
+  @IsBoolean()
+  excludeBots?: boolean;
+}
+
 export class PostIncomingWebhookDto {
   @ApiProperty({ example: 'Build #42 succeeded' })
   @IsString()
@@ -591,14 +661,30 @@ export class CreateSlashCommandDto {
   @MaxLength(160)
   description!: string;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     example: 'Deploying: {text}',
     description: 'Supports {text} and {user} placeholders',
   })
+  @ValidateIf((dto: CreateSlashCommandDto) => !dto.requestUrl)
   @IsString()
   @IsNotEmpty()
   @MaxLength(2000)
-  responseTemplate!: string;
+  responseTemplate?: string;
+
+  @ApiPropertyOptional({ enum: ['in_channel', 'ephemeral'], default: 'in_channel' })
+  @IsOptional()
+  @IsIn(['in_channel', 'ephemeral'])
+  responseMode?: 'in_channel' | 'ephemeral';
+
+  @ApiPropertyOptional({ example: 'https://hooks.example.com/slash' })
+  @IsOptional()
+  @ValidateIf((_, value) => value != null && value !== '')
+  @IsString()
+  @MaxLength(500)
+  @Matches(/^https:\/\//i, {
+    message: 'requestUrl must start with https://',
+  })
+  requestUrl?: string;
 }
 
 export class InvokeSlashCommandDto {

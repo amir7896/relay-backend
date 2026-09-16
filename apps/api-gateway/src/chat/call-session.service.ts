@@ -6,12 +6,15 @@ import { REDIS_CLIENT } from '@app/common';
 export type CallStatus = 'ringing' | 'active' | 'ended';
 export type CallKind = 'private' | 'group';
 export type CallMedia = 'audio' | 'video';
+export type CallMode = 'ring' | 'huddle';
 
 export type VoiceCallSession = {
   callId: string;
   conversationId: string;
   kind: CallKind;
   media: CallMedia;
+  /** Ambient channel huddle vs ringing call. */
+  mode: CallMode;
   hostId: string;
   /** Everyone invited (conversation members at start / mid-call adds). */
   memberIds: string[];
@@ -45,6 +48,7 @@ export type CallLobbyPayload = {
   conversationId: string;
   kind: CallKind;
   media: CallMedia;
+  mode: CallMode;
   hostId: string;
   memberIds: string[];
   joinedIds: string[];
@@ -86,7 +90,13 @@ export class CallSessionService {
     hostId: string;
     memberIds: string[];
     media?: CallMedia;
+    mode?: CallMode;
   }): Promise<VoiceCallSession | { error: string }> {
+    const mode: CallMode = input.mode === 'huddle' ? 'huddle' : 'ring';
+    if (mode === 'huddle' && input.kind !== 'group' && input.kind !== 'private') {
+      return { error: 'Huddles are only available in channels and DMs' };
+    }
+
     const busyHost = await this.getActiveCallIdForUser(input.hostId);
     if (busyHost) {
       const existing = await this.get(busyHost);
@@ -97,7 +107,12 @@ export class CallSessionService {
         existing.joinedIds.includes(input.hostId) ||
         existing.hostId === input.hostId
       ) {
-        return { error: 'You are already in a call' };
+        return {
+          error:
+            mode === 'huddle'
+              ? 'You are already in a huddle or call'
+              : 'You are already in a call',
+        };
       } else {
         // Marked ringing on another call but never joined — release lock
         await this.clearUserBusy(input.hostId, busyHost);
@@ -113,7 +128,12 @@ export class CallSessionService {
       ) {
         await this.end(existingConvo.callId);
       } else {
-        return { error: 'A call is already in progress in this group' };
+        return {
+          error:
+            existingConvo.mode === 'huddle'
+              ? 'A huddle is already in progress in this channel'
+              : 'A call is already in progress in this group',
+        };
       }
     }
 
@@ -121,7 +141,8 @@ export class CallSessionService {
     if (!memberIds.includes(input.hostId)) {
       memberIds.push(input.hostId);
     }
-    if (memberIds.length < 2) {
+    // Huddles can start with only the host; ringing calls need a peer.
+    if (mode !== 'huddle' && memberIds.length < 2) {
       return { error: 'Not enough participants for a call' };
     }
 
@@ -142,6 +163,7 @@ export class CallSessionService {
       conversationId: input.conversationId,
       kind: input.kind,
       media: input.media === 'video' ? 'video' : 'audio',
+      mode,
       hostId: input.hostId,
       memberIds,
       joinedIds: [input.hostId],
@@ -151,17 +173,20 @@ export class CallSessionService {
       heldBy: null,
       forceMuted: false,
       screenSharerId: null,
-      status: 'ringing',
+      // Huddles go live immediately (hop-in); ringing calls stay ringing until accept.
+      status: mode === 'huddle' ? 'active' : 'ringing',
       createdAt: new Date().toISOString(),
-      connectedAt: null,
+      connectedAt: mode === 'huddle' ? new Date().toISOString() : null,
     };
 
-    await this.persist(session, RINGING_TTL_SECONDS);
+    const ttl =
+      mode === 'huddle' ? ACTIVE_TTL_SECONDS : RINGING_TTL_SECONDS;
+    await this.persist(session, ttl);
     await this.redis.set(
       this.convoKey(session.conversationId),
       session.callId,
       'EX',
-      RINGING_TTL_SECONDS,
+      ttl,
     );
     return session;
   }
@@ -241,6 +266,7 @@ export class CallSessionService {
       conversationId: normalized.conversationId,
       kind: normalized.kind,
       media: normalized.media ?? 'audio',
+      mode: normalized.mode ?? 'ring',
       hostId: normalized.hostId,
       memberIds: normalized.memberIds,
       joinedIds: normalized.joinedIds,
@@ -549,6 +575,9 @@ export class CallSessionService {
 
   /** Users still ringing (invited, not joined, not declined/left). */
   ringingIds(session: VoiceCallSession): string[] {
+    if (session.mode === 'huddle') {
+      return [];
+    }
     return session.memberIds.filter(
       (id) =>
         !session.joinedIds.includes(id) &&
@@ -740,6 +769,9 @@ export class CallSessionService {
     }
     if (!session.media) {
       session.media = 'audio';
+    }
+    if (session.mode !== 'huddle') {
+      session.mode = 'ring';
     }
     if (session.connectedAt === undefined) {
       session.connectedAt = null;

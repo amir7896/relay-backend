@@ -9,6 +9,22 @@ export type SendMailInput = {
   html: string;
 };
 
+function parseBool(value: unknown, fallback = false): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off', ''].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+function parsePort(value: unknown, fallback = 587): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
@@ -17,16 +33,31 @@ export class MailService {
   constructor(private readonly config: ConfigService) {
     const host = this.config.get<string>('SMTP_HOST');
     if (host) {
+      const port = parsePort(this.config.get('SMTP_PORT'), 587);
+      // Env strings like "false" are truthy in JS — always coerce explicitly.
+      // Port 465 = implicit TLS; 587/25 = plain then STARTTLS.
+      const secure =
+        this.config.get('SMTP_SECURE') === undefined ||
+        this.config.get('SMTP_SECURE') === ''
+          ? port === 465
+          : parseBool(this.config.get('SMTP_SECURE'), port === 465);
+      const user = (this.config.get<string>('SMTP_USER') || '').trim();
+      // Gmail app passwords are often pasted with spaces.
+      const pass = (this.config.get<string>('SMTP_PASS') || '').replace(
+        /\s+/g,
+        '',
+      );
+
       this.transporter = nodemailer.createTransport({
         host,
-        port: this.config.get<number>('SMTP_PORT', 587),
-        secure: this.config.get<boolean>('SMTP_SECURE', false),
-        auth: {
-          user: this.config.get<string>('SMTP_USER', ''),
-          pass: this.config.get<string>('SMTP_PASS', ''),
-        },
+        port,
+        secure,
+        requireTLS: !secure && port === 587,
+        auth: user ? { user, pass } : undefined,
       });
-      this.logger.log(`SMTP mailer ready (${host})`);
+      this.logger.log(
+        `SMTP mailer ready (${host}:${port}, secure=${secure}, requireTLS=${!secure && port === 587})`,
+      );
     } else {
       this.logger.warn(
         'SMTP_HOST not set — auth emails will be logged (dev mode)',
@@ -50,14 +81,14 @@ export class MailService {
     );
   }
 
-  async send(input: SendMailInput): Promise<{ delivered: boolean; previewUrl?: string }> {
+  async send(
+    input: SendMailInput,
+  ): Promise<{ delivered: boolean; previewUrl?: string }> {
     if (!this.transporter) {
       this.logger.warn(
         `Email NOT sent (SMTP not configured) | to=${input.to} | subject="${input.subject}"`,
       );
-      this.logger.log(
-        `[mail:dev] body preview:\n${input.text}`,
-      );
+      this.logger.log(`[mail:dev] body preview:\n${input.text}`);
       return { delivered: false, previewUrl: this.extractUrl(input.text) };
     }
 

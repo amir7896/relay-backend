@@ -59,6 +59,14 @@ export class Organization {
   @Column({ type: 'varchar', length: 500, nullable: true, select: false })
   ssoClientSecret!: string | null;
 
+  /** SAML IdP HTTP-Redirect SSO URL. */
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  ssoIdpSsoUrl!: string | null;
+
+  /** SAML IdP X.509 signing certificate (PEM). */
+  @Column({ type: 'text', nullable: true, select: false })
+  ssoIdpCertificate!: string | null;
+
   @OneToMany(() => OrganizationMember, (member) => member.organization)
   members!: OrganizationMember[];
 

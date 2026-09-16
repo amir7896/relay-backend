@@ -91,6 +91,7 @@ export class AuthService implements OnModuleInit {
     let inviteId: string | null = null;
     let inviteOrganizationId: string | null = null;
     let inviteRole: 'member' | 'guest' = 'member';
+    let pendingChannelId: string | null = null;
     let emailVerified = false;
     if (payload.inviteToken) {
       const invite = await this.authTokens.assertInviteForRegister(
@@ -100,6 +101,7 @@ export class AuthService implements OnModuleInit {
       inviteId = invite.id;
       inviteOrganizationId = invite.organizationId;
       inviteRole = invite.inviteRole === 'guest' ? 'guest' : 'member';
+      pendingChannelId = invite.pendingChannelId ?? null;
       emailVerified = Boolean(invite.email && invite.email === email);
     }
 
@@ -144,9 +146,10 @@ export class AuthService implements OnModuleInit {
         return {
           ...authResult,
           activeOrganizationId: inviteOrganizationId,
+          pendingChannelId,
         };
       }
-      return authResult;
+      return { ...authResult, pendingChannelId };
     } catch (error) {
       if (this.isUniqueViolation(error)) {
         return RpcErrors.conflict('An account with this email already exists');
@@ -416,6 +419,7 @@ export class AuthService implements OnModuleInit {
       activeOrganizationId: organizationId,
       alreadyMember,
       role,
+      pendingChannelId: invite.pendingChannelId ?? null,
     };
   }
 
@@ -621,7 +625,7 @@ export class AuthService implements OnModuleInit {
     return this.authTokens.createInvite(payload);
   }
 
-  async listInvites(payload: ListInvitesPayload): Promise<InviteView[]> {
+  async listInvites(payload: ListInvitesPayload) {
     return this.authTokens.listInvites(payload);
   }
 

@@ -43,6 +43,22 @@ export class IncomingWebhooksController {
     );
     const { recipientIds, ...message } = result;
     this.chatGateway.broadcastMessage(message, recipientIds);
+    void this.proxy.sendChat(
+      CHAT_PATTERNS.DISPATCH_OUTGOING_WEBHOOKS,
+      {
+        conversationId: message.conversationId,
+        event: 'message.created' as const,
+        message: {
+          id: message.id,
+          body: message.body ?? null,
+          senderId: message.senderId,
+          type: message.type,
+          createdAt: message.createdAt,
+          botUsername: message.botUsername ?? null,
+        },
+      },
+      { skipTenant: true },
+    );
     return { message: 'ok', data: { id: message.id } };
   }
 }

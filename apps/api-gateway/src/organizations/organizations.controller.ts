@@ -8,6 +8,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApiBearerAuth, ApiHeader, ApiTags } from '@nestjs/swagger';
@@ -15,6 +16,8 @@ import {
   AuthenticatedUser,
   CurrentUser,
   USER_SUCCESS_MESSAGES,
+  PaginationQueryDto,
+  type PaginatedResult,
 } from '@app/common';
 import { AUTH_PATTERNS, CHAT_PATTERNS, USER_PATTERNS } from '@app/contracts';
 import type {
@@ -127,10 +130,17 @@ export class OrganizationsController {
   async listMembers(
     @CurrentUser() user: AuthenticatedUser,
     @Param('organizationId', ParseUUIDPipe) organizationId: string,
+    @Query() query: PaginationQueryDto,
   ) {
-    const data = await this.proxy.sendAuth<OrgMemberView[]>(
+    const data = await this.proxy.sendAuth<PaginatedResult<OrgMemberView>>(
       AUTH_PATTERNS.LIST_ORG_MEMBERS,
-      { organizationId, requestedByUserId: user.id },
+      {
+        organizationId,
+        requestedByUserId: user.id,
+        page: query.page,
+        limit: query.limit,
+        search: query.search,
+      },
       { skipTenant: true },
     );
     return { message: 'Workspace members', data };
@@ -333,6 +343,8 @@ export class OrganizationsController {
         ssoIssuerUrl: dto.ssoIssuerUrl,
         ssoClientId: dto.ssoClientId,
         ssoClientSecret: dto.ssoClientSecret,
+        ssoIdpSsoUrl: dto.ssoIdpSsoUrl,
+        ssoIdpCertificate: dto.ssoIdpCertificate,
       },
       { skipTenant: true },
     );
@@ -347,6 +359,7 @@ export class OrganizationsController {
         ssoProvider: data.ssoProvider,
         configured: data.configured,
         secretRotated: Boolean(dto.ssoClientSecret?.trim()),
+        certificateRotated: Boolean(dto.ssoIdpCertificate?.trim()),
       },
     });
     return { message: 'SSO settings updated', data };

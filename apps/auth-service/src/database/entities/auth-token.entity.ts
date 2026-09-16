@@ -42,6 +42,14 @@ export class AuthToken {
   @Column({ type: 'varchar', length: 20, default: 'member' })
   inviteRole!: 'member' | 'guest';
 
+  /**
+   * When set, accepting this workspace invite also auto-joins this channel
+   * (Slack-style: invite outsider to a specific channel).
+   */
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  pendingChannelId!: string | null;
+
   @Column({ type: 'int', default: 1 })
   maxUses!: number;
 

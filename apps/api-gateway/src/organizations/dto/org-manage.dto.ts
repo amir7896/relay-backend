@@ -74,4 +74,18 @@ export class UpdateOrgSsoDto {
   @IsString()
   @MaxLength(500)
   ssoClientSecret?: string | null;
+
+  /** SAML IdP HTTP-Redirect SSO URL */
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null && value !== '')
+  @IsUrl({ require_tld: false })
+  @MaxLength(500)
+  ssoIdpSsoUrl?: string | null;
+
+  /** SAML IdP X.509 certificate (PEM). Write-only. */
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null && value !== '')
+  @IsString()
+  @MaxLength(16000)
+  ssoIdpCertificate?: string | null;
 }

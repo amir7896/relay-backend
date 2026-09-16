@@ -26,20 +26,27 @@ import {
   CHAT_SUCCESS_MESSAGES,
   CurrentUser,
   ForbiddenAppException,
+  MailService,
   NotFoundAppException,
   ParseUuidPipe,
   PresenceStatus,
+  Public,
+  channelAddedTemplate,
+  channelInviteTemplate,
   isUuidToken,
   parseMessageSearchQuery,
 } from '@app/common';
 import type { PaginatedResult } from '@app/common';
-import { CHAT_PATTERNS, USER_PATTERNS } from '@app/contracts';
+import { AUTH_PATTERNS, CHAT_PATTERNS, USER_PATTERNS } from '@app/contracts';
 import type {
   BlockView,
+  ChannelInvitePreviewView,
   ChannelInviteView,
   ConversationView,
   DeleteMessageResult,
   IncomingWebhookView,
+  OutgoingWebhookView,
+  InviteView,
   InvokeSlashCommandResult,
   MessageView,
   OrganizationView,
@@ -63,8 +70,10 @@ import {
   BlockUserDto,
   ChatPageQueryDto,
   CreateChannelInviteDto,
+  EmailChannelInviteDto,
   CreateGroupChatDto,
   CreateIncomingWebhookDto,
+  CreateOutgoingWebhookDto,
   CreatePollDto,
   CreatePrivateChatDto,
   CreateReminderDto,
@@ -77,6 +86,7 @@ import {
   InvokeSlashCommandDto,
   ListMediaQueryDto,
   MarkSeenDto,
+  MarkUnreadDto,
   MuteConversationDto,
   PinConversationDto,
   PinMessageDto,
@@ -93,6 +103,7 @@ import {
   UpdateUserGroupDto,
   UpsertDraftDto,
   UpdateNotificationPrefsDto,
+  UpdateChannelNotificationPrefsDto,
   VotePollDto,
 } from './dto/chat.dto';
 import { PresenceService } from './presence.service';
@@ -109,6 +120,7 @@ import {
   ListConversationsDocs,
   ListMessagesDocs,
   MarkSeenDocs,
+  MarkUnreadDocs,
   RemoveMemberDocs,
   SendMessageDocs,
   TypingDocs,
@@ -165,8 +177,7 @@ const FILE_EXT_MIME: Record<string, string> = {
   '.docx':
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.xls': 'application/vnd.ms-excel',
-  '.xlsx':
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   '.ppt': 'application/vnd.ms-powerpoint',
   '.pptx':
     'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -186,6 +197,11 @@ function normalizeUploadMime(
   originalName: string,
 ): string | null {
   if (mimeType === 'video/webm') {
+    // Voice notes often arrive as video/webm; keep those as audio.
+    // Explicit video clip uploads use a clip-video-* filename.
+    if (/^clip-video/i.test(originalName) || /\/clip-video/i.test(originalName)) {
+      return 'video/webm';
+    }
     return 'audio/webm';
   }
   if (ALLOWED_UPLOAD_MIMES.has(mimeType)) {
@@ -238,9 +254,12 @@ export class ChatController {
     private readonly push: PushService,
     private readonly notificationPrefs: NotificationPrefsService,
     private readonly calls: CallSessionService,
+    private readonly mail: MailService,
   ) {}
 
-  private assertFullMember(request: Request & { organization?: OrganizationView }) {
+  private assertFullMember(
+    request: Request & { organization?: OrganizationView },
+  ) {
     if (request.organization?.role === 'guest') {
       throw new ForbiddenAppException(
         'Guests can only access channels they are invited to',
@@ -272,18 +291,18 @@ export class ChatController {
         continue;
       }
       try {
-        const page = await this.proxy.sendUser<PaginatedResult<UserProfileView>>(
-          USER_PATTERNS.FIND_ALL,
-          {
-            page: 1,
-            limit: 40,
-            search: token,
-            sortBy: 'firstName',
-            order: 'ASC',
-          },
-        );
+        const page = await this.proxy.sendUser<
+          PaginatedResult<UserProfileView>
+        >(USER_PATTERNS.FIND_ALL, {
+          page: 1,
+          limit: 40,
+          search: token,
+          sortBy: 'firstName',
+          order: 'ASC',
+        });
         for (const profile of page.items) {
-          const hay = `${profile.firstName} ${profile.lastName} ${profile.email}`.toLowerCase();
+          const hay =
+            `${profile.firstName} ${profile.lastName} ${profile.email}`.toLowerCase();
           if (
             hay.includes(token) ||
             profile.email.toLowerCase().startsWith(token) ||
@@ -347,6 +366,7 @@ export class ChatController {
     const memberIds = data.members.map((member) => member.userId);
     await this.conversationCache.setMemberIds(data.id, memberIds);
     this.chatGateway.broadcastConversationUpdated(data, memberIds);
+    void this.evaluateChannelWorkflows(user.id, data.id, 'channel_created');
     return { message: CHAT_SUCCESS_MESSAGES.GROUP_CREATED, data };
   }
 
@@ -487,11 +507,14 @@ export class ChatController {
   @Get('channels/public')
   async listPublicChannels(
     @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ChatPageQueryDto,
     @Req() request: Request & { organization?: OrganizationView },
   ) {
     this.assertFullMember(request);
     const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_PUBLIC_CHANNELS, {
       actorId: user.id,
+      page: query.page,
+      limit: query.limit,
     });
     return { message: CHAT_SUCCESS_MESSAGES.CONVERSATIONS_FETCHED, data };
   }
@@ -515,6 +538,24 @@ export class ChatController {
     return { message: CHAT_SUCCESS_MESSAGES.MEMBERS_ADDED, data };
   }
 
+  @Get('conversations/:id/members')
+  async listConversationMembers(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Query() query: ChatPageQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.LIST_CONVERSATION_MEMBERS,
+      {
+        actorId: user.id,
+        conversationId: id,
+        page: query.page,
+        limit: query.limit,
+      },
+    );
+    return { message: 'Channel members retrieved successfully', data };
+  }
+
   @Post('conversations/:id/invites')
   @HttpCode(HttpStatus.CREATED)
   async createChannelInvite(
@@ -534,15 +575,165 @@ export class ChatController {
     return { message: 'Channel invite created successfully', data };
   }
 
+  @Post('conversations/:id/invites/email')
+  @HttpCode(HttpStatus.CREATED)
+  async emailChannelInvite(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: EmailChannelInviteDto,
+    @Req() request: Request & { organization?: OrganizationView },
+  ) {
+    const email = dto.email.toLowerCase().trim();
+    const conversation = await this.proxy.sendChat<ConversationView>(
+      CHAT_PATTERNS.GET_CONVERSATION,
+      { actorId: user.id, conversationId: id },
+    );
+    const channelName = conversation.name || 'channel';
+    const orgName = request.organization?.name || 'the workspace';
+
+    const directory = await this.proxy.sendUser<{
+      items: UserProfileView[];
+    }>(USER_PATTERNS.FIND_ALL, { search: email, page: 1, limit: 20 });
+    const existing = (directory.items ?? []).find(
+      (person) => person.email.toLowerCase() === email,
+    );
+
+    if (existing) {
+      const alreadyInChannel = conversation.members.some(
+        (member) => member.userId === existing.userId,
+      );
+      if (alreadyInChannel) {
+        throw new BadRequestAppException(
+          'That person is already a member of this channel',
+        );
+      }
+      const updated = await this.proxy.sendChat<ConversationView>(
+        CHAT_PATTERNS.ADD_MEMBERS,
+        {
+          actorId: user.id,
+          conversationId: id,
+          memberIds: [existing.userId],
+        },
+      );
+      await this.presence.attachToConversations([updated]);
+      const memberIds = updated.members.map((member) => member.userId);
+      await this.conversationCache.setMemberIds(updated.id, memberIds);
+      this.chatGateway.broadcastConversationUpdated(updated, memberIds);
+
+      const channelUrl = `${this.mail.publicAppUrl}/chat/${id}`;
+      const content = channelAddedTemplate({
+        appUrl: this.mail.publicAppUrl,
+        channelUrl,
+        channelName,
+        organizationName: orgName,
+      });
+      const mailResult = await this.mail.send({
+        to: email,
+        ...content,
+      });
+
+      return {
+        message: mailResult.delivered
+          ? 'Teammate added to the channel and notified by email'
+          : 'Teammate added to the channel (email not delivered — SMTP may be unset)',
+        data: {
+          mode: 'added' as const,
+          conversationId: id,
+          userId: existing.userId,
+          email,
+          emailSent: mailResult.delivered,
+        },
+      };
+    }
+
+    let workspaceInvite: InviteView | null = null;
+    try {
+      if (!request.organization?.id) {
+        throw new BadRequestAppException('Active workspace is required');
+      }
+      workspaceInvite = await this.proxy.sendAuth<InviteView>(
+        AUTH_PATTERNS.CREATE_INVITE,
+        {
+          createdByUserId: user.id,
+          organizationId: request.organization.id,
+          email,
+          expiresInDays: 7,
+          role: 'member',
+          skipEmail: true,
+          pendingChannelId: id,
+        },
+      );
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof error === 'object' &&
+              error &&
+              'message' in error &&
+              typeof (error as { message: unknown }).message === 'string'
+            ? (error as { message: string }).message
+            : String(error ?? '');
+      if (/already in this workspace/i.test(message)) {
+        throw new BadRequestAppException(
+          'That person is already in this workspace. Use Add people above to add them to this channel.',
+        );
+      }
+      workspaceInvite = null;
+    }
+
+    if (!workspaceInvite?.inviteUrl && !workspaceInvite?.token) {
+      throw new BadRequestAppException(
+        'Could not create a workspace invite for that email',
+      );
+    }
+
+    const inviteUrl =
+      workspaceInvite.inviteUrl ||
+      `${this.mail.publicAppUrl}/invite/${workspaceInvite.token}`;
+
+    const content = channelInviteTemplate({
+      appUrl: this.mail.publicAppUrl,
+      channelName,
+      organizationName: orgName,
+      channelUrl: `${this.mail.publicAppUrl}/chat/${id}`,
+      workspaceUrl: inviteUrl,
+      autoJoinChannel: true,
+    });
+    const mailResult = await this.mail.send({
+      to: email,
+      ...content,
+    });
+
+    return {
+      message: mailResult.delivered
+        ? 'Channel invite email sent'
+        : 'Invite created (email not delivered — copy the link below; configure SMTP to send mail)',
+      data: {
+        mode: 'invited' as const,
+        email,
+        emailSent: mailResult.delivered,
+        workspaceInviteUrl: inviteUrl,
+        inviteUrl,
+        pendingChannelId: id,
+        debugInviteUrl:
+          mailResult.previewUrl ??
+          (mailResult.delivered ? undefined : inviteUrl),
+      },
+    };
+  }
+
   @Get('conversations/:id/invites')
   async listChannelInvites(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUuidPipe) id: string,
+    @Query() query: ChatPageQueryDto,
   ) {
-    const data = await this.proxy.sendChat<ChannelInviteView[]>(
-      CHAT_PATTERNS.LIST_CHANNEL_INVITES,
-      { actorId: user.id, conversationId: id },
-    );
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_CHANNEL_INVITES, {
+      actorId: user.id,
+      conversationId: id,
+      page: query.page,
+      limit: query.limit,
+    });
     return { message: 'Channel invites retrieved successfully', data };
   }
 
@@ -564,6 +755,17 @@ export class ChatController {
     return { message: 'Channel invite revoked successfully', data };
   }
 
+  @Public()
+  @Get('channel-invites/:token')
+  async previewChannelInvite(@Param('token') token: string) {
+    const data = await this.proxy.sendChat<ChannelInvitePreviewView>(
+      CHAT_PATTERNS.PREVIEW_CHANNEL_INVITE,
+      { token },
+      { skipTenant: true },
+    );
+    return { message: 'Channel invite preview', data };
+  }
+
   @Post('channel-invites/:token/accept')
   @HttpCode(HttpStatus.OK)
   async acceptChannelInvite(
@@ -573,6 +775,7 @@ export class ChatController {
     const data = await this.proxy.sendChat<ConversationView>(
       CHAT_PATTERNS.ACCEPT_CHANNEL_INVITE,
       { actorId: user.id, token },
+      { skipTenant: true },
     );
     await this.presence.attachToConversations([data]);
     const memberIds = data.members.map((member) => member.userId);
@@ -605,10 +808,16 @@ export class ChatController {
   async listIncomingWebhooks(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUuidPipe) id: string,
+    @Query() query: ChatPageQueryDto,
   ) {
-    const data = await this.proxy.sendChat<IncomingWebhookView[]>(
+    const data = await this.proxy.sendChat(
       CHAT_PATTERNS.LIST_INCOMING_WEBHOOKS,
-      { actorId: user.id, conversationId: id },
+      {
+        actorId: user.id,
+        conversationId: id,
+        page: query.page,
+        limit: query.limit,
+      },
     );
     return { message: 'Incoming webhooks retrieved successfully', data };
   }
@@ -631,12 +840,72 @@ export class ChatController {
     return { message: 'Incoming webhook revoked successfully', data };
   }
 
-  @Get('slash-commands')
-  async listSlashCommands(@CurrentUser() user: AuthenticatedUser) {
-    const data = await this.proxy.sendChat<SlashCommandView[]>(
-      CHAT_PATTERNS.LIST_SLASH_COMMANDS,
-      { actorId: user.id },
+  @Post('conversations/:id/outgoing-webhooks')
+  @HttpCode(HttpStatus.CREATED)
+  async createOutgoingWebhook(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: CreateOutgoingWebhookDto,
+  ) {
+    const data = await this.proxy.sendChat<OutgoingWebhookView>(
+      CHAT_PATTERNS.CREATE_OUTGOING_WEBHOOK,
+      {
+        actorId: user.id,
+        conversationId: id,
+        name: dto.name,
+        targetUrl: dto.targetUrl,
+        excludeBots: dto.excludeBots,
+      },
     );
+    return { message: 'Outgoing webhook created successfully', data };
+  }
+
+  @Get('conversations/:id/outgoing-webhooks')
+  async listOutgoingWebhooks(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Query() query: ChatPageQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.LIST_OUTGOING_WEBHOOKS,
+      {
+        actorId: user.id,
+        conversationId: id,
+        page: query.page,
+        limit: query.limit,
+      },
+    );
+    return { message: 'Outgoing webhooks retrieved successfully', data };
+  }
+
+  @Delete('conversations/:id/outgoing-webhooks/:webhookId')
+  @HttpCode(HttpStatus.OK)
+  async revokeOutgoingWebhook(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('webhookId', ParseUuidPipe) webhookId: string,
+  ) {
+    const data = await this.proxy.sendChat<OutgoingWebhookView>(
+      CHAT_PATTERNS.REVOKE_OUTGOING_WEBHOOK,
+      {
+        actorId: user.id,
+        conversationId: id,
+        webhookId,
+      },
+    );
+    return { message: 'Outgoing webhook revoked successfully', data };
+  }
+
+  @Get('slash-commands')
+  async listSlashCommands(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ChatPageQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_SLASH_COMMANDS, {
+      actorId: user.id,
+      page: query.page,
+      limit: query.limit,
+    });
     return { message: 'Slash commands retrieved successfully', data };
   }
 
@@ -655,6 +924,8 @@ export class ChatController {
         name: dto.name,
         description: dto.description,
         responseTemplate: dto.responseTemplate,
+        responseMode: dto.responseMode,
+        requestUrl: dto.requestUrl ?? null,
       },
     );
     return { message: 'Slash command created successfully', data };
@@ -721,6 +992,7 @@ export class ChatController {
     }
     const { recipientIds, ...message } = messageResult;
     this.chatGateway.broadcastMessage(message, recipientIds);
+    this.dispatchOutgoingWebhooksForMessage(message);
     return {
       message: 'Slash command executed',
       data: { kind: 'message' as const, message },
@@ -728,11 +1000,15 @@ export class ChatController {
   }
 
   @Get('user-groups')
-  async listUserGroups(@CurrentUser() user: AuthenticatedUser) {
-    const data = await this.proxy.sendChat<UserGroupView[]>(
-      CHAT_PATTERNS.LIST_USER_GROUPS,
-      { actorId: user.id },
-    );
+  async listUserGroups(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ChatPageQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_USER_GROUPS, {
+      actorId: user.id,
+      page: query.page,
+      limit: query.limit,
+    });
     return { message: 'User groups retrieved successfully', data };
   }
 
@@ -830,10 +1106,10 @@ export class ChatController {
       throw new NotFoundAppException('Attachment not found');
     }
 
-    const filename = (
-      message.attachment.name ||
-      `relay-${messageId}`
-    ).replace(/[\\/:*?"<>|]+/g, '_');
+    const filename = (message.attachment.name || `relay-${messageId}`).replace(
+      /[\\/:*?"<>|]+/g,
+      '_',
+    );
     const inline = disposition === 'inline';
     const contentType = resolveAttachmentContentType(
       message.attachment.mime,
@@ -950,6 +1226,11 @@ export class ChatController {
       mentionUserIds: data.mentions ?? dto.mentionUserIds ?? [],
       mutedRecipientIds: mutedRecipientIds ?? [],
     });
+    this.dispatchOutgoingWebhooksForMessage(data);
+    if (channelBroadcast) {
+      this.dispatchOutgoingWebhooksForMessage(channelBroadcast);
+    }
+    void this.evaluateChannelWorkflows(user.id, id, 'message_contains', data);
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_SENT, data };
   }
 
@@ -957,7 +1238,10 @@ export class ChatController {
   getPushPublicKey() {
     return {
       message: 'Push public key',
-      data: { publicKey: this.push.getPublicKey(), enabled: this.push.isEnabled() },
+      data: {
+        publicKey: this.push.getPublicKey(),
+        enabled: this.push.isEnabled(),
+      },
     };
   }
 
@@ -974,6 +1258,43 @@ export class ChatController {
   ) {
     const data = await this.notificationPrefs.set(user.id, dto);
     return { message: 'Notification preferences updated', data };
+  }
+
+  @Get('conversations/:id/notification-prefs')
+  async getChannelNotificationPrefs(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    await this.proxy.sendChat(CHAT_PATTERNS.GET_CONVERSATION, {
+      actorId: user.id,
+      conversationId: id,
+    });
+    const mode = await this.notificationPrefs.getChannelMode(user.id, id);
+    return {
+      message: 'Channel notification preferences retrieved',
+      data: { conversationId: id, mode },
+    };
+  }
+
+  @Put('conversations/:id/notification-prefs')
+  async updateChannelNotificationPrefs(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: UpdateChannelNotificationPrefsDto,
+  ) {
+    await this.proxy.sendChat(CHAT_PATTERNS.GET_CONVERSATION, {
+      actorId: user.id,
+      conversationId: id,
+    });
+    const data = await this.notificationPrefs.setChannelMode(
+      user.id,
+      id,
+      dto.mode,
+    );
+    return {
+      message: 'Channel notification preferences updated',
+      data,
+    };
   }
 
   /** ICE servers for WebRTC voice calls (STUN always; TURN only if configured). */
@@ -999,7 +1320,11 @@ export class ChatController {
       conversationId: id,
     });
     const session = await this.calls.getByConversation(id);
-    if (!session || session.kind !== 'group' || session.joinedIds.length === 0) {
+    if (
+      !session ||
+      session.kind !== 'group' ||
+      session.joinedIds.length === 0
+    ) {
       return {
         message: 'No active call',
         data: null,
@@ -1407,9 +1732,14 @@ export class ChatController {
   }
 
   @Get('reminders')
-  async listReminders(@CurrentUser() user: AuthenticatedUser) {
+  async listReminders(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ChatPageQueryDto,
+  ) {
     const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_REMINDERS, {
       actorId: user.id,
+      page: query.page,
+      limit: query.limit,
     });
     return { message: 'Reminders retrieved', data };
   }
@@ -1444,10 +1774,7 @@ export class ChatController {
       },
     );
     const { recipientIds, ...data } = result;
-    await this.conversationCache.setMemberIds(
-      dto.conversationId,
-      recipientIds,
-    );
+    await this.conversationCache.setMemberIds(dto.conversationId, recipientIds);
     this.chatGateway.broadcastMessage(data, recipientIds);
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_FORWARDED, data };
   }
@@ -1670,6 +1997,27 @@ export class ChatController {
     return { message: CHAT_SUCCESS_MESSAGES.SEEN_UPDATED, data };
   }
 
+  @Post('conversations/:id/unread')
+  @MarkUnreadDocs()
+  async markUnread(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: MarkUnreadDto,
+  ) {
+    const result = await this.proxy.sendChat<SeenResultView>(
+      CHAT_PATTERNS.MARK_UNREAD,
+      {
+        actorId: user.id,
+        conversationId: id,
+        messageId: dto.messageId,
+      },
+    );
+    const { recipientIds, ...data } = result;
+    await this.conversationCache.setMemberIds(id, recipientIds);
+    this.chatGateway.broadcastUnseen(data, recipientIds);
+    return { message: CHAT_SUCCESS_MESSAGES.UNREAD_UPDATED, data };
+  }
+
   @Post('conversations/:id/members')
   @AddMembersDocs()
   async addMembers(
@@ -1854,9 +2202,12 @@ export class ChatController {
 
   @Get('sidebar/sections')
   async listSidebarSections(@CurrentUser() user: AuthenticatedUser) {
-    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_SIDEBAR_SECTIONS, {
-      actorId: user.id,
-    });
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.LIST_SIDEBAR_SECTIONS,
+      {
+        actorId: user.id,
+      },
+    );
     return { message: 'Sidebar sections loaded', data };
   }
 
@@ -1866,10 +2217,13 @@ export class ChatController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateSidebarSectionDto,
   ) {
-    const data = await this.proxy.sendChat(CHAT_PATTERNS.CREATE_SIDEBAR_SECTION, {
-      actorId: user.id,
-      name: dto.name,
-    });
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.CREATE_SIDEBAR_SECTION,
+      {
+        actorId: user.id,
+        name: dto.name,
+      },
+    );
     return { message: 'Sidebar section created', data };
   }
 
@@ -1879,11 +2233,14 @@ export class ChatController {
     @Param('sectionId', ParseUuidPipe) sectionId: string,
     @Body() dto: UpdateSidebarSectionDto,
   ) {
-    const data = await this.proxy.sendChat(CHAT_PATTERNS.UPDATE_SIDEBAR_SECTION, {
-      actorId: user.id,
-      sectionId,
-      ...dto,
-    });
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.UPDATE_SIDEBAR_SECTION,
+      {
+        actorId: user.id,
+        sectionId,
+        ...dto,
+      },
+    );
     return { message: 'Sidebar section updated', data };
   }
 
@@ -1892,10 +2249,13 @@ export class ChatController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('sectionId', ParseUuidPipe) sectionId: string,
   ) {
-    const data = await this.proxy.sendChat(CHAT_PATTERNS.DELETE_SIDEBAR_SECTION, {
-      actorId: user.id,
-      sectionId,
-    });
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.DELETE_SIDEBAR_SECTION,
+      {
+        actorId: user.id,
+        sectionId,
+      },
+    );
     return { message: 'Sidebar section deleted', data };
   }
 
@@ -1929,10 +2289,13 @@ export class ChatController {
       throw new BadRequestAppException('You cannot block yourself');
     }
     await this.assertUserExists(dto.userId);
-    const data = await this.proxy.sendChat<BlockView>(CHAT_PATTERNS.BLOCK_USER, {
-      actorId: user.id,
-      userId: dto.userId,
-    });
+    const data = await this.proxy.sendChat<BlockView>(
+      CHAT_PATTERNS.BLOCK_USER,
+      {
+        actorId: user.id,
+        userId: dto.userId,
+      },
+    );
     return { message: CHAT_SUCCESS_MESSAGES.USER_BLOCKED, data };
   }
 
@@ -1949,11 +2312,15 @@ export class ChatController {
   }
 
   @Get('blocks')
-  async listBlocks(@CurrentUser() user: AuthenticatedUser) {
-    const data = await this.proxy.sendChat<BlockView[]>(
-      CHAT_PATTERNS.LIST_BLOCKS,
-      { actorId: user.id },
-    );
+  async listBlocks(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ChatPageQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_BLOCKS, {
+      actorId: user.id,
+      page: query.page,
+      limit: query.limit,
+    });
     return { message: CHAT_SUCCESS_MESSAGES.BLOCKS_FETCHED, data };
   }
 
@@ -2021,6 +2388,61 @@ export class ChatController {
       }
     } catch {
       // Keep lastSeenAt if profile lookup fails
+    }
+  }
+
+  private dispatchOutgoingWebhooksForMessage(
+    message: MessageView,
+    options?: { skipTenant?: boolean },
+  ): void {
+    void this.proxy.sendChat(
+      CHAT_PATTERNS.DISPATCH_OUTGOING_WEBHOOKS,
+      {
+        conversationId: message.conversationId,
+        event: 'message.created' as const,
+        message: {
+          id: message.id,
+          body: message.body ?? null,
+          senderId: message.senderId,
+          type: message.type,
+          createdAt: message.createdAt,
+          botUsername: message.botUsername ?? null,
+        },
+      },
+      options,
+    );
+  }
+
+  private async evaluateChannelWorkflows(
+    actorId: string,
+    conversationId: string,
+    triggerType: 'message_contains' | 'channel_created',
+    message?: MessageView,
+  ): Promise<void> {
+    try {
+      const result = (await this.proxy.sendChat(CHAT_PATTERNS.EVALUATE_WORKFLOWS, {
+        actorId,
+        conversationId,
+        triggerType,
+        message: message
+          ? {
+              id: message.id,
+              body: message.body ?? '',
+              senderId: message.senderId,
+              botUsername: message.botUsername ?? null,
+              conversationId: message.conversationId,
+            }
+          : null,
+      })) as {
+        messages?: Array<MessageView & { recipientIds?: string[] }>;
+      };
+      for (const item of result.messages ?? []) {
+        const { recipientIds, ...view } = item;
+        this.chatGateway.broadcastMessage(view, recipientIds ?? []);
+        this.dispatchOutgoingWebhooksForMessage(view);
+      }
+    } catch {
+      // Workflow failures must not break chat delivery.
     }
   }
 

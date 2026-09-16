@@ -17,10 +17,13 @@ import { ThreadFollow } from '../database/entities/thread-follow.entity';
 import { MessageEdit } from '../database/entities/message-edit.entity';
 import { SidebarSection } from '../database/entities/sidebar-section.entity';
 import { IncomingWebhook } from '../database/entities/incoming-webhook.entity';
+import { OutgoingWebhook } from '../database/entities/outgoing-webhook.entity';
 import { SlashCommand } from '../database/entities/slash-command.entity';
 import { UserGroup } from '../database/entities/user-group.entity';
+import { SLACK_PRODUCT_ENTITIES } from '../database/entities/slack-product.entities';
 import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
+import { SlackProductsService } from './slack-products.service';
 
 @Module({
   imports: [
@@ -42,11 +45,13 @@ import { ChatService } from './chat.service';
       MessageEdit,
       SidebarSection,
       IncomingWebhook,
+      OutgoingWebhook,
       SlashCommand,
       UserGroup,
+      ...SLACK_PRODUCT_ENTITIES,
     ]),
   ],
   controllers: [ChatController],
-  providers: [ChatService],
+  providers: [ChatService, SlackProductsService],
 })
 export class ChatModule {}

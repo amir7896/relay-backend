@@ -7,6 +7,7 @@ import { RolesGuard } from './guards/roles.guard';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { TokenBlacklistService } from './token-blacklist.service';
 import { SsoOidcService } from './sso-oidc.service';
+import { SsoSamlService } from './sso-saml.service';
 
 @Module({
   imports: [PassportModule.register({ defaultStrategy: 'jwt' })],
@@ -18,6 +19,7 @@ import { SsoOidcService } from './sso-oidc.service';
     JwtAuthGuard,
     RolesGuard,
     SsoOidcService,
+    SsoSamlService,
   ],
   exports: [TokenBlacklistService, AuthSessionCache, JwtAuthGuard, RolesGuard],
 })

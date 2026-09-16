@@ -16,6 +16,7 @@ import {
   CreateGroupChatDto,
   CreatePrivateChatDto,
   MarkSeenDto,
+  MarkUnreadDto,
   SendMessageDto,
   TypingDto,
   UpdateGroupDto,
@@ -166,6 +167,20 @@ export const MarkSeenDocs = () =>
     ApiBody({ type: MarkSeenDto, required: false }),
     ApiWrappedResponse(SeenResultSchema, {
       description: 'Messages marked as seen',
+    }),
+  );
+
+export const MarkUnreadDocs = () =>
+  applyDecorators(
+    ApiOperation({
+      summary: 'Mark conversation unread from a message',
+      description:
+        'Rewinds your last-read cursor so the chosen message (and later messages) count as unread. Peers receive `chat:unseen` so read receipts (ticks) drop back to delivered for those messages.',
+    }),
+    ApiParam({ name: 'id', type: String, format: 'uuid' }),
+    ApiBody({ type: MarkUnreadDto }),
+    ApiWrappedResponse(SeenResultSchema, {
+      description: 'Conversation marked as unread',
     }),
   );
 

@@ -21,8 +21,10 @@ import { ThreadFollow } from './database/entities/thread-follow.entity';
 import { MessageEdit } from './database/entities/message-edit.entity';
 import { SidebarSection } from './database/entities/sidebar-section.entity';
 import { IncomingWebhook } from './database/entities/incoming-webhook.entity';
+import { OutgoingWebhook } from './database/entities/outgoing-webhook.entity';
 import { SlashCommand } from './database/entities/slash-command.entity';
 import { UserGroup } from './database/entities/user-group.entity';
+import { SLACK_PRODUCT_ENTITIES } from './database/entities/slack-product.entities';
 
 @Module({
   imports: [
@@ -58,8 +60,10 @@ import { UserGroup } from './database/entities/user-group.entity';
             MessageEdit,
             SidebarSection,
             IncomingWebhook,
+            OutgoingWebhook,
             SlashCommand,
             UserGroup,
+            ...SLACK_PRODUCT_ENTITIES,
           ],
           poolMax: config.get<number>('POSTGRES_POOL_MAX', 20),
           poolMin: config.get<number>('POSTGRES_POOL_MIN', 2),
