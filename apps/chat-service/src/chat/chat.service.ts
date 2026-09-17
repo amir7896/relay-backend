@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, createHmac, randomBytes, randomUUID } from 'crypto';
 import { In, IsNull, LessThanOrEqual, Repository } from 'typeorm';
+import { SlackProductsService } from './slack-products.service';
 import {
   ConversationMemberRole,
   ConversationType,
@@ -60,10 +61,12 @@ import type {
   ListMessageEditsPayload,
   ListMessagesPayload,
   ListMyThreadsPayload,
+  ListMyMentionsPayload,
   ListThreadRepliesPayload,
   FollowThreadPayload,
   UnfollowThreadPayload,
   MarkThreadReadPayload,
+  MentionActivityView,
   GetMessagePayload,
   LogAuditPayload,
   MarkSeenPayload,
@@ -95,8 +98,13 @@ import type {
   SlashCommandView,
   UpsertDraftPayload,
   DraftView,
+  ListMyDraftsPayload,
+  DraftInboxView,
   CreateReminderPayload,
   CancelReminderPayload,
+  CompleteReminderPayload,
+  ClearCompletedRemindersPayload,
+  ListRemindersPayload,
   CreateSidebarSectionPayload,
   DeleteSidebarSectionPayload,
   CreateUserGroupPayload,
@@ -170,6 +178,10 @@ const BUILTIN_SLASH_COMMANDS: Array<{
   { name: 'shrug', description: 'Append ¯\\_(ツ)_/¯ to your message' },
   { name: 'me', description: 'Post an action line (*does something*)' },
   { name: 'status', description: 'Set your custom status (ephemeral)' },
+  {
+    name: 'standup',
+    description: 'Reply to today’s standup, or /standup summary',
+  },
   { name: 'help', description: 'List available slash commands' },
 ];
 
@@ -227,6 +239,7 @@ export class ChatService {
     @InjectRepository(UserGroup)
     private readonly userGroups: Repository<UserGroup>,
     private readonly config: ConfigService,
+    private readonly slackProducts: SlackProductsService,
   ) {}
 
   async createPrivate(
@@ -504,6 +517,31 @@ export class ChatService {
   }
 
   async listMessages(payload: ListMessagesPayload) {
+    await this.requireMembership(payload.conversationId, payload.actorId);
+    const resolved = await this.slackProducts.resolveConnectConversation({
+      conversationId: payload.conversationId,
+    });
+    if (resolved.isPartnerStub) {
+      const result = await runWithOrganization(
+        resolved.effectiveOrganizationId,
+        () =>
+          this.listMessagesForConversation({
+            ...payload,
+            conversationId: resolved.effectiveConversationId,
+          }),
+      );
+      return {
+        ...result,
+        items: result.items.map((item: MessageView) => ({
+          ...item,
+          conversationId: payload.conversationId,
+        })),
+      };
+    }
+    return this.listMessagesForConversation(payload);
+  }
+
+  private async listMessagesForConversation(payload: ListMessagesPayload) {
     const conversation = await this.requireMembership(
       payload.conversationId,
       payload.actorId,
@@ -563,6 +601,33 @@ export class ChatService {
   }
 
   async listThreadReplies(payload: ListThreadRepliesPayload) {
+    await this.requireMembership(payload.conversationId, payload.actorId);
+    const resolved = await this.slackProducts.resolveConnectConversation({
+      conversationId: payload.conversationId,
+    });
+    if (resolved.isPartnerStub) {
+      const result = await runWithOrganization(
+        resolved.effectiveOrganizationId,
+        () =>
+          this.listThreadRepliesForConversation({
+            ...payload,
+            conversationId: resolved.effectiveConversationId,
+          }),
+      );
+      return {
+        ...result,
+        items: result.items.map((item: MessageView) => ({
+          ...item,
+          conversationId: payload.conversationId,
+        })),
+      };
+    }
+    return this.listThreadRepliesForConversation(payload);
+  }
+
+  private async listThreadRepliesForConversation(
+    payload: ListThreadRepliesPayload,
+  ) {
     const conversation = await this.requireMembership(
       payload.conversationId,
       payload.actorId,
@@ -770,6 +835,98 @@ export class ChatService {
     return buildPaginatedResult(items, total, payload.page, payload.limit);
   }
 
+  async listMyMentions(payload: ListMyMentionsPayload) {
+    const { skip, take } = getSkipTake(payload.page, payload.limit);
+    const organizationId = requireOrganizationId();
+    const mentionJson = JSON.stringify([payload.actorId]);
+
+    const base = this.messages
+      .createQueryBuilder('m')
+      .innerJoin(
+        ConversationMember,
+        'cm',
+        'cm.conversationId = m.conversationId AND cm.userId = :actorId AND cm.leftAt IS NULL',
+        { actorId: payload.actorId },
+      )
+      .innerJoin(
+        Conversation,
+        'c',
+        'c.id = m.conversationId AND c.organizationId = :organizationId AND c.deletedAt IS NULL',
+        { organizationId },
+      )
+      .where('m.organizationId = :organizationId', { organizationId })
+      .andWhere('m.senderId != :actorId', { actorId: payload.actorId })
+      .andWhere('m.deletedForEveryoneAt IS NULL')
+      .andWhere('(m.undelivered = false OR m.senderId = :actorId)', {
+        actorId: payload.actorId,
+      })
+      .andWhere('m.mentions @> CAST(:mentionJson AS jsonb)', { mentionJson })
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM message_hides mh
+          WHERE mh."messageId" = m.id AND mh."userId" = :actorId
+        )`,
+        { actorId: payload.actorId },
+      );
+
+    if (payload.unreadOnly) {
+      base.andWhere(
+        '(cm.lastReadAt IS NULL OR m.createdAt > cm.lastReadAt)',
+      );
+    }
+
+    const total = await base.clone().getCount();
+    if (total === 0) {
+      return buildPaginatedResult([], 0, payload.page, payload.limit);
+    }
+
+    const rows = await base
+      .clone()
+      .orderBy('m.createdAt', 'DESC')
+      .skip(skip)
+      .take(take)
+      .getMany();
+
+    const conversationIds = [...new Set(rows.map((row) => row.conversationId))];
+    const conversations = await this.conversations.find({
+      where: { id: In(conversationIds), organizationId },
+      relations: { members: true },
+    });
+    const conversationById = new Map(
+      conversations.map((item) => [item.id, item]),
+    );
+    const reactionMap = await this.loadReactionsByMessageIds(
+      rows.map((row) => row.id),
+    );
+
+    const items: MentionActivityView[] = [];
+    for (const message of rows) {
+      const conversation = conversationById.get(message.conversationId);
+      if (!conversation) continue;
+      const members = (conversation.members ?? []).filter((m) => !m.leftAt);
+      const membership = members.find((m) => m.userId === payload.actorId);
+      const unread =
+        !membership?.lastReadAt ||
+        message.createdAt > membership.lastReadAt;
+      items.push({
+        conversationId: conversation.id,
+        conversationName: conversation.name,
+        conversationType: conversation.type,
+        message: this.toMessageView(
+          message,
+          members,
+          null,
+          reactionMap.get(message.id) ?? [],
+          payload.actorId,
+          0,
+        ),
+        unread,
+      });
+    }
+
+    return buildPaginatedResult(items, total, payload.page, payload.limit);
+  }
+
   async followThread(payload: FollowThreadPayload): Promise<ThreadSummaryView> {
     const conversation = await this.requireMembership(
       payload.conversationId,
@@ -862,7 +1019,10 @@ export class ChatService {
       },
     });
     if (!follow) {
+      // Explicit id: migration created PK without DEFAULT; Postgres UUID
+      // strategy inserts DEFAULT, which fails without a column default.
       follow = this.threadFollows.create({
+        id: randomUUID(),
         organizationId: input.organizationId,
         conversationId: input.conversationId,
         threadRootId: input.threadRootId,
@@ -1198,6 +1358,31 @@ export class ChatService {
   }
 
   async sendMessage(payload: SendMessagePayload): Promise<SendMessageResult> {
+    await this.requireMembership(payload.conversationId, payload.actorId);
+    const resolved = await this.slackProducts.resolveConnectConversation({
+      conversationId: payload.conversationId,
+    });
+    if (resolved.isPartnerStub) {
+      const result = await runWithOrganization(
+        resolved.effectiveOrganizationId,
+        () =>
+          this.sendMessageCore({
+            ...payload,
+            conversationId: resolved.effectiveConversationId,
+          }),
+      );
+      return this.enrichWithConnectFanouts(
+        result,
+        resolved.effectiveConversationId,
+      );
+    }
+    const result = await this.sendMessageCore(payload);
+    return this.enrichWithConnectFanouts(result, payload.conversationId);
+  }
+
+  private async sendMessageCore(
+    payload: SendMessagePayload,
+  ): Promise<SendMessageResult> {
     const attachmentUrl = payload.attachmentUrl?.trim() || null;
     const rawBody = (payload.body ?? '').trim();
     if (!rawBody && !attachmentUrl) {
@@ -2478,6 +2663,54 @@ export class ChatService {
     return { cleared: true };
   }
 
+  async listMyDrafts(payload: ListMyDraftsPayload) {
+    const { skip, take } = getSkipTake(payload.page, payload.limit);
+    const organizationId = requireOrganizationId();
+
+    const [drafts, total] = await this.messageDrafts.findAndCount({
+      where: {
+        organizationId,
+        userId: payload.actorId,
+      },
+      order: { updatedAt: 'DESC' },
+      skip,
+      take,
+    });
+
+    if (drafts.length === 0) {
+      return buildPaginatedResult([], total, payload.page, payload.limit);
+    }
+
+    const conversationIds = drafts.map((draft) => draft.conversationId);
+    const conversations = await this.conversations.find({
+      where: { id: In(conversationIds), organizationId },
+      relations: { members: true },
+    });
+    const conversationById = new Map(
+      conversations.map((item) => [item.id, item]),
+    );
+
+    const items: DraftInboxView[] = [];
+    for (const draft of drafts) {
+      if (!draft.body.trim()) continue;
+      const conversation = conversationById.get(draft.conversationId);
+      if (!conversation) continue;
+      const isMember = (conversation.members ?? []).some(
+        (member) => member.userId === payload.actorId && !member.leftAt,
+      );
+      if (!isMember) continue;
+      items.push({
+        conversationId: conversation.id,
+        conversationName: conversation.name,
+        conversationType: conversation.type,
+        body: draft.body,
+        updatedAt: draft.updatedAt.toISOString(),
+      });
+    }
+
+    return buildPaginatedResult(items, total, payload.page, payload.limit);
+  }
+
   async createReminder(
     payload: CreateReminderPayload,
   ): Promise<MessageReminderView> {
@@ -2529,6 +2762,7 @@ export class ChatService {
     if (pending[0]) {
       pending[0].remindAt = remindAt;
       pending[0].notifiedAt = null;
+      pending[0].completedAt = null;
       pending[0].conversationId = payload.conversationId;
       const saved = await this.messageReminders.save(pending[0]);
       return this.toReminderView(saved, message.body);
@@ -2543,18 +2777,23 @@ export class ChatService {
         remindAt,
         status: 'pending',
         notifiedAt: null,
+        completedAt: null,
       }),
     );
 
     return this.toReminderView(saved, message.body);
   }
 
-  async listReminders(payload: {
-    actorId: string;
-    page?: number;
-    limit?: number;
-  }) {
+  async listReminders(payload: ListRemindersPayload) {
     const orgId = requireOrganizationId();
+    const scope = payload.scope === 'done' || payload.scope === 'all' ? payload.scope : 'open';
+    const statusFilter =
+      scope === 'open'
+        ? (['pending'] as const)
+        : scope === 'done'
+          ? (['completed', 'sent'] as const)
+          : (['pending', 'completed', 'sent'] as const);
+
     const duplicates = await this.messageReminders.find({
       where: {
         organizationId: orgId,
@@ -2580,9 +2819,9 @@ export class ChatService {
       where: {
         organizationId: orgId,
         userId: payload.actorId,
-        status: 'pending',
+        status: In([...statusFilter]),
       },
-      order: { remindAt: 'ASC' },
+      order: { remindAt: scope === 'done' ? 'DESC' : 'ASC' },
       skip,
       take,
     });
@@ -2648,6 +2887,42 @@ export class ChatService {
     item.status = 'cancelled';
     const saved = await this.messageReminders.save(item);
     return this.toReminderView(saved);
+  }
+
+  async completeReminder(
+    payload: CompleteReminderPayload,
+  ): Promise<MessageReminderView> {
+    const item = await this.messageReminders.findOne({
+      where: {
+        id: payload.reminderId,
+        organizationId: requireOrganizationId(),
+        userId: payload.actorId,
+      },
+    });
+    if (!item) {
+      return RpcErrors.notFound('Reminder');
+    }
+    if (item.status !== 'pending' && item.status !== 'sent') {
+      return RpcErrors.badRequest('Only open or notified reminders can be completed');
+    }
+    item.status = 'completed';
+    item.completedAt = new Date();
+    const saved = await this.messageReminders.save(item);
+    return this.toReminderView(saved);
+  }
+
+  async clearCompletedReminders(payload: ClearCompletedRemindersPayload) {
+    const result = await this.messageReminders
+      .createQueryBuilder()
+      .update(MessageReminder)
+      .set({ status: 'cancelled' })
+      .where('"organizationId" = :orgId', { orgId: requireOrganizationId() })
+      .andWhere('"userId" = :userId', { userId: payload.actorId })
+      .andWhere('status IN (:...statuses)', {
+        statuses: ['completed', 'sent'],
+      })
+      .execute();
+    return { cleared: Number(result.affected) || 0 };
   }
 
   async dispatchDueReminders(): Promise<ReminderDispatchResult[]> {
@@ -4451,6 +4726,10 @@ export class ChatService {
       };
     }
 
+    if (name === 'standup') {
+      return this.handleStandupSlash(payload, conversation, text);
+    }
+
     let body: string | null = null;
     let ephemeralResponse = false;
     if (name === 'shrug') {
@@ -4572,6 +4851,77 @@ export class ChatService {
         ),
         recipientIds: this.recipientIds(conversation),
       },
+    };
+  }
+
+  private async handleStandupSlash(
+    payload: InvokeSlashCommandPayload,
+    conversation: Conversation,
+    text: string,
+  ): Promise<InvokeSlashCommandResult> {
+    const lower = text.trim().toLowerCase();
+    if (!lower || lower === 'help') {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'Standup Bot commands:\n' +
+          '• `/standup your update` — submit today’s update\n' +
+          '• `/standup summary` — post a summary of replies\n' +
+          'Install/configure the bot from the channel Apps tab.',
+      };
+    }
+
+    if (lower === 'summary') {
+      try {
+        const result = await this.slackProducts.summarizeStandup({
+          actorId: payload.actorId,
+          conversationId: conversation.id,
+        });
+        if (result?.message) {
+          return {
+            kind: 'message',
+            message: result.message as any,
+          };
+        }
+        return {
+          kind: 'ephemeral',
+          ephemeral: 'Standup summary posted.',
+        };
+      } catch {
+        return {
+          kind: 'ephemeral',
+          ephemeral: 'No open standup in this channel to summarize.',
+        };
+      }
+    }
+
+    const runInfo = await this.slackProducts.getOpenStandupRun(conversation.id);
+    if (!runInfo?.promptMessageId) {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'No open standup in this channel. Install Standup Bot from Apps and click “Post now”, or wait for the daily prompt.',
+      };
+    }
+
+    await this.slackProducts.collectStandupReply({
+      conversationId: conversation.id,
+      threadRootId: runInfo.promptMessageId,
+      senderId: payload.actorId,
+      body: text,
+    });
+
+    const saved = await this.sendMessage({
+      actorId: payload.actorId,
+      conversationId: conversation.id,
+      body: text.slice(0, 4000),
+      type: MessageType.TEXT,
+      threadRootId: runInfo.promptMessageId,
+    });
+
+    return {
+      kind: 'message',
+      message: saved,
     };
   }
 
@@ -6190,6 +6540,28 @@ export class ChatService {
       .map((member) => member.userId);
   }
 
+  private async enrichWithConnectFanouts(
+    result: SendMessageResult,
+    hostConversationId: string,
+  ): Promise<SendMessageResult> {
+    const fanouts =
+      await this.slackProducts.listConnectFanouts(hostConversationId);
+    if (fanouts.length === 0) {
+      return result;
+    }
+    const partnerUserIds = new Set(
+      fanouts.flatMap((fanout) => fanout.recipientIds),
+    );
+    const hostRecipients = (result.recipientIds ?? []).filter(
+      (userId) => !partnerUserIds.has(userId),
+    );
+    return {
+      ...result,
+      recipientIds: hostRecipients.length > 0 ? hostRecipients : result.recipientIds,
+      connectFanouts: fanouts.filter((fanout) => fanout.recipientIds.length > 0),
+    };
+  }
+
   private mutedRecipientIds(conversation: Conversation): string[] {
     return (conversation.members ?? [])
       .filter((member) => !member.leftAt && member.mutedAt)
@@ -6545,6 +6917,7 @@ export class ChatService {
       remindAt: item.remindAt.toISOString(),
       status: item.status,
       notifiedAt: item.notifiedAt?.toISOString() ?? null,
+      completedAt: item.completedAt?.toISOString() ?? null,
       createdAt: item.createdAt.toISOString(),
       ...(bodySnippet !== undefined
         ? { bodySnippet: bodySnippet.slice(0, 120) }

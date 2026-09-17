@@ -3,12 +3,58 @@ import { randomBytes } from 'crypto';
 import { DataSource } from 'typeorm';
 import { RpcErrors } from '@app/common';
 import { requireOrganizationId } from '@app/database';
+import {
+  INTEGRATION_CATALOG_META,
+  IntegrationsService,
+} from './integrations.service';
+
+const DEFAULT_STANDUP_QUESTIONS = [
+  'What did you do yesterday?',
+  'What will you do today?',
+  'Any blockers?',
+];
+const DEFAULT_DSU_QUESTIONS = [
+  'Yesterday’s progress?',
+  'Today’s plan?',
+  'Blockers or risks?',
+];
+const DEFAULT_MEETING_QUESTIONS = [
+  'Ready for the meeting?',
+  'Anything to add to the agenda?',
+  'Any decisions needed today?',
+];
+
+const BOT_APP_KEYS = new Set(['standup', 'dsu', 'daily-meeting']);
 
 const APP_CATALOG = [
-  { key: 'google-drive', name: 'Google Drive', description: 'Share and discover Drive files.', icon: 'drive' },
-  { key: 'github', name: 'GitHub', description: 'Repository and pull request notifications.', icon: 'github' },
-  { key: 'jira', name: 'Jira', description: 'Create and track Jira issues.', icon: 'jira' },
-  { key: 'zoom', name: 'Zoom', description: 'Start Zoom meetings from channels.', icon: 'video' },
+  {
+    key: 'standup',
+    name: 'Standup Bot',
+    description: 'Posts a daily standup prompt and collects team updates in-thread.',
+    icon: 'standup',
+    category: 'bot' as const,
+    configurable: true,
+  },
+  {
+    key: 'dsu',
+    name: 'DSU Bot',
+    description: 'Daily Stand-Up bot with blockers-focused prompts for engineering teams.',
+    icon: 'dsu',
+    category: 'bot' as const,
+    configurable: true,
+  },
+  {
+    key: 'daily-meeting',
+    name: 'Daily Meeting Bot',
+    description: 'Morning check-in bot for daily meeting readiness and agenda items.',
+    icon: 'meeting',
+    category: 'bot' as const,
+    configurable: true,
+  },
+  { key: 'google-drive', name: 'Google Drive', description: 'Unfurl Drive files and docs in channels.', icon: 'drive', category: 'integration' as const },
+  { key: 'github', name: 'GitHub', description: 'Unfurl repos/PRs, create issues from messages, receive events.', icon: 'github', category: 'integration' as const },
+  { key: 'jira', name: 'Jira', description: 'Unfurl issues, create tasks from messages, receive project events.', icon: 'jira', category: 'integration' as const },
+  { key: 'zoom', name: 'Zoom', description: 'Start Zoom meetings from a channel.', icon: 'video', category: 'integration' as const },
 ] as const;
 const STATUSES = new Set(['todo', 'doing', 'done']);
 const TRIGGERS = new Set(['message_contains', 'channel_created', 'manual']);
@@ -16,7 +62,10 @@ const ACTIONS = new Set(['post_message', 'webhook', 'set_reminder']);
 
 @Injectable()
 export class SlackProductsService {
-  constructor(private readonly db: DataSource) {}
+  constructor(
+    private readonly db: DataSource,
+    private readonly integrations: IntegrationsService,
+  ) {}
 
   /**
    * TypeORM 1.x Postgres driver returns rows[] for SELECT/INSERT, but
@@ -718,52 +767,118 @@ export class SlackProductsService {
       email: String(row.email ?? ''),
       token: row.token ? String(row.token) : undefined,
       status: (row.status || 'pending') as 'pending' | 'accepted' | 'revoked',
+      inviteKind: (row.inviteKind === 'workspace_share'
+        ? 'workspace_share'
+        : 'guest_email') as 'guest_email' | 'workspace_share',
       createdBy: String(row.createdBy),
       createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
       acceptedAt: row.acceptedAt ? new Date(row.acceptedAt).toISOString() : null,
       inviteUrl: inviteUrl ?? null,
+      partnerOrganizationName: row.partnerOrganizationName
+        ? String(row.partnerOrganizationName)
+        : null,
+    };
+  }
+
+  private toSharedLinkView(row: any) {
+    return {
+      id: String(row.id),
+      hostOrganizationId: String(row.hostOrganizationId),
+      hostConversationId: String(row.hostConversationId),
+      partnerOrganizationId: String(row.partnerOrganizationId),
+      partnerConversationId: String(row.partnerConversationId),
+      partnerOrganizationName: row.partnerOrganizationName
+        ? String(row.partnerOrganizationName)
+        : null,
+      hostOrganizationName: row.hostOrganizationName
+        ? String(row.hostOrganizationName)
+        : null,
+      status: (row.status || 'active') as 'pending' | 'active' | 'disconnected',
+      createdBy: String(row.createdBy),
+      acceptedBy: row.acceptedBy ? String(row.acceptedBy) : null,
+      createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
+      disconnectedAt: row.disconnectedAt
+        ? new Date(row.disconnectedAt).toISOString()
+        : null,
     };
   }
 
   async createSharedInvite(p: any) {
     const conversation = await this.requireMembership(p.conversationId, p.actorId);
     if (conversation.type && conversation.type !== 'group') {
-      return RpcErrors.badRequest('Slack Connect is only available on channels') as never;
+      return RpcErrors.badRequest('Connect is only available on channels') as never;
     }
     const email = String(p.email ?? '').trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return RpcErrors.badRequest('A valid email is required');
     }
+    const mode =
+      p.mode === 'workspace' || p.inviteKind === 'workspace_share'
+        ? 'workspace_share'
+        : 'guest_email';
     const existing = await this.queryRows(
       `SELECT id FROM shared_channel_invites
-       WHERE "organizationId"=$1 AND "conversationId"=$2 AND lower(email)=lower($3) AND status='pending'
+       WHERE "organizationId"=$1 AND "conversationId"=$2 AND lower(email)=lower($3)
+         AND status='pending' AND COALESCE("inviteKind",'guest_email')=$4
        LIMIT 1`,
-      [requireOrganizationId(), p.conversationId, email],
+      [requireOrganizationId(), p.conversationId, email, mode],
     );
     if (existing[0]) {
       return RpcErrors.badRequest('A pending Connect invite already exists for that email') as never;
     }
     const token = randomBytes(32).toString('hex');
     const row = await this.queryOne(
-      `INSERT INTO shared_channel_invites ("organizationId","conversationId","email","token","createdBy")
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [requireOrganizationId(), p.conversationId, email, token, p.actorId],
+      `INSERT INTO shared_channel_invites (
+         "organizationId","conversationId",email,token,"createdBy","inviteKind"
+       ) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [requireOrganizationId(), p.conversationId, email, token, p.actorId, mode],
     );
-    return this.toSharedInviteView(row);
+    return this.toSharedInviteView(
+      row,
+      mode === 'workspace_share' ? `/connect-invite/${token}` : undefined,
+    );
   }
 
   async getSharedInfo(p: any) {
+    const orgId = requireOrganizationId();
     const conversation = await this.requireMembership(p.conversationId, p.actorId);
+
+    // Partner stub: show link from partner side
+    const asPartner = await this.queryOne(
+      `SELECT * FROM shared_channel_links
+       WHERE "partnerConversationId"=$1 AND "partnerOrganizationId"=$2 AND status='active'
+       LIMIT 1`,
+      [p.conversationId, orgId],
+    );
+    if (asPartner) {
+      return {
+        conversationId: p.conversationId,
+        isShared: true,
+        sharedExternalLabel:
+          asPartner.hostOrganizationName || conversation.sharedExternalLabel || null,
+        conversationName: conversation.name ?? null,
+        invites: [],
+        links: [this.toSharedLinkView(asPartner)],
+        connectRole: 'partner' as const,
+        hostConversationId: String(asPartner.hostConversationId),
+      };
+    }
+
     const invites = await this.queryRows(
-      `SELECT id,"organizationId","conversationId",email,token,status,"createdBy","createdAt","acceptedAt"
-       FROM shared_channel_invites
+      `SELECT * FROM shared_channel_invites
        WHERE "organizationId"=$1 AND "conversationId"=$2
        ORDER BY "createdAt" DESC`,
-      [requireOrganizationId(), p.conversationId],
+      [orgId, p.conversationId],
+    );
+    const links = await this.queryRows(
+      `SELECT * FROM shared_channel_links
+       WHERE "hostConversationId"=$1 AND "hostOrganizationId"=$2 AND status='active'
+       ORDER BY "createdAt" DESC`,
+      [p.conversationId, orgId],
     );
     return {
       conversationId: p.conversationId,
-      isShared: Boolean(conversation.isShared),
+      isShared: Boolean(conversation.isShared) || links.length > 0,
       sharedExternalLabel: conversation.sharedExternalLabel ?? null,
       conversationName: conversation.name ?? null,
       invites: invites.map((row: any) =>
@@ -774,6 +889,9 @@ export class SlackProductsService {
             : null,
         ),
       ),
+      links: links.map((row: any) => this.toSharedLinkView(row)),
+      connectRole: 'host' as const,
+      hostConversationId: p.conversationId,
     };
   }
 
@@ -832,6 +950,10 @@ export class SlackProductsService {
       organizationId: invite.organizationId,
       organizationName: null,
       status: invite.status,
+      inviteKind:
+        invite.inviteKind === 'workspace_share'
+          ? 'workspace_share'
+          : 'guest_email',
     };
   }
 
@@ -842,9 +964,12 @@ export class SlackProductsService {
       [token],
     );
     if (!invite) return RpcErrors.notFound('Shared channel invite') as never;
+    if (invite.inviteKind === 'workspace_share') {
+      return RpcErrors.badRequest(
+        'This is a workspace share invite — use workspace accept',
+      ) as never;
+    }
 
-    // Membership is granted by the companion workspace guest invite + pendingChannelId.
-    // This marks the Connect record and flags the channel as shared.
     const row = await this.queryOne(
       `UPDATE shared_channel_invites SET status='accepted',"acceptedAt"=now() WHERE id=$1 RETURNING *`,
       [invite.id],
@@ -855,6 +980,280 @@ export class SlackProductsService {
       [invite.email, invite.conversationId, invite.organizationId],
     );
     return this.toSharedInviteView(row);
+  }
+
+  async acceptWorkspaceShare(p: any) {
+    const token = String(p.token ?? '').trim();
+    const partnerOrganizationId = String(p.partnerOrganizationId ?? '').trim();
+    const partnerOrganizationName = String(p.partnerOrganizationName ?? '').trim() || null;
+    const hostOrganizationName = String(p.hostOrganizationName ?? '').trim() || null;
+    if (!partnerOrganizationId) {
+      return RpcErrors.badRequest('partnerOrganizationId is required') as never;
+    }
+
+    const invite = await this.queryOne(
+      `SELECT * FROM shared_channel_invites WHERE token=$1 AND status='pending' LIMIT 1`,
+      [token],
+    );
+    if (!invite) return RpcErrors.notFound('Connect invite') as never;
+    if (invite.inviteKind !== 'workspace_share') {
+      return RpcErrors.badRequest('Not a workspace share invite') as never;
+    }
+    if (String(invite.organizationId) === partnerOrganizationId) {
+      return RpcErrors.badRequest(
+        'Accept from your other workspace — not the host organization',
+      ) as never;
+    }
+
+    const hostConversation = await this.queryOne(
+      `SELECT * FROM conversations WHERE id=$1 AND "organizationId"=$2 AND "deletedAt" IS NULL LIMIT 1`,
+      [invite.conversationId, invite.organizationId],
+    );
+    if (!hostConversation || hostConversation.type !== 'group') {
+      return RpcErrors.notFound('Host channel') as never;
+    }
+
+    const existingLink = await this.queryOne(
+      `SELECT * FROM shared_channel_links
+       WHERE "hostConversationId"=$1 AND "partnerOrganizationId"=$2
+       LIMIT 1`,
+      [invite.conversationId, partnerOrganizationId],
+    );
+    if (existingLink && existingLink.status === 'active') {
+      return {
+        organizationId: partnerOrganizationId,
+        conversationId: String(existingLink.partnerConversationId),
+        hostConversationId: String(existingLink.hostConversationId),
+        link: this.toSharedLinkView(existingLink),
+        alreadyConnected: true,
+      };
+    }
+
+    // Partner stub channel in the partner org (local sidebar entry).
+    const stub = await this.queryOne(
+      `INSERT INTO conversations (
+         "organizationId", type, name, "createdBy", visibility, "announceOnly",
+         "isShared", "sharedExternalLabel"
+       ) VALUES ($1,'group',$2,$3,'private',false,true,$4)
+       RETURNING *`,
+      [
+        partnerOrganizationId,
+        hostConversation.name || 'Shared channel',
+        p.actorId,
+        hostOrganizationName || 'Connected workspace',
+      ],
+    );
+    if (!stub) return RpcErrors.internal('Could not create partner channel') as never;
+
+    await this.db.query(
+      `INSERT INTO conversation_members (
+         "conversationId","userId",role,"homeOrganizationId","membershipSource"
+       ) VALUES ($1,$2,'owner',$3,'native')`,
+      [stub.id, p.actorId, partnerOrganizationId],
+    );
+
+    // Add partner user onto the host conversation so messages are shared.
+    const hostMember = await this.queryOne(
+      `SELECT id, "leftAt" FROM conversation_members
+       WHERE "conversationId"=$1 AND "userId"=$2 LIMIT 1`,
+      [invite.conversationId, p.actorId],
+    );
+    if (hostMember?.leftAt) {
+      await this.db.query(
+        `UPDATE conversation_members
+         SET "leftAt"=NULL, "homeOrganizationId"=$1, "membershipSource"='connect_partner'
+         WHERE id=$2`,
+        [partnerOrganizationId, hostMember.id],
+      );
+    } else if (!hostMember) {
+      await this.db.query(
+        `INSERT INTO conversation_members (
+           "conversationId","userId",role,"homeOrganizationId","membershipSource"
+         ) VALUES ($1,$2,'member',$3,'connect_partner')`,
+        [invite.conversationId, p.actorId, partnerOrganizationId],
+      );
+    }
+
+    let link: any;
+    if (existingLink) {
+      link = await this.queryOne(
+        `UPDATE shared_channel_links SET
+           status='active',
+           "partnerConversationId"=$1,
+           "partnerOrganizationName"=$2,
+           "hostOrganizationName"=COALESCE($3,"hostOrganizationName"),
+           "acceptedBy"=$4,
+           "inviteId"=$5,
+           "disconnectedAt"=NULL
+         WHERE id=$6 RETURNING *`,
+        [
+          stub.id,
+          partnerOrganizationName,
+          hostOrganizationName,
+          p.actorId,
+          invite.id,
+          existingLink.id,
+        ],
+      );
+    } else {
+      link = await this.queryOne(
+        `INSERT INTO shared_channel_links (
+           "hostOrganizationId","hostConversationId","partnerOrganizationId","partnerConversationId",
+           "partnerOrganizationName","hostOrganizationName",status,"createdBy","acceptedBy","inviteId"
+         ) VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$8,$9) RETURNING *`,
+        [
+          invite.organizationId,
+          invite.conversationId,
+          partnerOrganizationId,
+          stub.id,
+          partnerOrganizationName,
+          hostOrganizationName,
+          invite.createdBy,
+          p.actorId,
+          invite.id,
+        ],
+      );
+    }
+
+    await this.db.query(
+      `UPDATE shared_channel_invites SET
+         status='accepted', "acceptedAt"=now(), "acceptedByUserId"=$1,
+         "partnerOrganizationId"=$2, "partnerConversationId"=$3,
+         "partnerOrganizationName"=$4
+       WHERE id=$5`,
+      [
+        p.actorId,
+        partnerOrganizationId,
+        stub.id,
+        partnerOrganizationName,
+        invite.id,
+      ],
+    );
+    await this.db.query(
+      `UPDATE conversations SET "isShared"=true,
+         "sharedExternalLabel"=COALESCE($1,"sharedExternalLabel")
+       WHERE id=$2 AND "organizationId"=$3`,
+      [
+        partnerOrganizationName || invite.email,
+        invite.conversationId,
+        invite.organizationId,
+      ],
+    );
+
+    return {
+      organizationId: partnerOrganizationId,
+      conversationId: String(stub.id),
+      hostConversationId: String(invite.conversationId),
+      link: this.toSharedLinkView(link),
+      alreadyConnected: false,
+    };
+  }
+
+  async disconnectSharedChannel(p: any) {
+    const orgId = requireOrganizationId();
+    await this.requireMembership(p.conversationId, p.actorId);
+    const link = await this.queryOne(
+      `SELECT * FROM shared_channel_links WHERE id=$1 LIMIT 1`,
+      [p.linkId],
+    );
+    if (!link || link.status !== 'active') {
+      return RpcErrors.notFound('Shared channel link') as never;
+    }
+    const isHost =
+      String(link.hostOrganizationId) === orgId &&
+      String(link.hostConversationId) === String(p.conversationId);
+    const isPartner =
+      String(link.partnerOrganizationId) === orgId &&
+      String(link.partnerConversationId) === String(p.conversationId);
+    if (!isHost && !isPartner) {
+      return RpcErrors.forbidden('Not allowed to disconnect this link') as never;
+    }
+
+    await this.db.query(
+      `UPDATE shared_channel_links SET status='disconnected', "disconnectedAt"=now() WHERE id=$1`,
+      [link.id],
+    );
+    // Soft-leave partner members from host channel that were connect_partner.
+    await this.db.query(
+      `UPDATE conversation_members SET "leftAt"=now()
+       WHERE "conversationId"=$1 AND "membershipSource"='connect_partner'
+         AND "homeOrganizationId"=$2 AND "leftAt" IS NULL`,
+      [link.hostConversationId, link.partnerOrganizationId],
+    );
+    await this.db.query(
+      `UPDATE conversations SET "deletedAt"=now()
+       WHERE id=$1 AND "organizationId"=$2 AND "deletedAt" IS NULL`,
+      [link.partnerConversationId, link.partnerOrganizationId],
+    );
+
+    const remaining = await this.queryOne(
+      `SELECT id FROM shared_channel_links
+       WHERE "hostConversationId"=$1 AND status='active' LIMIT 1`,
+      [link.hostConversationId],
+    );
+    const guestLeft = await this.queryOne(
+      `SELECT id FROM shared_channel_invites
+       WHERE "conversationId"=$1 AND status='accepted' LIMIT 1`,
+      [link.hostConversationId],
+    );
+    if (!remaining && !guestLeft) {
+      await this.db.query(
+        `UPDATE conversations SET "isShared"=false WHERE id=$1`,
+        [link.hostConversationId],
+      );
+    }
+
+    return { disconnected: true, linkId: String(link.id) };
+  }
+
+  async resolveConnectConversation(p: any) {
+    const orgId = requireOrganizationId();
+    const conversationId = String(p.conversationId ?? '');
+    const asPartner = await this.queryOne(
+      `SELECT * FROM shared_channel_links
+       WHERE "partnerConversationId"=$1 AND "partnerOrganizationId"=$2 AND status='active'
+       LIMIT 1`,
+      [conversationId, orgId],
+    );
+    if (asPartner) {
+      return {
+        displayConversationId: conversationId,
+        effectiveConversationId: String(asPartner.hostConversationId),
+        effectiveOrganizationId: String(asPartner.hostOrganizationId),
+        isPartnerStub: true,
+        linkId: String(asPartner.id),
+      };
+    }
+    return {
+      displayConversationId: conversationId,
+      effectiveConversationId: conversationId,
+      effectiveOrganizationId: orgId,
+      isPartnerStub: false,
+      linkId: null,
+    };
+  }
+
+  /** Partner-stub rooms that should receive a remapped copy of host-channel events. */
+  async listConnectFanouts(hostConversationId: string) {
+    const links = await this.queryRows(
+      `SELECT id, "partnerConversationId", "partnerOrganizationId"
+       FROM shared_channel_links
+       WHERE "hostConversationId"=$1 AND status='active'`,
+      [hostConversationId],
+    );
+    const fanouts: Array<{ conversationId: string; recipientIds: string[] }> = [];
+    for (const link of links) {
+      const members = await this.queryRows(
+        `SELECT "userId" FROM conversation_members
+         WHERE "conversationId"=$1 AND "leftAt" IS NULL`,
+        [link.partnerConversationId],
+      );
+      fanouts.push({
+        conversationId: String(link.partnerConversationId),
+        recipientIds: members.map((row: any) => String(row.userId)),
+      });
+    }
+    return fanouts;
   }
 
   async revokeSharedInvite(p: any) {
@@ -903,27 +1302,563 @@ export class SlackProductsService {
   }
 
   async listInstalledApps() {
-    return this.queryRows(
+    const rows = await this.queryRows(
       `SELECT * FROM installed_apps WHERE "organizationId"=$1 ORDER BY "createdAt" DESC`,
       [requireOrganizationId()],
     );
+    const connections = await this.integrations.connectionMap();
+    return rows.map((row: any) => this.toInstalledAppView(row, connections.get(String(row.appKey))));
   }
   async listAppCatalog() {
     const installed = await this.listInstalledApps();
-    const keys = new Set(installed.map((app: any) => app.appKey));
-    return APP_CATALOG.map((app) => ({ ...app, installed: keys.has(app.key) }));
+    const keys = new Set(installed.map((app: any) => app.appKey || app.key));
+    const connections = await this.integrations.connectionMap();
+    return APP_CATALOG.map((app) => {
+      const meta = INTEGRATION_CATALOG_META[app.key];
+      const connection = connections.get(app.key);
+      return {
+        key: app.key,
+        name: app.name,
+        description: app.description,
+        icon: app.icon,
+        category: app.category,
+        configurable: Boolean((app as { configurable?: boolean }).configurable) || Boolean(meta),
+        installed: keys.has(app.key),
+        oauthRequired: Boolean(meta?.oauthRequired),
+        capabilities: meta?.capabilities ?? [],
+        connected: connection?.status === 'connected',
+        connectionStatus: connection?.status ?? null,
+        providerAccountName: connection?.providerAccountName ?? null,
+      };
+    });
   }
   async installApp(p: any) {
-    if (!APP_CATALOG.some((app) => app.key === p.appKey)) return RpcErrors.notFound('App');
+    const catalog = APP_CATALOG.find((app) => app.key === p.appKey);
+    if (!catalog) return RpcErrors.notFound('App');
+    const config = this.normalizeAppConfig(String(p.appKey), p.config ?? {});
     const row = await this.queryOne(
       `INSERT INTO installed_apps ("organizationId","appKey","config","installedBy") VALUES ($1,$2,$3::jsonb,$4)
        ON CONFLICT ("organizationId","appKey") DO UPDATE SET config=EXCLUDED.config RETURNING *`,
-      [requireOrganizationId(), p.appKey, JSON.stringify(p.config ?? {}), p.actorId],
+      [requireOrganizationId(), p.appKey, JSON.stringify(config), p.actorId],
     );
-    return row;
+    const connection = (await this.integrations.connectionMap()).get(String(p.appKey));
+    return this.toInstalledAppView(row, connection);
   }
   async uninstallApp(p: any) {
     await this.db.query(`DELETE FROM installed_apps WHERE "organizationId"=$1 AND "appKey"=$2`, [requireOrganizationId(), p.appKey]);
+    if (INTEGRATION_CATALOG_META[String(p.appKey)]) {
+      await this.integrations.disconnectOauth({ appKey: p.appKey }).catch(() => undefined);
+    }
     return { deleted: true };
+  }
+
+  private toInstalledAppView(row: any, connection?: any) {
+    const catalog = APP_CATALOG.find((app) => app.key === row.appKey);
+    const meta = INTEGRATION_CATALOG_META[String(row.appKey)];
+    return {
+      id: String(row.id),
+      organizationId: String(row.organizationId),
+      appKey: String(row.appKey),
+      key: String(row.appKey),
+      name: catalog?.name,
+      description: catalog?.description,
+      config: row.config && typeof row.config === 'object' ? row.config : {},
+      installedBy: String(row.installedBy),
+      createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
+      configurable: Boolean(catalog && (catalog as { configurable?: boolean }).configurable) || Boolean(meta),
+      category: catalog?.category ?? 'integration',
+      oauthRequired: Boolean(meta?.oauthRequired),
+      capabilities: meta?.capabilities ?? [],
+      connected: connection?.status === 'connected',
+      connectionStatus: connection?.status ?? null,
+      providerAccountName: connection?.providerAccountName ?? null,
+    };
+  }
+
+  private defaultQuestions(appKey: string) {
+    if (appKey === 'dsu') return [...DEFAULT_DSU_QUESTIONS];
+    if (appKey === 'daily-meeting') return [...DEFAULT_MEETING_QUESTIONS];
+    return [...DEFAULT_STANDUP_QUESTIONS];
+  }
+
+  private botDisplayName(appKey: string) {
+    if (appKey === 'dsu') return 'DSU Bot';
+    if (appKey === 'daily-meeting') return 'Daily Meeting Bot';
+    return 'Standup Bot';
+  }
+
+  private normalizeAppConfig(appKey: string, raw: Record<string, unknown>) {
+    if (INTEGRATION_CATALOG_META[appKey]) {
+      const config: Record<string, unknown> = {};
+      if (raw.defaultRepo) config.defaultRepo = String(raw.defaultRepo).trim();
+      if (raw.defaultProjectKey) {
+        config.defaultProjectKey = String(raw.defaultProjectKey).trim().toUpperCase();
+      }
+      if (raw.eventsConversationId) {
+        config.eventsConversationId = String(raw.eventsConversationId).trim();
+      }
+      if (raw.webhookSecret) config.webhookSecret = String(raw.webhookSecret).trim();
+      return config;
+    }
+    if (!BOT_APP_KEYS.has(appKey)) {
+      return raw && typeof raw === 'object' ? raw : {};
+    }
+    const conversationId = String(raw.conversationId ?? '').trim();
+    if (!/^[0-9a-f-]{36}$/i.test(conversationId)) {
+      return RpcErrors.badRequest('Select a channel for the bot to post in') as never;
+    }
+    const time = this.normalizeClockTime(String(raw.time ?? '09:30').trim());
+    if (!/^\d{2}:\d{2}$/.test(time)) {
+      return RpcErrors.badRequest('time must be HH:mm') as never;
+    }
+    const timezone = String(raw.timezone ?? 'UTC').trim() || 'UTC';
+    const weekdays = Array.isArray(raw.weekdays)
+      ? raw.weekdays.map((d) => Number(d)).filter((d) => d >= 0 && d <= 6)
+      : [1, 2, 3, 4, 5];
+    const questions = Array.isArray(raw.questions)
+      ? raw.questions.map((q) => String(q).trim()).filter(Boolean).slice(0, 8)
+      : this.defaultQuestions(appKey);
+    if (!questions.length) {
+      return RpcErrors.badRequest('Add at least one standup question') as never;
+    }
+    const summaryOffsetMinutes = Math.min(
+      24 * 60,
+      Math.max(30, Number(raw.summaryOffsetMinutes ?? 480) || 480),
+    );
+    return {
+      conversationId,
+      time,
+      timezone,
+      weekdays: weekdays.length ? weekdays : [1, 2, 3, 4, 5],
+      questions,
+      summaryOffsetMinutes,
+      mode: appKey === 'dsu' ? 'dsu' : appKey === 'daily-meeting' ? 'daily-meeting' : 'standup',
+    };
+  }
+
+  private zonedClock(timeZone: string, at = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      weekday: 'short',
+      hourCycle: 'h23',
+    }).formatToParts(at);
+    const get = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+    const weekdayMap: Record<string, number> = {
+      Sun: 0,
+      Mon: 1,
+      Tue: 2,
+      Wed: 3,
+      Thu: 4,
+      Fri: 5,
+      Sat: 6,
+    };
+    const hour = get('hour').padStart(2, '0');
+    const minute = get('minute').padStart(2, '0');
+    return {
+      runDate: `${get('year')}-${get('month')}-${get('day')}`,
+      time: `${hour}:${minute}`,
+      minutesOfDay: Number(hour) * 60 + Number(minute),
+      weekday: weekdayMap[get('weekday')] ?? at.getUTCDay(),
+    };
+  }
+
+  /** Normalize "9:5" / "21:50" / "21:50:00" / "10:36 PM" → "21:50" */
+  private normalizeClockTime(raw: unknown): string {
+    const text = String(raw ?? '').trim();
+    const ampm = text.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)$/i);
+    if (ampm) {
+      let hour = Number(ampm[1]) % 12;
+      if (/pm/i.test(ampm[3])) hour += 12;
+      return `${String(hour).padStart(2, '0')}:${ampm[2]}`;
+    }
+    const match = text.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+    if (!match) return text;
+    const hour = Number(match[1]);
+    if (hour > 23) return text;
+    return `${String(hour).padStart(2, '0')}:${match[2]}`;
+  }
+
+  private timeToMinutes(raw: unknown): number | null {
+    const normalized = this.normalizeClockTime(raw);
+    const match = normalized.match(/^(\d{2}):(\d{2})$/);
+    if (!match) return null;
+    return Number(match[1]) * 60 + Number(match[2]);
+  }
+
+  private buildPromptBody(appKey: string, questions: string[]) {
+    const title =
+      appKey === 'dsu'
+        ? 'Daily Stand-Up'
+        : appKey === 'daily-meeting'
+          ? 'Daily Meeting Check-in'
+          : 'Daily Standup';
+    const lines = [
+      `*${title}* — please reply in this thread (or use \`/standup your update\`).`,
+      '',
+      ...questions.map((question, index) => `${index + 1}. ${question}`),
+      '',
+      '_Tip: `/standup summary` posts today’s collected updates._',
+    ];
+    return lines.join('\n');
+  }
+
+  private async postBotMessage(opts: {
+    organizationId: string;
+    conversationId: string;
+    senderId: string;
+    body: string;
+    botUsername: string;
+    threadRootId?: string | null;
+  }) {
+    const saved = await this.queryOne(
+      `INSERT INTO messages (
+         "organizationId","conversationId","senderId",body,type,
+         "replyToMessageId","threadRootId","attachmentUrl","attachmentMime","attachmentName","attachmentSize",
+         mentions,"linkPreview",poll,"botUsername","botIconUrl"
+       ) VALUES (
+         $1,$2,$3,$4,'text',
+         NULL,$5,NULL,NULL,NULL,NULL,
+         '[]'::jsonb,NULL,NULL,$6,NULL
+       ) RETURNING *`,
+      [
+        opts.organizationId,
+        opts.conversationId,
+        opts.senderId,
+        opts.body.slice(0, 4000),
+        opts.threadRootId ?? null,
+        opts.botUsername.slice(0, 80),
+      ],
+    );
+    if (!saved) return null;
+    await this.db.query(
+      `UPDATE conversations SET "lastMessageAt"=$1, "updatedAt"=now() WHERE id=$2`,
+      [saved.createdAt, opts.conversationId],
+    );
+    const members = await this.queryRows(
+      `SELECT "userId" FROM conversation_members
+       WHERE "conversationId"=$1 AND "leftAt" IS NULL`,
+      [opts.conversationId],
+    );
+    const recipientIds = members.map((member: { userId: string }) => String(member.userId));
+    const createdAt = new Date(saved.createdAt).toISOString();
+    return {
+      id: String(saved.id),
+      conversationId: opts.conversationId,
+      senderId: String(saved.senderId),
+      body: String(saved.body),
+      type: 'text',
+      replyToMessageId: null,
+      threadRootId: opts.threadRootId ? String(opts.threadRootId) : null,
+      attachmentUrl: null,
+      attachmentMime: null,
+      attachmentName: null,
+      attachmentSize: null,
+      mentions: [],
+      reactions: [],
+      linkPreview: null,
+      poll: null,
+      pinned: false,
+      editedAt: null,
+      deletedForEveryone: false,
+      botUsername: opts.botUsername,
+      botIconUrl: null,
+      seenBy: [] as string[],
+      createdAt,
+      updatedAt: createdAt,
+      recipientIds,
+    };
+  }
+
+  private formatSummary(responses: Record<string, any>, questions: string[]) {
+    const entries = Object.entries(responses || {});
+    if (!entries.length) {
+      return '_No standup responses yet._';
+    }
+    return entries
+      .map(([userId, value]) => {
+        const body = typeof value === 'string' ? value : String(value?.body ?? '');
+        return `• <@${userId}>\n${body || '_empty_'}`;
+      })
+      .join('\n\n');
+  }
+
+  async runStandupNow(p: any) {
+    const appKey = String(p.appKey || 'standup');
+    if (!BOT_APP_KEYS.has(appKey)) return RpcErrors.badRequest('Unknown bot app');
+    const installed = await this.queryOne(
+      `SELECT * FROM installed_apps WHERE "organizationId"=$1 AND "appKey"=$2`,
+      [requireOrganizationId(), appKey],
+    );
+    if (!installed) return RpcErrors.notFound('Install this bot from Apps first');
+    const config = this.normalizeAppConfig(appKey, {
+      ...(installed.config || {}),
+      ...(p.conversationId ? { conversationId: p.conversationId } : {}),
+    });
+    const created = await this.createStandupRun({
+      organizationId: requireOrganizationId(),
+      appKey,
+      installedBy: installed.installedBy || p.actorId,
+      config,
+      force: true,
+    });
+    if (!created?.message) {
+      return RpcErrors.badRequest(
+        'Could not post the standup prompt. Check the bot channel and try again.',
+      );
+    }
+    return created;
+  }
+
+  private async createStandupRun(opts: {
+    organizationId: string;
+    appKey: string;
+    installedBy: string;
+    config: any;
+    force?: boolean;
+  }) {
+    const clock = this.zonedClock(String(opts.config.timezone || 'UTC'));
+    const scheduledTime = this.normalizeClockTime(opts.config.time);
+    // One auto-run per org/app/channel/day/time-slot (not once per calendar day forever).
+    // Fits varchar(16): "YYYY-MM-DD@HH:mm"
+    const scheduledSlotKey = `${clock.runDate}@${scheduledTime}`;
+
+    if (!opts.force) {
+      const weekdays = Array.isArray(opts.config.weekdays)
+        ? opts.config.weekdays.map((d: unknown) => Number(d))
+        : [1, 2, 3, 4, 5];
+      if (!weekdays.includes(clock.weekday)) return null;
+
+      const scheduledMinutes = this.timeToMinutes(scheduledTime);
+      if (scheduledMinutes == null) return null;
+      // Grace window: fire during the scheduled minute and up to 15 minutes after
+      // so a 30s dispatcher tick (and slow saves) cannot miss the slot forever.
+      const delta = clock.minutesOfDay - scheduledMinutes;
+      if (delta < 0 || delta > 15) return null;
+
+      // Block only this exact time-slot (YYYY-MM-DD@HH:mm). Changing the schedule
+      // time the same day can fire again; the same slot cannot.
+      const existing = await this.queryOne(
+        `SELECT id FROM standup_runs
+         WHERE "organizationId"=$1 AND "appKey"=$2 AND "conversationId"=$3 AND "runDate"=$4`,
+        [
+          opts.organizationId,
+          opts.appKey,
+          opts.config.conversationId,
+          scheduledSlotKey,
+        ],
+      );
+      if (existing) return null;
+    }
+
+    // Scheduled runs use YYYY-MM-DD@HH:mm (16). Manual runs must stay ≤16 (column width).
+    const runDate = opts.force
+      ? `${clock.runDate}${Date.now().toString(36).slice(-6)}`
+      : scheduledSlotKey;
+
+    const prompt = await this.postBotMessage({
+      organizationId: opts.organizationId,
+      conversationId: opts.config.conversationId,
+      senderId: opts.installedBy,
+      body: this.buildPromptBody(
+        opts.appKey,
+        Array.isArray(opts.config.questions)
+          ? opts.config.questions
+          : this.defaultQuestions(opts.appKey),
+      ),
+      botUsername: this.botDisplayName(opts.appKey),
+    });
+    if (!prompt) return null;
+
+    const run = await this.queryOne(
+      `INSERT INTO standup_runs (
+         "organizationId","appKey","conversationId","promptMessageId","runDate","status","responses"
+       ) VALUES ($1,$2,$3,$4,$5,'open','{}'::jsonb) RETURNING *`,
+      [
+        opts.organizationId,
+        opts.appKey,
+        opts.config.conversationId,
+        prompt.id,
+        runDate,
+      ],
+    );
+
+    return { message: prompt, run };
+  }
+
+  async dispatchDueStandups() {
+    const apps = await this.queryRows(
+      `SELECT * FROM installed_apps WHERE "appKey" = ANY($1::text[])`,
+      [['standup', 'dsu', 'daily-meeting']],
+    );
+    const messages: any[] = [];
+    for (const app of apps) {
+      try {
+        const rawConfig =
+          typeof app.config === 'string'
+            ? JSON.parse(app.config || '{}')
+            : app.config || {};
+        const config = this.normalizeAppConfig(String(app.appKey), rawConfig);
+        const created = await this.createStandupRun({
+          organizationId: String(app.organizationId),
+          appKey: String(app.appKey),
+          installedBy: String(app.installedBy),
+          config,
+          force: false,
+        });
+        if (created?.message) {
+          // eslint-disable-next-line no-console
+          console.info(
+            `[standup] auto-posted ${app.appKey} → ${config.conversationId} at ${config.time} ${config.timezone}`,
+          );
+          messages.push(created.message);
+        }
+
+        const openRuns = await this.queryRows(
+          `SELECT * FROM standup_runs
+           WHERE "organizationId"=$1 AND "appKey"=$2 AND "conversationId"=$3 AND status='open'`,
+          [app.organizationId, app.appKey, config.conversationId],
+        );
+        for (const run of openRuns) {
+          const promptedAt = new Date(run.promptedAt || run.createdAt).getTime();
+          const offsetMs = Math.max(30, Number(config.summaryOffsetMinutes || 480)) * 60_000;
+          if (Date.now() - promptedAt < offsetMs) continue;
+          const summary = await this.postStandupSummary({
+            organizationId: String(app.organizationId),
+            appKey: String(app.appKey),
+            conversationId: String(config.conversationId),
+            installedBy: String(app.installedBy),
+            run,
+            questions: Array.isArray(config.questions)
+              ? config.questions
+              : this.defaultQuestions(String(app.appKey)),
+          });
+          if (summary) messages.push(summary);
+        }
+      } catch (error) {
+        // Keep dispatching other apps; log so silent config errors are visible.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[standup] dispatch skipped for ${app.appKey}/${app.organizationId}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+    return messages;
+  }
+
+  private async postStandupSummary(opts: {
+    organizationId: string;
+    appKey: string;
+    conversationId: string;
+    installedBy: string;
+    run: any;
+    questions: string[];
+  }) {
+    const responses =
+      typeof opts.run.responses === 'string'
+        ? JSON.parse(opts.run.responses)
+        : opts.run.responses || {};
+    const body = [
+      `*${this.botDisplayName(opts.appKey)} summary* for ${opts.run.runDate}`,
+      '',
+      this.formatSummary(responses, opts.questions),
+    ].join('\n');
+    const message = await this.postBotMessage({
+      organizationId: opts.organizationId,
+      conversationId: opts.conversationId,
+      senderId: opts.installedBy,
+      body,
+      botUsername: this.botDisplayName(opts.appKey),
+      threadRootId: opts.run.promptMessageId || null,
+    });
+    await this.db.query(
+      `UPDATE standup_runs SET status='closed', "summarizedAt"=now() WHERE id=$1`,
+      [opts.run.id],
+    );
+    return message;
+  }
+
+  async collectStandupReply(p: any) {
+    if (p.botUsername) return { collected: false };
+    const body = String(p.body ?? '').trim();
+    if (!body || !p.threadRootId || !p.senderId) return { collected: false };
+    const run = await this.queryOne(
+      `SELECT * FROM standup_runs
+       WHERE "conversationId"=$1 AND "promptMessageId"=$2 AND status='open'
+       LIMIT 1`,
+      [p.conversationId, p.threadRootId],
+    );
+    if (!run) return { collected: false };
+    const responses =
+      typeof run.responses === 'string' ? JSON.parse(run.responses) : { ...(run.responses || {}) };
+    responses[String(p.senderId)] = {
+      body: body.slice(0, 4000),
+      messageId: p.messageId ?? null,
+      at: new Date().toISOString(),
+    };
+    await this.db.query(`UPDATE standup_runs SET responses=$1::jsonb WHERE id=$2`, [
+      JSON.stringify(responses),
+      run.id,
+    ]);
+    return { collected: true, runId: run.id };
+  }
+
+  async getOpenStandupRun(conversationId: string) {
+    const run = await this.queryOne(
+      `SELECT id, "appKey", "promptMessageId", "runDate", responses
+       FROM standup_runs
+       WHERE "conversationId"=$1 AND status='open'
+       ORDER BY "promptedAt" DESC LIMIT 1`,
+      [conversationId],
+    );
+    if (!run) return null;
+    return {
+      id: String(run.id),
+      appKey: String(run.appKey),
+      promptMessageId: run.promptMessageId ? String(run.promptMessageId) : null,
+      runDate: String(run.runDate),
+      responses: run.responses || {},
+    };
+  }
+
+  async summarizeStandup(p: any) {
+    const requestedKey =
+      p.appKey != null && String(p.appKey).trim()
+        ? String(p.appKey).trim()
+        : null;
+    const appKeyFilter =
+      requestedKey && BOT_APP_KEYS.has(requestedKey) ? requestedKey : null;
+    const run = await this.queryOne(
+      `SELECT * FROM standup_runs
+       WHERE "organizationId"=$1 AND "conversationId"=$2 AND status='open'
+         AND ($3::text IS NULL OR "appKey"=$3)
+       ORDER BY "promptedAt" DESC LIMIT 1`,
+      [requireOrganizationId(), p.conversationId, appKeyFilter],
+    );
+    if (!run) return RpcErrors.notFound('No open standup in this channel');
+    const installed = await this.queryOne(
+      `SELECT * FROM installed_apps WHERE "organizationId"=$1 AND "appKey"=$2`,
+      [requireOrganizationId(), run.appKey],
+    );
+    const config = installed
+      ? this.normalizeAppConfig(String(run.appKey), installed.config || {})
+      : { questions: this.defaultQuestions(String(run.appKey)) };
+    const questions = Array.isArray((config as any).questions)
+      ? (config as any).questions
+      : this.defaultQuestions(String(run.appKey));
+    const message = await this.postStandupSummary({
+      organizationId: requireOrganizationId(),
+      appKey: String(run.appKey),
+      conversationId: String(p.conversationId),
+      installedBy: installed?.installedBy || p.actorId,
+      run,
+      questions,
+    });
+    return { message };
   }
 }

@@ -6,7 +6,11 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
-export type MessageReminderStatus = 'pending' | 'sent' | 'cancelled';
+export type MessageReminderStatus =
+  | 'pending'
+  | 'sent'
+  | 'cancelled'
+  | 'completed';
 
 @Entity({ name: 'message_reminders' })
 @Index('IDX_message_reminders_due', ['status', 'remindAt'])
@@ -38,6 +42,9 @@ export class MessageReminder {
 
   @Column({ type: 'timestamptz', nullable: true })
   notifiedAt!: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  completedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

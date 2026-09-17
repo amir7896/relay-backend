@@ -90,9 +90,39 @@ export class SharedChannelInvite {
   @Index({ unique: true })
   @Column({ type: 'varchar', length: 128 }) token!: string;
   @Column({ type: 'varchar', length: 16, default: 'pending' }) status!: 'pending' | 'accepted' | 'revoked';
+  @Column({ type: 'varchar', length: 24, default: 'guest_email' })
+  inviteKind!: 'guest_email' | 'workspace_share';
+  @Column({ type: 'uuid', nullable: true }) targetOrganizationId!: string | null;
+  @Column({ type: 'uuid', nullable: true }) acceptedByUserId!: string | null;
+  @Column({ type: 'uuid', nullable: true }) partnerConversationId!: string | null;
+  @Column({ type: 'uuid', nullable: true }) partnerOrganizationId!: string | null;
+  @Column({ type: 'varchar', length: 160, nullable: true })
+  partnerOrganizationName!: string | null;
   @Column('uuid') createdBy!: string;
   @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
   @Column({ type: 'timestamptz', nullable: true }) acceptedAt!: Date | null;
+}
+
+@Entity({ name: 'shared_channel_links' })
+@Index(['partnerConversationId', 'status'])
+@Index(['hostConversationId', 'status'])
+export class SharedChannelLink {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column('uuid') hostOrganizationId!: string;
+  @Column('uuid') hostConversationId!: string;
+  @Column('uuid') partnerOrganizationId!: string;
+  @Column('uuid') partnerConversationId!: string;
+  @Column({ type: 'varchar', length: 160, nullable: true })
+  partnerOrganizationName!: string | null;
+  @Column({ type: 'varchar', length: 160, nullable: true })
+  hostOrganizationName!: string | null;
+  @Column({ type: 'varchar', length: 16, default: 'active' })
+  status!: 'pending' | 'active' | 'disconnected';
+  @Column('uuid') createdBy!: string;
+  @Column({ type: 'uuid', nullable: true }) acceptedBy!: string | null;
+  @Column({ type: 'uuid', nullable: true }) inviteId!: string | null;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
+  @Column({ type: 'timestamptz', nullable: true }) disconnectedAt!: Date | null;
 }
 
 @Entity({ name: 'installed_apps' })
@@ -106,6 +136,44 @@ export class InstalledApp {
   @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
 }
 
+@Entity({ name: 'app_oauth_connections' })
+@Index(['organizationId', 'appKey'], { unique: true })
+export class AppOauthConnection {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column('uuid') organizationId!: string;
+  @Column({ type: 'varchar', length: 80 }) appKey!: string;
+  @Column({ type: 'varchar', length: 160, nullable: true })
+  providerAccountId!: string | null;
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  providerAccountName!: string | null;
+  @Column({ type: 'text' }) accessTokenEnc!: string;
+  @Column({ type: 'text', nullable: true }) refreshTokenEnc!: string | null;
+  @Column({ type: 'varchar', length: 40, default: 'bearer' }) tokenType!: string;
+  @Column({ type: 'text', nullable: true }) scopes!: string | null;
+  @Column({ type: 'timestamptz', nullable: true }) expiresAt!: Date | null;
+  @Column({ type: 'jsonb', default: {} }) meta!: Record<string, unknown>;
+  @Column({ type: 'varchar', length: 24, default: 'connected' })
+  status!: 'connected' | 'needs_reauth' | 'error' | 'disconnected';
+  @Column('uuid') installedBy!: string;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
+  @UpdateDateColumn({ type: 'timestamptz' }) updatedAt!: Date;
+}
+
+@Entity({ name: 'app_external_refs' })
+export class AppExternalRef {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column('uuid') organizationId!: string;
+  @Column({ type: 'varchar', length: 80 }) appKey!: string;
+  @Column({ type: 'uuid', nullable: true }) conversationId!: string | null;
+  @Column({ type: 'uuid', nullable: true }) messageId!: string | null;
+  @Column({ type: 'varchar', length: 200 }) externalId!: string;
+  @Column({ type: 'varchar', length: 1000, nullable: true })
+  externalUrl!: string | null;
+  @Column({ type: 'varchar', length: 400, nullable: true }) title!: string | null;
+  @Column('uuid') createdBy!: string;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
+}
+
 export const SLACK_PRODUCT_ENTITIES = [
   ChannelCanvas,
   ChannelList,
@@ -114,5 +182,8 @@ export const SLACK_PRODUCT_ENTITIES = [
   ChannelHuddle,
   ChannelWorkflow,
   SharedChannelInvite,
+  SharedChannelLink,
   InstalledApp,
+  AppOauthConnection,
+  AppExternalRef,
 ];

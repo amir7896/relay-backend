@@ -54,4 +54,10 @@ export class ConversationMember {
 
   @Column({ type: 'timestamptz', nullable: true })
   leftAt!: Date | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  homeOrganizationId!: string | null;
+
+  @Column({ type: 'varchar', length: 24, default: 'native' })
+  membershipSource!: 'native' | 'connect_guest' | 'connect_partner';
 }

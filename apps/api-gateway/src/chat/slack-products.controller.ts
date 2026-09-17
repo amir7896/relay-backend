@@ -106,10 +106,32 @@ export class SlackProductsController {
   ) {
     const email = String(b.email ?? '').trim().toLowerCase();
     if (!email) throw new BadRequestAppException('A valid email is required');
+    const mode = b.mode === 'workspace' ? 'workspace' : 'guest';
+
+    if (mode === 'workspace') {
+      const shared = (await this.proxy.sendChat(
+        CHAT_PATTERNS.CREATE_SHARED_INVITE,
+        this.payload(u, id, { email, mode: 'workspace' }),
+      )) as SharedChannelInviteView;
+      const rawToken = shared.token;
+      if (!rawToken) {
+        throw new BadRequestAppException('Could not create Connect invite token');
+      }
+      const inviteUrl = `${this.mail.publicAppUrl}/connect-invite/${rawToken}`;
+      return {
+        message: 'Workspace Connect invite created',
+        data: {
+          ...shared,
+          token: rawToken,
+          inviteUrl,
+          inviteKind: 'workspace_share' as const,
+        },
+      };
+    }
 
     const shared = (await this.proxy.sendChat(
       CHAT_PATTERNS.CREATE_SHARED_INVITE,
-      this.payload(u, id, { email }),
+      this.payload(u, id, { email, mode: 'guest' }),
     )) as SharedChannelInviteView;
 
     let workspaceInvite: InviteView | null = null;
@@ -151,6 +173,7 @@ export class SlackProductsController {
       token: rawToken,
       inviteUrl,
       workspaceInviteId: workspaceInvite.id,
+      inviteKind: 'guest_email' as const,
     };
 
     return { message: 'Connect invite created', data };
@@ -171,6 +194,19 @@ export class SlackProductsController {
       'Connect invite revoked',
       CHAT_PATTERNS.REVOKE_SHARED_INVITE,
       this.payload(u, id, { inviteId }),
+    );
+  }
+
+  @Delete('conversations/:id/connect/links/:linkId')
+  disconnectLink(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('linkId', ParseUuidPipe) linkId: string,
+  ) {
+    return this.wrap(
+      'Shared channel disconnected',
+      CHAT_PATTERNS.DISCONNECT_SHARED_CHANNEL,
+      this.payload(u, id, { linkId }),
     );
   }
 
@@ -198,7 +234,7 @@ export class SlackProductsController {
         };
       }
     } catch {
-      // Auth preview optional when token is Connect-only.
+      // Auth preview optional when token is Connect-only (workspace share).
     }
 
     return {
@@ -212,8 +248,70 @@ export class SlackProductsController {
   async acceptConnectInvite(
     @CurrentUser() u: AuthenticatedUser,
     @Param('token') token: string,
+    @Body() b: Record<string, unknown> = {},
   ) {
-    // Accept as workspace guest invite (token is bound to auth invite).
+    const preview = (await this.proxy.sendChat(
+      CHAT_PATTERNS.PREVIEW_SHARED_INVITE,
+      { token },
+      { skipTenant: true },
+    )) as SharedChannelInvitePreviewView;
+
+    if (preview.inviteKind === 'workspace_share') {
+      const partnerOrganizationId = String(
+        b.partnerOrganizationId ?? '',
+      ).trim();
+      if (!partnerOrganizationId) {
+        throw new BadRequestAppException(
+          'partnerOrganizationId is required — accept from your workspace',
+        );
+      }
+      if (
+        preview.organizationId &&
+        partnerOrganizationId === String(preview.organizationId)
+      ) {
+        throw new BadRequestAppException(
+          'Accept from your other workspace — not the host organization',
+        );
+      }
+
+      const result = (await this.proxy.sendChat(
+        CHAT_PATTERNS.ACCEPT_WORKSPACE_SHARE,
+        {
+          actorId: u.id,
+          token,
+          partnerOrganizationId,
+          partnerOrganizationName: b.partnerOrganizationName
+            ? String(b.partnerOrganizationName)
+            : null,
+          hostOrganizationName:
+            preview.organizationName ??
+            (b.hostOrganizationName ? String(b.hostOrganizationName) : null),
+        },
+        { skipTenant: true },
+      )) as {
+        organizationId: string;
+        conversationId: string;
+        hostConversationId: string;
+        alreadyConnected?: boolean;
+      };
+
+      return {
+        message: result.alreadyConnected
+          ? 'Already connected to shared channel'
+          : 'Workspace connected to shared channel',
+        data: {
+          organizationId: result.organizationId,
+          conversationId: result.conversationId,
+          hostConversationId: result.hostConversationId,
+          role: 'member',
+          inviteKind: 'workspace_share' as const,
+          organizations: [],
+          activeOrganizationId: result.organizationId,
+        },
+      };
+    }
+
+    // Guest-into-host path (legacy Connect).
     const joined = await this.proxy.sendAuth<{
       organizationId: string;
       pendingChannelId?: string | null;
@@ -268,6 +366,7 @@ export class SlackProductsController {
         organizationId: joined.organizationId,
         conversationId: joined.pendingChannelId ?? null,
         role: joined.role ?? 'guest',
+        inviteKind: 'guest_email' as const,
         organizations: joined.organizations ?? [],
         activeOrganizationId:
           joined.activeOrganizationId ?? joined.organizationId,
@@ -279,6 +378,38 @@ export class SlackProductsController {
   @Get('apps') apps(@CurrentUser() u: AuthenticatedUser) { return this.wrap('App catalog retrieved', CHAT_PATTERNS.LIST_APP_CATALOG, this.payload(u)); }
   @Post('apps/:appId/install') install(@CurrentUser() u: AuthenticatedUser, @Param('appId') appKey: string, @Body() b: Record<string, unknown>) { return this.wrap('App installed', CHAT_PATTERNS.INSTALL_APP, this.payload(u, undefined, { appKey, config: b.config ?? b })); }
   @Delete('apps/:appId/install') uninstall(@CurrentUser() u: AuthenticatedUser, @Param('appId') appKey: string) { return this.wrap('App uninstalled', CHAT_PATTERNS.UNINSTALL_APP, this.payload(u, undefined, { appKey })); }
+  @Post('apps/:appId/run')
+  async runBot(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('appId') appKey: string,
+    @Body() b: Record<string, unknown>,
+  ) {
+    const result = (await this.proxy.sendChat(
+      CHAT_PATTERNS.RUN_STANDUP_NOW,
+      this.payload(u, undefined, { appKey, conversationId: b.conversationId }),
+    )) as { message?: Record<string, unknown> & { conversationId: string; recipientIds?: string[] } };
+    if (result?.message) {
+      const { recipientIds, ...view } = result.message;
+      this.chatGateway.broadcastMessage(view as any, recipientIds ?? []);
+    }
+    return { message: 'Standup posted', data: result };
+  }
+  @Post('conversations/:id/standup/summary')
+  async standupSummary(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() b: Record<string, unknown>,
+  ) {
+    const result = (await this.proxy.sendChat(
+      CHAT_PATTERNS.SUMMARIZE_STANDUP,
+      this.payload(u, id, { appKey: b.appKey }),
+    )) as { message?: Record<string, unknown> & { conversationId: string; recipientIds?: string[] } };
+    if (result?.message) {
+      const { recipientIds, ...view } = result.message;
+      this.chatGateway.broadcastMessage(view as any, recipientIds ?? []);
+    }
+    return { message: 'Standup summary posted', data: result };
+  }
 
   private async wrap(message: string, pattern: string, payload: Record<string, unknown>) {
     return { message, data: await this.proxy.sendChat(pattern, payload) };

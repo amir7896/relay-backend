@@ -1,16 +1,52 @@
 import { Injectable } from '@nestjs/common';
+import { CHAT_PATTERNS } from '@app/contracts';
+import type { UnfurlAppLinkResult } from '@app/contracts';
+import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
+import { getGatewayTenant } from '../organizations/tenant-context';
 
 export type LinkPreviewResult = {
   url: string;
   title: string;
   description: string;
   image: string | null;
+  provider?: string | null;
 };
 
 @Injectable()
 export class LinkPreviewService {
-  async fetch(url: string): Promise<LinkPreviewResult> {
+  constructor(private readonly proxy: MicroserviceProxy) {}
+
+  async fetch(url: string, actorId?: string): Promise<LinkPreviewResult> {
     const normalized = url.trim();
+    const tenant = getGatewayTenant();
+    if (
+      actorId &&
+      tenant?.id &&
+      this.isProviderUrl(normalized)
+    ) {
+      try {
+        const unfurled = await this.proxy.sendChat<UnfurlAppLinkResult>(
+          CHAT_PATTERNS.UNFURL_APP_LINK,
+          {
+            actorId,
+            organizationId: tenant.id,
+            url: normalized,
+          },
+        );
+        if (unfurled?.title) {
+          return {
+            url: unfurled.url || normalized,
+            title: unfurled.title.slice(0, 200),
+            description: (unfurled.description || '').slice(0, 400),
+            image: unfurled.image ?? null,
+            provider: unfurled.provider ?? null,
+          };
+        }
+      } catch {
+        // Fall through to OG scrape.
+      }
+    }
+
     const response = await fetch(normalized, {
       headers: { 'User-Agent': 'RelayBot/1.0' },
       redirect: 'follow',
@@ -28,6 +64,14 @@ export class LinkPreviewService {
       description: description.slice(0, 400),
       image: image ? this.resolveUrl(normalized, image) : null,
     };
+  }
+
+  private isProviderUrl(url: string): boolean {
+    return (
+      /github\.com\//i.test(url) ||
+      /atlassian\.net\/browse\//i.test(url) ||
+      /(?:drive|docs)\.google\.com\//i.test(url)
+    );
   }
 
   private readMeta(html: string, key: string): string | null {

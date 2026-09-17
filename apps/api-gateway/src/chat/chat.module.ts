@@ -17,8 +17,11 @@ import { LinkPreviewService } from './link-preview.service';
 import { PushService } from './push.service';
 import { NotificationPrefsService } from './notification-prefs.service';
 import { ScheduledMessageDispatcher } from './scheduled-message.dispatcher';
+import { StandupDispatcher } from './standup.dispatcher';
 import { ReminderDispatcher } from './reminder.dispatcher';
 import { DisappearingMessageDispatcher } from './disappearing-message.dispatcher';
+import { IntegrationsController } from './integrations.controller';
+import { AppOauthService } from './app-oauth.service';
 
 @Module({
   imports: [
@@ -32,7 +35,12 @@ import { DisappearingMessageDispatcher } from './disappearing-message.dispatcher
       }),
     }),
   ],
-  controllers: [ChatController, SlackProductsController, IncomingWebhooksController],
+  controllers: [
+    ChatController,
+    SlackProductsController,
+    IncomingWebhooksController,
+    IntegrationsController,
+  ],
   providers: [
     ChatGateway,
     WsAuthService,
@@ -44,8 +52,10 @@ import { DisappearingMessageDispatcher } from './disappearing-message.dispatcher
     NotificationPrefsService,
     PushService,
     ScheduledMessageDispatcher,
+    StandupDispatcher,
     ReminderDispatcher,
     DisappearingMessageDispatcher,
+    AppOauthService,
   ],
   exports: [PresenceService, AiService, LinkPreviewService, PushService],
 })

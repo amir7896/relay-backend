@@ -24,6 +24,7 @@ import { SLACK_PRODUCT_ENTITIES } from '../database/entities/slack-product.entit
 import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
 import { SlackProductsService } from './slack-products.service';
+import { IntegrationsService } from './integrations.service';
 
 @Module({
   imports: [
@@ -52,6 +53,6 @@ import { SlackProductsService } from './slack-products.service';
     ]),
   ],
   controllers: [ChatController],
-  providers: [ChatService, SlackProductsService],
+  providers: [ChatService, SlackProductsService, IntegrationsService],
 })
 export class ChatModule {}

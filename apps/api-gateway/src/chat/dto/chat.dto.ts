@@ -527,6 +527,27 @@ export class ChatPageQueryDto {
   limit = 20;
 }
 
+export class ListBookmarksQueryDto extends ChatPageQueryDto {
+  @ApiPropertyOptional({
+    description: 'Limit bookmarks to a single conversation',
+    format: 'uuid',
+  })
+  @IsOptional()
+  @IsUUID('4')
+  conversationId?: string;
+}
+
+export class ListRemindersQueryDto extends ChatPageQueryDto {
+  @ApiPropertyOptional({
+    enum: ['open', 'done', 'all'],
+    default: 'open',
+    description: 'open=pending, done=completed+sent, all=both',
+  })
+  @IsOptional()
+  @IsIn(['open', 'done', 'all'])
+  scope: 'open' | 'done' | 'all' = 'open';
+}
+
 export class SearchMessagesQueryDto extends ChatPageQueryDto {
   @ApiProperty({ example: 'hello', description: 'Search text' })
   @IsString()

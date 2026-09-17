@@ -77,6 +77,8 @@ import {
   CreatePollDto,
   CreatePrivateChatDto,
   CreateReminderDto,
+  ListBookmarksQueryDto,
+  ListRemindersQueryDto,
   CreateSidebarSectionDto,
   CreateSlashCommandDto,
   CreateUserGroupDto,
@@ -1210,12 +1212,25 @@ export class ChatController {
       mutedRecipientIds,
       pushRecipientIds,
       channelBroadcast,
+      connectFanouts,
       ...data
     } = result;
     await this.conversationCache.setMemberIds(id, recipientIds);
     this.chatGateway.broadcastMessage(data, recipientIds);
+    for (const fanout of connectFanouts ?? []) {
+      this.chatGateway.broadcastMessage(
+        { ...data, conversationId: fanout.conversationId },
+        fanout.recipientIds,
+      );
+    }
     if (channelBroadcast) {
       this.chatGateway.broadcastMessage(channelBroadcast, recipientIds);
+      for (const fanout of connectFanouts ?? []) {
+        this.chatGateway.broadcastMessage(
+          { ...channelBroadcast, conversationId: fanout.conversationId },
+          fanout.recipientIds,
+        );
+      }
     }
     void this.push.notifyOfflineRecipients({
       recipientIds: pushRecipientIds ?? recipientIds,
@@ -1231,7 +1246,26 @@ export class ChatController {
       this.dispatchOutgoingWebhooksForMessage(channelBroadcast);
     }
     void this.evaluateChannelWorkflows(user.id, id, 'message_contains', data);
-    return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_SENT, data };
+    if (data.threadRootId && !data.botUsername) {
+      void this.proxy
+        .sendChat(
+          CHAT_PATTERNS.COLLECT_STANDUP_REPLY,
+          {
+            conversationId: id,
+            threadRootId: data.threadRootId,
+            senderId: user.id,
+            body: data.body ?? '',
+            messageId: data.id,
+            botUsername: data.botUsername ?? null,
+          },
+          { skipTenant: true },
+        )
+        .catch(() => undefined);
+    }
+    return {
+      message: CHAT_SUCCESS_MESSAGES.MESSAGE_SENT,
+      data: { ...data, conversationId: id },
+    };
   }
 
   @Get('push/vapid-public-key')
@@ -1511,14 +1545,13 @@ export class ChatController {
   @Get('bookmarks')
   async listBookmarks(
     @CurrentUser() user: AuthenticatedUser,
-    @Query() query: ChatPageQueryDto,
-    @Query('conversationId') conversationId?: string,
+    @Query() query: ListBookmarksQueryDto,
   ) {
     const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_BOOKMARKS, {
       actorId: user.id,
       page: query.page,
       limit: query.limit,
-      conversationId: conversationId?.trim() || undefined,
+      conversationId: query.conversationId?.trim() || undefined,
     });
     return { message: 'Bookmarks retrieved', data };
   }
@@ -1534,6 +1567,19 @@ export class ChatController {
       limit: query.limit,
     });
     return { message: 'Threads retrieved', data };
+  }
+
+  @Get('mentions')
+  async listMyMentions(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ChatPageQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_MY_MENTIONS, {
+      actorId: user.id,
+      page: query.page,
+      limit: query.limit,
+    });
+    return { message: 'Mentions retrieved', data };
   }
 
   @Post('conversations/:id/threads/:threadRootId/follow')
@@ -1714,6 +1760,19 @@ export class ChatController {
     return { message: 'Draft cleared', data };
   }
 
+  @Get('drafts')
+  async listMyDrafts(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ChatPageQueryDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_MY_DRAFTS, {
+      actorId: user.id,
+      page: query.page,
+      limit: query.limit,
+    });
+    return { message: 'Drafts retrieved', data };
+  }
+
   @Post('conversations/:id/messages/:messageId/remind')
   @HttpCode(HttpStatus.CREATED)
   async createReminder(
@@ -1734,14 +1793,37 @@ export class ChatController {
   @Get('reminders')
   async listReminders(
     @CurrentUser() user: AuthenticatedUser,
-    @Query() query: ChatPageQueryDto,
+    @Query() query: ListRemindersQueryDto,
   ) {
     const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_REMINDERS, {
       actorId: user.id,
       page: query.page,
       limit: query.limit,
+      scope: query.scope,
     });
     return { message: 'Reminders retrieved', data };
+  }
+
+  @Post('reminders/:id/complete')
+  @HttpCode(HttpStatus.OK)
+  async completeReminder(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) reminderId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.COMPLETE_REMINDER, {
+      actorId: user.id,
+      reminderId,
+    });
+    return { message: 'Reminder completed', data };
+  }
+
+  @Delete('reminders/completed')
+  async clearCompletedReminders(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.CLEAR_COMPLETED_REMINDERS,
+      { actorId: user.id },
+    );
+    return { message: 'Completed reminders cleared', data };
   }
 
   @Delete('reminders/:id')

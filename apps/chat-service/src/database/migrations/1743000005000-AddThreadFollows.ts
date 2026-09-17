@@ -6,7 +6,7 @@ export class AddThreadFollows1743000005000 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "thread_follows" (
-        "id" uuid PRIMARY KEY,
+        "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         "organizationId" uuid NOT NULL,
         "conversationId" uuid NOT NULL,
         "threadRootId" uuid NOT NULL,

@@ -51,6 +51,11 @@ import { SlashCommand } from './entities/slash-command.entity';
 import { UserGroup } from './entities/user-group.entity';
 import { SLACK_PRODUCT_ENTITIES } from './entities/slack-product.entities';
 import { AddSlackProducts1743000016000 } from './migrations/1743000016000-AddSlackProducts';
+import { AddStandupRuns1743000017000 } from './migrations/1743000017000-AddStandupRuns';
+import { AddReminderCompleted1743000018000 } from './migrations/1743000018000-AddReminderCompleted';
+import { AddSharedChannelLinks1743000019000 } from './migrations/1743000019000-AddSharedChannelLinks';
+import { AddAppOauthConnections1743000020000 } from './migrations/1743000020000-AddAppOauthConnections';
+import { ThreadFollowsIdDefault1743000021000 } from './migrations/1743000021000-ThreadFollowsIdDefault';
 
 config({
   path: [
@@ -118,6 +123,11 @@ export default new DataSource({
     AddUserGroups1743000014000,
     AddOutgoingWebhooksAndSlashInteractive1743000015000,
     AddSlackProducts1743000016000,
+    AddStandupRuns1743000017000,
+    AddReminderCompleted1743000018000,
+    AddSharedChannelLinks1743000019000,
+    AddAppOauthConnections1743000020000,
+    ThreadFollowsIdDefault1743000021000,
   ],
   synchronize: false,
 });

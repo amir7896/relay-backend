@@ -26,6 +26,7 @@ import type {
   ListMediaPayload,
   ListMessageEditsPayload,
   ListMyThreadsPayload,
+  ListMyMentionsPayload,
   ListThreadRepliesPayload,
   FollowThreadPayload,
   UnfollowThreadPayload,
@@ -45,8 +46,12 @@ import type {
   SaveBookmarkPayload,
   ScheduleMessagePayload,
   UpsertDraftPayload,
+  ListMyDraftsPayload,
   CreateReminderPayload,
   CancelReminderPayload,
+  CompleteReminderPayload,
+  ClearCompletedRemindersPayload,
+  ListRemindersPayload,
   SearchMessagesPayload,
   GlobalSearchMessagesPayload,
   SendMessagePayload,
@@ -78,6 +83,7 @@ import type {
 import { runWithOrganization } from '@app/database';
 import { ChatService } from './chat.service';
 import { SlackProductsService } from './slack-products.service';
+import { IntegrationsService } from './integrations.service';
 
 type TenantChatPayload = {
   organizationId?: string;
@@ -85,7 +91,11 @@ type TenantChatPayload = {
 
 @Controller()
 export class ChatController {
-  constructor(private readonly chatService: ChatService, private readonly slackProducts: SlackProductsService) {}
+  constructor(
+    private readonly chatService: ChatService,
+    private readonly slackProducts: SlackProductsService,
+    private readonly integrations: IntegrationsService,
+  ) {}
 
   private withOrg<T>(
     payload: TenantChatPayload,
@@ -269,6 +279,11 @@ export class ChatController {
     return this.withOrg(payload, () => this.chatService.clearDraft(payload));
   }
 
+  @MessagePattern(CHAT_PATTERNS.LIST_MY_DRAFTS)
+  listMyDrafts(@Payload() payload: ListMyDraftsPayload & TenantChatPayload) {
+    return this.withOrg(payload, () => this.chatService.listMyDrafts(payload));
+  }
+
   @MessagePattern(CHAT_PATTERNS.CREATE_REMINDER)
   createReminder(
     @Payload() payload: CreateReminderPayload & TenantChatPayload,
@@ -281,11 +296,7 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.LIST_REMINDERS)
   listReminders(
     @Payload()
-    payload: {
-      actorId: string;
-      page?: number;
-      limit?: number;
-    } & TenantChatPayload,
+    payload: ListRemindersPayload & TenantChatPayload,
   ) {
     return this.withOrg(payload, () =>
       this.chatService.listReminders(payload),
@@ -298,6 +309,24 @@ export class ChatController {
   ) {
     return this.withOrg(payload, () =>
       this.chatService.cancelReminder(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.COMPLETE_REMINDER)
+  completeReminder(
+    @Payload() payload: CompleteReminderPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.completeReminder(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CLEAR_COMPLETED_REMINDERS)
+  clearCompletedReminders(
+    @Payload() payload: ClearCompletedRemindersPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.clearCompletedReminders(payload),
     );
   }
 
@@ -483,6 +512,13 @@ export class ChatController {
     @Payload() payload: ListMyThreadsPayload & TenantChatPayload,
   ) {
     return this.withOrg(payload, () => this.chatService.listMyThreads(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_MY_MENTIONS)
+  listMyMentions(
+    @Payload() payload: ListMyMentionsPayload & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () => this.chatService.listMyMentions(payload));
   }
 
   @MessagePattern(CHAT_PATTERNS.FOLLOW_THREAD)
@@ -746,6 +782,9 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.CREATE_SHARED_INVITE) createSharedInvite(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createSharedInvite(p)); }
   @MessagePattern(CHAT_PATTERNS.GET_SHARED_INFO) getSharedInfo(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getSharedInfo(p)); }
   @MessagePattern(CHAT_PATTERNS.ACCEPT_SHARED_INVITE) acceptSharedInvite(@Payload() p: any) { return this.slackProducts.acceptSharedInvite(p); }
+  @MessagePattern(CHAT_PATTERNS.ACCEPT_WORKSPACE_SHARE) acceptWorkspaceShare(@Payload() p: any) { return this.slackProducts.acceptWorkspaceShare(p); }
+  @MessagePattern(CHAT_PATTERNS.DISCONNECT_SHARED_CHANNEL) disconnectSharedChannel(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.disconnectSharedChannel(p)); }
+  @MessagePattern(CHAT_PATTERNS.RESOLVE_CONNECT_CONVERSATION) resolveConnectConversation(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.resolveConnectConversation(p)); }
   @MessagePattern(CHAT_PATTERNS.PREVIEW_SHARED_INVITE) previewSharedInvite(@Payload() p: any) { return this.slackProducts.previewSharedInvite(p); }
   @MessagePattern(CHAT_PATTERNS.REVOKE_SHARED_INVITE) revokeSharedInvite(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.revokeSharedInvite(p)); }
   @MessagePattern(CHAT_PATTERNS.MARK_SHARED_INVITE_ACCEPTED) markSharedInviteAccepted(@Payload() p: any) { return this.slackProducts.markSharedInviteAccepted(p); }
@@ -754,6 +793,18 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.INSTALL_APP) installApp(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.installApp(p)); }
   @MessagePattern(CHAT_PATTERNS.UNINSTALL_APP) uninstallApp(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.uninstallApp(p)); }
   @MessagePattern(CHAT_PATTERNS.LIST_INSTALLED_APPS) listInstalledApps(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listInstalledApps()); }
+  @MessagePattern(CHAT_PATTERNS.UPSERT_APP_OAUTH) upsertAppOauth(@Payload() p: any) { return this.withOrg(p, () => this.integrations.upsertOauth(p)); }
+  @MessagePattern(CHAT_PATTERNS.GET_APP_OAUTH_STATUS) getAppOauthStatus(@Payload() p: any) { return this.withOrg(p, () => this.integrations.getOauthStatus(p)); }
+  @MessagePattern(CHAT_PATTERNS.DISCONNECT_APP_OAUTH) disconnectAppOauth(@Payload() p: any) { return this.withOrg(p, () => this.integrations.disconnectOauth(p)); }
+  @MessagePattern(CHAT_PATTERNS.UNFURL_APP_LINK) unfurlAppLink(@Payload() p: any) { return this.withOrg(p, () => this.integrations.unfurlLink(p)); }
+  @MessagePattern(CHAT_PATTERNS.CREATE_APP_ISSUE_FROM_MESSAGE) createAppIssueFromMessage(@Payload() p: any) { return this.withOrg(p, () => this.integrations.createIssueFromMessage(p)); }
+  @MessagePattern(CHAT_PATTERNS.CREATE_ZOOM_MEETING) createZoomMeeting(@Payload() p: any) { return this.withOrg(p, () => this.integrations.createZoomMeeting(p)); }
+  @MessagePattern(CHAT_PATTERNS.INGEST_APP_EVENT) ingestAppEvent(@Payload() p: any) { return this.integrations.ingestEvent(p); }
+  @MessagePattern(CHAT_PATTERNS.LIST_APP_PROJECTS) listAppProjects(@Payload() p: any) { return this.withOrg(p, () => this.integrations.listProjects(p)); }
+  @MessagePattern(CHAT_PATTERNS.DISPATCH_DUE_STANDUPS) dispatchDueStandups() { return this.slackProducts.dispatchDueStandups(); }
+  @MessagePattern(CHAT_PATTERNS.RUN_STANDUP_NOW) runStandupNow(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.runStandupNow(p)); }
+  @MessagePattern(CHAT_PATTERNS.COLLECT_STANDUP_REPLY) collectStandupReply(@Payload() p: any) { return this.slackProducts.collectStandupReply(p); }
+  @MessagePattern(CHAT_PATTERNS.SUMMARIZE_STANDUP) summarizeStandup(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.summarizeStandup(p)); }
 
   @MessagePattern(CHAT_PATTERNS.DELETE_GROUP)
   deleteGroup(

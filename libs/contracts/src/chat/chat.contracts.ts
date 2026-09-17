@@ -33,9 +33,12 @@ export const CHAT_PATTERNS = {
   UPSERT_DRAFT: 'chat.upsert_draft',
   GET_DRAFT: 'chat.get_draft',
   CLEAR_DRAFT: 'chat.clear_draft',
+  LIST_MY_DRAFTS: 'chat.list_my_drafts',
   CREATE_REMINDER: 'chat.create_reminder',
   LIST_REMINDERS: 'chat.list_reminders',
   CANCEL_REMINDER: 'chat.cancel_reminder',
+  COMPLETE_REMINDER: 'chat.complete_reminder',
+  CLEAR_COMPLETED_REMINDERS: 'chat.clear_completed_reminders',
   DISPATCH_DUE_REMINDERS: 'chat.dispatch_due_reminders',
   FORWARD_MESSAGE: 'chat.forward_message',
   MARK_SEEN: 'chat.mark_seen',
@@ -66,6 +69,7 @@ export const CHAT_PATTERNS = {
   PURGE_ORGANIZATION: 'chat.purge_organization',
   LIST_THREAD_REPLIES: 'chat.list_thread_replies',
   LIST_MY_THREADS: 'chat.list_my_threads',
+  LIST_MY_MENTIONS: 'chat.list_my_mentions',
   FOLLOW_THREAD: 'chat.follow_thread',
   UNFOLLOW_THREAD: 'chat.unfollow_thread',
   MARK_THREAD_READ: 'chat.mark_thread_read',
@@ -126,6 +130,9 @@ export const CHAT_PATTERNS = {
   CREATE_SHARED_INVITE: 'chat.create_shared_invite',
   GET_SHARED_INFO: 'chat.get_shared_info',
   ACCEPT_SHARED_INVITE: 'chat.accept_shared_invite',
+  ACCEPT_WORKSPACE_SHARE: 'chat.accept_workspace_share',
+  DISCONNECT_SHARED_CHANNEL: 'chat.disconnect_shared_channel',
+  RESOLVE_CONNECT_CONVERSATION: 'chat.resolve_connect_conversation',
   PREVIEW_SHARED_INVITE: 'chat.preview_shared_invite',
   REVOKE_SHARED_INVITE: 'chat.revoke_shared_invite',
   MARK_SHARED_INVITE_ACCEPTED: 'chat.mark_shared_invite_accepted',
@@ -134,6 +141,18 @@ export const CHAT_PATTERNS = {
   INSTALL_APP: 'chat.install_app',
   UNINSTALL_APP: 'chat.uninstall_app',
   LIST_INSTALLED_APPS: 'chat.list_installed_apps',
+  UPSERT_APP_OAUTH: 'chat.upsert_app_oauth',
+  GET_APP_OAUTH_STATUS: 'chat.get_app_oauth_status',
+  DISCONNECT_APP_OAUTH: 'chat.disconnect_app_oauth',
+  UNFURL_APP_LINK: 'chat.unfurl_app_link',
+  CREATE_APP_ISSUE_FROM_MESSAGE: 'chat.create_app_issue_from_message',
+  CREATE_ZOOM_MEETING: 'chat.create_zoom_meeting',
+  INGEST_APP_EVENT: 'chat.ingest_app_event',
+  LIST_APP_PROJECTS: 'chat.list_app_projects',
+  DISPATCH_DUE_STANDUPS: 'chat.dispatch_due_standups',
+  RUN_STANDUP_NOW: 'chat.run_standup_now',
+  COLLECT_STANDUP_REPLY: 'chat.collect_standup_reply',
+  SUMMARIZE_STANDUP: 'chat.summarize_standup',
 } as const;
 
 export interface CreatePrivateChatPayload {
@@ -179,6 +198,14 @@ export interface ListMyThreadsPayload {
   limit: number;
 }
 
+export interface ListMyMentionsPayload {
+  actorId: string;
+  page: number;
+  limit: number;
+  /** When true, only mentions newer than the member's lastReadAt. */
+  unreadOnly?: boolean;
+}
+
 export interface FollowThreadPayload extends ConversationActorPayload {
   threadRootId: string;
 }
@@ -202,6 +229,14 @@ export interface ThreadSummaryView {
   followed: boolean;
   unreadCount: number;
   hasUnread: boolean;
+}
+
+export interface MentionActivityView {
+  conversationId: string;
+  conversationName: string | null;
+  conversationType: ConversationType;
+  message: MessageView;
+  unread: boolean;
 }
 
 export interface SearchMessagesPayload extends ConversationActorPayload {
@@ -268,6 +303,11 @@ export interface SendMessagePayload extends ConversationActorPayload {
   systemCall?: boolean;
 }
 
+export interface ConnectMessageFanout {
+  conversationId: string;
+  recipientIds: string[];
+}
+
 export interface SendMessageResult extends MessageView {
   recipientIds: string[];
   /** Members who muted this conversation (for push filtering). */
@@ -279,6 +319,11 @@ export interface SendMessageResult extends MessageView {
   pushRecipientIds?: string[];
   /** Optional channel copy when alsoSendToChannel was requested */
   channelBroadcast?: MessageView;
+  /**
+   * Partner-stub mirrors for true multi-org Connect.
+   * Gateway re-emits the same message with each stub conversationId.
+   */
+  connectFanouts?: ConnectMessageFanout[];
 }
 
 export interface EditMessagePayload extends ConversationActorPayload {
@@ -365,6 +410,20 @@ export interface DraftView {
   updatedAt: string;
 }
 
+export interface ListMyDraftsPayload {
+  actorId: string;
+  page: number;
+  limit: number;
+}
+
+export interface DraftInboxView {
+  conversationId: string;
+  conversationName: string | null;
+  conversationType: ConversationType;
+  body: string;
+  updatedAt: string;
+}
+
 export interface CreateReminderPayload extends ConversationActorPayload {
   messageId: string;
   remindAt: string;
@@ -375,7 +434,30 @@ export interface CancelReminderPayload {
   reminderId: string;
 }
 
-export type MessageReminderStatus = 'pending' | 'sent' | 'cancelled';
+export type MessageReminderStatus =
+  | 'pending'
+  | 'sent'
+  | 'cancelled'
+  | 'completed';
+
+export type ListRemindersScope = 'open' | 'done' | 'all';
+
+export interface ListRemindersPayload {
+  actorId: string;
+  page?: number;
+  limit?: number;
+  /** open=pending (default), done=completed+sent, all=open+done */
+  scope?: ListRemindersScope;
+}
+
+export interface CompleteReminderPayload {
+  actorId: string;
+  reminderId: string;
+}
+
+export interface ClearCompletedRemindersPayload {
+  actorId: string;
+}
 
 export interface MessageReminderView {
   id: string;
@@ -384,6 +466,7 @@ export interface MessageReminderView {
   remindAt: string;
   status: MessageReminderStatus;
   notifiedAt: string | null;
+  completedAt?: string | null;
   createdAt: string;
   bodySnippet?: string;
   conversationName?: string | null;
@@ -1046,13 +1129,43 @@ export interface SharedChannelInviteView {
   email: string;
   token?: string;
   status: 'pending' | 'accepted' | 'revoked';
+  inviteKind?: 'guest_email' | 'workspace_share';
   createdBy: string;
   createdAt: string;
   acceptedAt: string | null;
   inviteUrl?: string | null;
+  partnerOrganizationName?: string | null;
 }
-export interface CreateSharedChannelInvitePayload extends ConversationActorPayload { email: string }
+export interface CreateSharedChannelInvitePayload extends ConversationActorPayload {
+  email: string;
+  /** guest_email (default) or workspace_share for true multi-org Connect */
+  mode?: 'guest' | 'workspace';
+}
 export interface AcceptSharedChannelInvitePayload { actorId: string; token: string }
+export interface AcceptWorkspaceSharePayload {
+  actorId: string;
+  token: string;
+  partnerOrganizationId: string;
+  partnerOrganizationName?: string | null;
+  hostOrganizationName?: string | null;
+}
+export interface DisconnectSharedChannelPayload extends ConversationActorPayload {
+  linkId: string;
+}
+export interface SharedChannelLinkView {
+  id: string;
+  hostOrganizationId: string;
+  hostConversationId: string;
+  partnerOrganizationId: string;
+  partnerConversationId: string;
+  partnerOrganizationName: string | null;
+  hostOrganizationName: string | null;
+  status: 'pending' | 'active' | 'disconnected';
+  createdBy: string;
+  acceptedBy: string | null;
+  createdAt: string;
+  disconnectedAt: string | null;
+}
 export interface SharedChannelInfoView {
   conversationId: string;
   isShared: boolean;
@@ -1060,6 +1173,9 @@ export interface SharedChannelInfoView {
   conversationName?: string | null;
   organizationName?: string | null;
   invites: SharedChannelInviteView[];
+  links?: SharedChannelLinkView[];
+  connectRole?: 'host' | 'partner' | null;
+  hostConversationId?: string | null;
 }
 export interface SharedChannelInvitePreviewView {
   valid: boolean;
@@ -1070,6 +1186,14 @@ export interface SharedChannelInvitePreviewView {
   organizationId: string | null;
   organizationName: string | null;
   status?: 'pending' | 'accepted' | 'revoked';
+  inviteKind?: 'guest_email' | 'workspace_share';
+}
+export interface ResolveConnectConversationResult {
+  displayConversationId: string;
+  effectiveConversationId: string;
+  effectiveOrganizationId: string;
+  isPartnerStub: boolean;
+  linkId?: string | null;
 }
 export interface RevokeSharedChannelInvitePayload extends ConversationActorPayload { inviteId: string }
 export interface MarkSharedInviteAcceptedPayload {
@@ -1077,7 +1201,125 @@ export interface MarkSharedInviteAcceptedPayload {
   email: string;
   externalLabel?: string | null;
 }
-export interface AppCatalogView { key: string; name: string; description: string; icon: string; installed: boolean }
-export interface InstalledAppView { id: string; organizationId: string; appKey: string; config: Record<string, unknown>; installedBy: string; createdAt: string }
+export interface AppCatalogView {
+  key: string;
+  name: string;
+  description: string;
+  icon: string;
+  installed: boolean;
+  configurable?: boolean;
+  category?: 'integration' | 'bot';
+  oauthRequired?: boolean;
+  capabilities?: Array<'unfurl' | 'create_issue' | 'events' | 'meetings'>;
+  connected?: boolean;
+  connectionStatus?: string | null;
+  providerAccountName?: string | null;
+}
+export interface InstalledAppView {
+  id: string;
+  organizationId: string;
+  appKey: string;
+  key: string;
+  name?: string;
+  description?: string;
+  config: Record<string, unknown>;
+  installedBy: string;
+  createdAt: string;
+  connected?: boolean;
+  connectionStatus?: string | null;
+  providerAccountName?: string | null;
+  oauthRequired?: boolean;
+  capabilities?: Array<'unfurl' | 'create_issue' | 'events' | 'meetings'>;
+}
+export interface AppOauthConnectionView {
+  appKey: string;
+  status: 'connected' | 'needs_reauth' | 'error' | 'disconnected';
+  providerAccountId: string | null;
+  providerAccountName: string | null;
+  scopes: string | null;
+  expiresAt: string | null;
+  meta: Record<string, unknown>;
+  connected: boolean;
+}
+export interface UpsertAppOauthPayload {
+  actorId: string;
+  appKey: string;
+  accessToken: string;
+  refreshToken?: string | null;
+  tokenType?: string | null;
+  scopes?: string | null;
+  expiresAt?: string | null;
+  providerAccountId?: string | null;
+  providerAccountName?: string | null;
+  meta?: Record<string, unknown>;
+}
+export interface UnfurlAppLinkPayload {
+  actorId: string;
+  url: string;
+}
+export interface UnfurlAppLinkResult {
+  url: string;
+  title: string;
+  description: string;
+  image: string | null;
+  provider?: string | null;
+  externalId?: string | null;
+}
+export interface CreateAppIssuePayload {
+  actorId: string;
+  conversationId: string;
+  messageId: string;
+  appKey: 'github' | 'jira';
+  title?: string;
+  body?: string;
+  projectKey?: string;
+  repo?: string;
+}
+export interface CreateAppIssueResult {
+  appKey: string;
+  externalId: string;
+  externalUrl: string;
+  title: string;
+  message?: Record<string, unknown> & {
+    conversationId: string;
+    recipientIds?: string[];
+  };
+}
+export interface IngestAppEventPayload {
+  appKey: string;
+  organizationId: string;
+  eventType: string;
+  payload: Record<string, unknown>;
+  deliveryId?: string | null;
+}
+export interface ListAppProjectsPayload {
+  actorId: string;
+  appKey: 'github' | 'jira';
+}
 export interface AppActorPayload { actorId: string }
 export interface InstallAppPayload extends AppActorPayload { appKey: string; config?: Record<string, unknown> }
+export interface StandupConfig {
+  conversationId: string;
+  time: string;
+  timezone: string;
+  weekdays?: number[];
+  questions?: string[];
+  summaryOffsetMinutes?: number;
+  mode?: 'standup' | 'dsu' | 'daily-meeting';
+}
+export interface RunStandupNowPayload extends AppActorPayload {
+  appKey?: string;
+  conversationId?: string;
+}
+export interface CollectStandupReplyPayload {
+  conversationId: string;
+  threadRootId: string;
+  senderId: string;
+  body: string;
+  messageId?: string;
+  botUsername?: string | null;
+}
+export interface SummarizeStandupPayload extends AppActorPayload {
+  conversationId: string;
+  appKey?: string;
+}

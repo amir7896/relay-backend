@@ -240,9 +240,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         threadRootId: body.threadRootId,
       },
     );
-    const { recipientIds, mutedRecipientIds: _muted, ...message } = result;
+    const {
+      recipientIds,
+      mutedRecipientIds: _muted,
+      connectFanouts,
+      ...message
+    } = result;
     await this.conversationCache.setMemberIds(conversationId, recipientIds);
     this.broadcastMessage(message, recipientIds);
+    for (const fanout of connectFanouts ?? []) {
+      this.broadcastMessage(
+        { ...message, conversationId: fanout.conversationId },
+        fanout.recipientIds,
+      );
+    }
     void this.sendChatFor(client, CHAT_PATTERNS.DISPATCH_OUTGOING_WEBHOOKS, {
       conversationId: message.conversationId,
       event: 'message.created' as const,
@@ -256,7 +267,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       },
     }).catch(() => undefined);
     void this.evaluateChannelWorkflows(client, userId, conversationId, message);
-    return message;
+    return { ...message, conversationId };
   }
 
   @SubscribeMessage('chat:typing')

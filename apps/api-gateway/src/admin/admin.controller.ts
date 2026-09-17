@@ -236,8 +236,11 @@ export class AdminController {
 
   @Post('chat/link-preview')
   @HttpCode(HttpStatus.OK)
-  async previewLink(@Body() dto: LinkPreviewDto) {
-    const data = await this.linkPreview.fetch(dto.url);
+  async previewLink(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: LinkPreviewDto,
+  ) {
+    const data = await this.linkPreview.fetch(dto.url, user.id);
     return { message: 'Link preview ready', data };
   }
 }
