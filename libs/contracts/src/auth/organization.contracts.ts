@@ -95,6 +95,8 @@ export interface OrgMemberView {
   userId: string;
   role: OrgMemberRole;
   joinedAt: string;
+  /** Present when listing members for directory / admin UI. */
+  email?: string | null;
 }
 
 export interface ListOrgMembersPayload {

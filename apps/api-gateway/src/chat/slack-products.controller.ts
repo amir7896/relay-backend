@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import {
   AuthenticatedUser,
   BadRequestAppException,
@@ -19,6 +19,7 @@ import {
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
 import { StorageService } from '../storage/storage.service';
 import { ChatGateway } from './chat.gateway';
+import { PushService } from './push.service';
 import { SkipOrg } from '../organizations/skip-org.decorator';
 
 @Controller('chat')
@@ -28,9 +29,42 @@ export class SlackProductsController {
     private readonly chatGateway: ChatGateway,
     private readonly storage: StorageService,
     private readonly mail: MailService,
+    private readonly push: PushService,
   ) {}
   private payload(user: AuthenticatedUser, id?: string, extra: Record<string, unknown> = {}) {
     return { actorId: user.id, ...(id ? { conversationId: id } : {}), ...extra };
+  }
+
+  private async deliverAssignmentNotification(
+    notification: {
+      id: string;
+      userId: string;
+      actorId: string;
+      title: string;
+      body: string;
+      conversationId: string | null;
+      type?: string;
+      listId?: string | null;
+      listItemId?: string | null;
+      meta?: Record<string, unknown>;
+      readAt?: string | null;
+      createdAt?: string;
+      unread?: boolean;
+      organizationId?: string;
+    } | null | undefined,
+  ) {
+    if (!notification?.userId) return;
+    this.chatGateway.emitUserNotification(notification.userId, notification);
+    if (notification.conversationId) {
+      void this.push.notifyAssignment({
+        recipientId: notification.userId,
+        senderId: notification.actorId,
+        title: notification.title,
+        body: notification.body,
+        conversationId: notification.conversationId,
+        notificationId: notification.id,
+      });
+    }
   }
 
   @Get('conversations/:id/canvas') getCanvas(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string) { return this.wrap('Canvas retrieved', CHAT_PATTERNS.GET_CANVAS, this.payload(u, id)); }
@@ -52,9 +86,82 @@ export class SlackProductsController {
   @Get('conversations/:id/lists/:listId') getList(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Param('listId', ParseUuidPipe) listId: string) { return this.wrap('List retrieved', CHAT_PATTERNS.GET_CHANNEL_LIST, this.payload(u, id, { listId })); }
   @Patch('conversations/:id/lists/:listId') updateList(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Param('listId', ParseUuidPipe) listId: string, @Body() b: Record<string, unknown>) { return this.wrap('List updated', CHAT_PATTERNS.UPDATE_CHANNEL_LIST, this.payload(u, id, { listId, ...b })); }
   @Delete('conversations/:id/lists/:listId') deleteList(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Param('listId', ParseUuidPipe) listId: string) { return this.wrap('List deleted', CHAT_PATTERNS.DELETE_CHANNEL_LIST, this.payload(u, id, { listId })); }
-  @Post('conversations/:id/lists/:listId/items') createItem(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Param('listId', ParseUuidPipe) listId: string, @Body() b: Record<string, unknown>) { return this.wrap('List item created', CHAT_PATTERNS.CREATE_CHANNEL_LIST_ITEM, this.payload(u, id, { listId, ...b })); }
-  @Patch('conversations/:id/lists/:listId/items/:itemId') updateItem(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Param('listId', ParseUuidPipe) listId: string, @Param('itemId', ParseUuidPipe) itemId: string, @Body() b: Record<string, unknown>) { return this.wrap('List item updated', CHAT_PATTERNS.UPDATE_CHANNEL_LIST_ITEM, this.payload(u, id, { listId, itemId, ...b })); }
+  @Post('conversations/:id/lists/:listId/items')
+  async createItem(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('listId', ParseUuidPipe) listId: string,
+    @Body() b: Record<string, unknown>,
+  ) {
+    const result = (await this.proxy.sendChat(
+      CHAT_PATTERNS.CREATE_CHANNEL_LIST_ITEM,
+      this.payload(u, id, { listId, ...b }),
+    )) as { item: Record<string, unknown>; notification?: Record<string, unknown> | null };
+    await this.deliverAssignmentNotification(result.notification as any);
+    return { message: 'List item created', data: result.item };
+  }
+
+  @Patch('conversations/:id/lists/:listId/items/:itemId')
+  async updateItem(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('listId', ParseUuidPipe) listId: string,
+    @Param('itemId', ParseUuidPipe) itemId: string,
+    @Body() b: Record<string, unknown>,
+  ) {
+    const result = (await this.proxy.sendChat(
+      CHAT_PATTERNS.UPDATE_CHANNEL_LIST_ITEM,
+      this.payload(u, id, { listId, itemId, ...b }),
+    )) as { item: Record<string, unknown>; notification?: Record<string, unknown> | null };
+    await this.deliverAssignmentNotification(result.notification as any);
+    return { message: 'List item updated', data: result.item };
+  }
+
   @Delete('conversations/:id/lists/:listId/items/:itemId') deleteItem(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Param('listId', ParseUuidPipe) listId: string, @Param('itemId', ParseUuidPipe) itemId: string) { return this.wrap('List item deleted', CHAT_PATTERNS.DELETE_CHANNEL_LIST_ITEM, this.payload(u, id, { listId, itemId })); }
+
+  @Get('notifications')
+  listNotifications(
+    @CurrentUser() u: AuthenticatedUser,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('unreadOnly') unreadOnly?: string,
+  ) {
+    return this.wrap('Notifications retrieved', CHAT_PATTERNS.LIST_USER_NOTIFICATIONS, {
+      actorId: u.id,
+      page: Number(page) || 1,
+      limit: Number(limit) || 40,
+      unreadOnly: unreadOnly === '1' || unreadOnly === 'true',
+    });
+  }
+
+  @Get('notifications/unread-count')
+  unreadNotificationCount(@CurrentUser() u: AuthenticatedUser) {
+    return this.wrap(
+      'Unread notification count',
+      CHAT_PATTERNS.COUNT_UNREAD_USER_NOTIFICATIONS,
+      { actorId: u.id },
+    );
+  }
+
+  @Post('notifications/read-all')
+  markAllNotificationsRead(@CurrentUser() u: AuthenticatedUser) {
+    return this.wrap(
+      'Notifications marked read',
+      CHAT_PATTERNS.MARK_ALL_USER_NOTIFICATIONS_READ,
+      { actorId: u.id },
+    );
+  }
+
+  @Post('notifications/:notificationId/read')
+  markNotificationRead(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('notificationId', ParseUuidPipe) notificationId: string,
+  ) {
+    return this.wrap('Notification marked read', CHAT_PATTERNS.MARK_USER_NOTIFICATION_READ, {
+      actorId: u.id,
+      notificationId,
+    });
+  }
   @Get('conversations/:id/clips') clips(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string) { return this.wrap('Clips retrieved', CHAT_PATTERNS.LIST_CLIPS, this.payload(u, id)); }
   @Post('conversations/:id/clips') createClip(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Body() b: Record<string, unknown>) { return this.wrap('Clip created', CHAT_PATTERNS.CREATE_CLIP, this.payload(u, id, b)); }
   @Delete('conversations/:id/clips/:clipId')

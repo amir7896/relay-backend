@@ -102,6 +102,25 @@ export class SlackProductsService {
     return row;
   }
 
+  /** null = unassigned; undefined = leave unchanged (caller decides). */
+  private async resolveAssigneeId(
+    conversationId: string,
+    assigneeId: unknown,
+  ): Promise<string | null> {
+    if (assigneeId === null || assigneeId === '') return null;
+    const id = String(assigneeId ?? '').trim();
+    if (!id) return null;
+    const member = await this.queryOne(
+      `SELECT "userId" FROM conversation_members
+       WHERE "conversationId"=$1 AND "userId"=$2 AND "leftAt" IS NULL LIMIT 1`,
+      [conversationId, id],
+    );
+    if (!member) {
+      return RpcErrors.badRequest('Assignee must be a member of this channel') as never;
+    }
+    return id;
+  }
+
   private text(value: unknown, name: string, max: number) {
     const text = String(value ?? '').trim();
     if (!text || text.length > max) return RpcErrors.badRequest(`${name} is required (max ${max} characters)`) as never;
@@ -254,12 +273,26 @@ export class SlackProductsService {
     await this.requireList(p);
     const status = p.status ?? 'todo';
     if (!STATUSES.has(status)) return RpcErrors.badRequest('status must be todo, doing, or done');
+    const assigneeId =
+      p.assigneeId === undefined
+        ? null
+        : await this.resolveAssigneeId(p.conversationId, p.assigneeId);
     const row = await this.queryOne(
       `INSERT INTO channel_list_items ("listId","title","status","assigneeId","sortOrder") VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [p.listId, this.text(p.title, 'title', 500), status, p.assigneeId ?? null, Number(p.sortOrder) || 0],
+      [p.listId, this.text(p.title, 'title', 500), status, assigneeId, Number(p.sortOrder) || 0],
     );
     if (!row) return RpcErrors.internal('Could not create list item') as never;
-    return this.toListItemView(row);
+    const item = this.toListItemView(row);
+    const notification =
+      assigneeId && assigneeId !== p.actorId
+        ? await this.createListAssignmentNotification({
+            actorId: p.actorId,
+            conversationId: p.conversationId,
+            listId: p.listId,
+            item,
+          })
+        : null;
+    return { item, notification };
   }
 
   async updateListItem(p: any) {
@@ -267,6 +300,18 @@ export class SlackProductsService {
     if (p.status !== undefined && !STATUSES.has(p.status)) {
       return RpcErrors.badRequest('status must be todo, doing, or done');
     }
+    const previous = await this.queryOne(
+      `SELECT * FROM channel_list_items WHERE id=$1 AND "listId"=$2`,
+      [p.itemId, p.listId],
+    );
+    if (!previous) return RpcErrors.notFound('Channel list item');
+    const previousAssignee = previous.assigneeId
+      ? String(previous.assigneeId)
+      : null;
+    const assigneeId =
+      p.assigneeId === undefined
+        ? undefined
+        : await this.resolveAssigneeId(p.conversationId, p.assigneeId);
     const row = await this.queryOne(
       `UPDATE channel_list_items SET title=COALESCE($1,title), status=COALESCE($2,status),
        "assigneeId"=CASE WHEN $3::boolean THEN $4::uuid ELSE "assigneeId" END,
@@ -275,14 +320,173 @@ export class SlackProductsService {
         p.title === undefined ? null : this.text(p.title, 'title', 500),
         p.status ?? null,
         p.assigneeId !== undefined,
-        p.assigneeId ?? null,
+        assigneeId ?? null,
         p.sortOrder ?? null,
         p.itemId,
         p.listId,
       ],
     );
     if (!row) return RpcErrors.notFound('Channel list item');
-    return this.toListItemView(row);
+    const item = this.toListItemView(row);
+    const nextAssignee = item.assigneeId;
+    const assigneeChanged =
+      p.assigneeId !== undefined && nextAssignee !== previousAssignee;
+    const notification =
+      assigneeChanged && nextAssignee && nextAssignee !== p.actorId
+        ? await this.createListAssignmentNotification({
+            actorId: p.actorId,
+            conversationId: p.conversationId,
+            listId: p.listId,
+            item,
+          })
+        : null;
+    return { item, notification };
+  }
+
+  private toUserNotificationView(row: any) {
+    const readAt = row.readAt ? new Date(row.readAt).toISOString() : null;
+    return {
+      id: String(row.id),
+      organizationId: String(row.organizationId),
+      userId: String(row.userId),
+      actorId: String(row.actorId),
+      type: String(row.type ?? 'list_assignment'),
+      title: String(row.title ?? ''),
+      body: String(row.body ?? ''),
+      conversationId: row.conversationId ? String(row.conversationId) : null,
+      listId: row.listId ? String(row.listId) : null,
+      listItemId: row.listItemId ? String(row.listItemId) : null,
+      meta:
+        row.meta && typeof row.meta === 'object' && !Array.isArray(row.meta)
+          ? (row.meta as Record<string, unknown>)
+          : {},
+      readAt,
+      createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
+      unread: !readAt,
+    };
+  }
+
+  private async createListAssignmentNotification(input: {
+    actorId: string;
+    conversationId: string;
+    listId: string;
+    item: {
+      id: string;
+      title: string;
+      assigneeId: string | null;
+    };
+  }) {
+    if (!input.item.assigneeId) return null;
+    const context = await this.queryOne(
+      `SELECT l.name AS "listName", c.name AS "channelName", c.type AS "channelType"
+       FROM channel_lists l
+       JOIN conversations c ON c.id = l."conversationId"
+       WHERE l.id=$1 AND l."conversationId"=$2
+       LIMIT 1`,
+      [input.listId, input.conversationId],
+    );
+    const listName = String(context?.listName ?? 'List').trim() || 'List';
+    const channelRaw = String(context?.channelName ?? '').trim();
+    const channelLabel =
+      context?.channelType === 'group'
+        ? `#${channelRaw.replace(/^#/, '') || 'channel'}`
+        : channelRaw || 'Direct message';
+    const title = 'Task assigned to you';
+    const body = `"${input.item.title}" in ${listName} · ${channelLabel}`.slice(
+      0,
+      500,
+    );
+    const row = await this.queryOne(
+      `INSERT INTO user_notifications (
+         "organizationId","userId","actorId","type","title","body",
+         "conversationId","listId","listItemId","meta"
+       ) VALUES ($1,$2,$3,'list_assignment',$4,$5,$6,$7,$8,$9::jsonb)
+       RETURNING *`,
+      [
+        requireOrganizationId(),
+        input.item.assigneeId,
+        input.actorId,
+        title,
+        body,
+        input.conversationId,
+        input.listId,
+        input.item.id,
+        JSON.stringify({
+          listName,
+          channelName: channelRaw || null,
+          channelType: context?.channelType ?? null,
+          itemTitle: input.item.title,
+        }),
+      ],
+    );
+    if (!row) return null;
+    return this.toUserNotificationView(row);
+  }
+
+  async listUserNotifications(p: any) {
+    const page = Math.max(1, Number(p.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(p.limit) || 40));
+    const offset = (page - 1) * limit;
+    const unreadOnly = Boolean(p.unreadOnly);
+    const organizationId = requireOrganizationId();
+    const where = unreadOnly
+      ? `WHERE "organizationId"=$1 AND "userId"=$2 AND "readAt" IS NULL`
+      : `WHERE "organizationId"=$1 AND "userId"=$2`;
+    const countRow = await this.queryOne<{ total: string }>(
+      `SELECT COUNT(*)::text AS total FROM user_notifications ${where}`,
+      [organizationId, p.actorId],
+    );
+    const total = Number(countRow?.total ?? 0) || 0;
+    const rows = await this.queryRows(
+      `SELECT * FROM user_notifications ${where}
+       ORDER BY "createdAt" DESC
+       LIMIT $3 OFFSET $4`,
+      [organizationId, p.actorId, limit, offset],
+    );
+    const totalPages = Math.max(1, Math.ceil(total / limit) || 1);
+    return {
+      items: rows.map((row) => this.toUserNotificationView(row)),
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
+      },
+    };
+  }
+
+  async markUserNotificationRead(p: any) {
+    const row = await this.queryOne(
+      `UPDATE user_notifications
+       SET "readAt"=COALESCE("readAt", now())
+       WHERE id=$1 AND "userId"=$2 AND "organizationId"=$3
+       RETURNING *`,
+      [p.notificationId, p.actorId, requireOrganizationId()],
+    );
+    if (!row) return RpcErrors.notFound('Notification');
+    return this.toUserNotificationView(row);
+  }
+
+  async markAllUserNotificationsRead(p: any) {
+    const rows = await this.queryRows(
+      `UPDATE user_notifications
+       SET "readAt"=now()
+       WHERE "userId"=$1 AND "organizationId"=$2 AND "readAt" IS NULL
+       RETURNING id`,
+      [p.actorId, requireOrganizationId()],
+    );
+    return { updated: rows.length };
+  }
+
+  async countUnreadUserNotifications(p: any) {
+    const row = await this.queryOne<{ total: string }>(
+      `SELECT COUNT(*)::text AS total FROM user_notifications
+       WHERE "organizationId"=$1 AND "userId"=$2 AND "readAt" IS NULL`,
+      [requireOrganizationId(), p.actorId],
+    );
+    return { count: Number(row?.total ?? 0) || 0 };
   }
 
   async deleteListItem(p: any) {

@@ -765,6 +765,10 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.CREATE_CHANNEL_LIST_ITEM) createChannelListItem(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createListItem(p)); }
   @MessagePattern(CHAT_PATTERNS.UPDATE_CHANNEL_LIST_ITEM) updateChannelListItem(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.updateListItem(p)); }
   @MessagePattern(CHAT_PATTERNS.DELETE_CHANNEL_LIST_ITEM) deleteChannelListItem(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.deleteListItem(p)); }
+  @MessagePattern(CHAT_PATTERNS.LIST_USER_NOTIFICATIONS) listUserNotifications(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listUserNotifications(p)); }
+  @MessagePattern(CHAT_PATTERNS.MARK_USER_NOTIFICATION_READ) markUserNotificationRead(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.markUserNotificationRead(p)); }
+  @MessagePattern(CHAT_PATTERNS.MARK_ALL_USER_NOTIFICATIONS_READ) markAllUserNotificationsRead(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.markAllUserNotificationsRead(p)); }
+  @MessagePattern(CHAT_PATTERNS.COUNT_UNREAD_USER_NOTIFICATIONS) countUnreadUserNotifications(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.countUnreadUserNotifications(p)); }
   @MessagePattern(CHAT_PATTERNS.LIST_CLIPS) listClips(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listClips(p)); }
   @MessagePattern(CHAT_PATTERNS.CREATE_CLIP) createClip(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createClip(p)); }
   @MessagePattern(CHAT_PATTERNS.DELETE_CLIP) deleteClip(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.deleteClip(p)); }

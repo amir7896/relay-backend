@@ -834,6 +834,16 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.to(`user:${userId}`).emit('chat:reminder', payload);
   }
 
+  emitUserNotification(
+    userId: string,
+    payload: Record<string, unknown>,
+  ): void {
+    if (!this.server) {
+      return;
+    }
+    this.server.to(`user:${userId}`).emit('chat:notification', payload);
+  }
+
   broadcastMessageDeleted(
     message: MessageView,
     recipientIds: string[] = [],

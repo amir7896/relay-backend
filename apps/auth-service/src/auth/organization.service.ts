@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import Stripe from 'stripe';
 import { RpcErrors, UserRole, buildPaginatedResult, getSkipTake } from '@app/common';
 import type { PaginatedResult } from '@app/common';
@@ -385,10 +385,17 @@ export class OrganizationService {
   async listMembers(
     payload: ListOrgMembersPayload,
   ): Promise<PaginatedResult<OrgMemberView>> {
-    await this.requireOrgAdmin({
-      organizationId: payload.organizationId,
-      userId: payload.requestedByUserId,
+    const membership = await this.members.findOne({
+      where: {
+        organizationId: payload.organizationId,
+        userId: payload.requestedByUserId,
+      },
+      select: { id: true },
     });
+    if (!membership) {
+      return RpcErrors.forbidden('You are not a member of this workspace');
+    }
+
     const page = Math.max(1, Number(payload.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(payload.limit) || 20));
     const { skip, take } = getSkipTake(page, limit);
@@ -412,11 +419,21 @@ export class OrganizationService {
     }
 
     const [rows, total] = await qb.getManyAndCount();
+    const userIds = rows.map((row) => row.userId);
+    const emails = userIds.length
+      ? await this.users.find({
+          where: { id: In(userIds) },
+          select: { id: true, email: true },
+        })
+      : [];
+    const emailById = new Map(emails.map((user) => [user.id, user.email]));
+
     return buildPaginatedResult(
       rows.map((row) => ({
         userId: row.userId,
         role: row.role,
         joinedAt: row.createdAt.toISOString(),
+        email: emailById.get(row.userId) ?? null,
       })),
       total,
       page,

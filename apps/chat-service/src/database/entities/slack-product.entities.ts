@@ -174,6 +174,24 @@ export class AppExternalRef {
   @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
 }
 
+@Entity({ name: 'user_notifications' })
+@Index(['userId', 'createdAt'])
+export class UserNotification {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column('uuid') organizationId!: string;
+  @Column('uuid') userId!: string;
+  @Column('uuid') actorId!: string;
+  @Column({ type: 'varchar', length: 40 }) type!: string;
+  @Column({ type: 'varchar', length: 200 }) title!: string;
+  @Column({ type: 'varchar', length: 500, default: '' }) body!: string;
+  @Column({ type: 'uuid', nullable: true }) conversationId!: string | null;
+  @Column({ type: 'uuid', nullable: true }) listId!: string | null;
+  @Column({ type: 'uuid', nullable: true }) listItemId!: string | null;
+  @Column({ type: 'jsonb', default: {} }) meta!: Record<string, unknown>;
+  @Column({ type: 'timestamptz', nullable: true }) readAt!: Date | null;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
+}
+
 export const SLACK_PRODUCT_ENTITIES = [
   ChannelCanvas,
   ChannelList,
@@ -186,4 +204,5 @@ export const SLACK_PRODUCT_ENTITIES = [
   InstalledApp,
   AppOauthConnection,
   AppExternalRef,
+  UserNotification,
 ];

@@ -56,6 +56,7 @@ import { AddReminderCompleted1743000018000 } from './migrations/1743000018000-Ad
 import { AddSharedChannelLinks1743000019000 } from './migrations/1743000019000-AddSharedChannelLinks';
 import { AddAppOauthConnections1743000020000 } from './migrations/1743000020000-AddAppOauthConnections';
 import { ThreadFollowsIdDefault1743000021000 } from './migrations/1743000021000-ThreadFollowsIdDefault';
+import { AddUserNotifications1743000022000 } from './migrations/1743000022000-AddUserNotifications';
 
 config({
   path: [
@@ -128,6 +129,7 @@ export default new DataSource({
     AddSharedChannelLinks1743000019000,
     AddAppOauthConnections1743000020000,
     ThreadFollowsIdDefault1743000021000,
+    AddUserNotifications1743000022000,
   ],
   synchronize: false,
 });

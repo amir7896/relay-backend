@@ -113,6 +113,10 @@ export const CHAT_PATTERNS = {
   CREATE_CHANNEL_LIST_ITEM: 'chat.create_channel_list_item',
   UPDATE_CHANNEL_LIST_ITEM: 'chat.update_channel_list_item',
   DELETE_CHANNEL_LIST_ITEM: 'chat.delete_channel_list_item',
+  LIST_USER_NOTIFICATIONS: 'chat.list_user_notifications',
+  MARK_USER_NOTIFICATION_READ: 'chat.mark_user_notification_read',
+  MARK_ALL_USER_NOTIFICATIONS_READ: 'chat.mark_all_user_notifications_read',
+  COUNT_UNREAD_USER_NOTIFICATIONS: 'chat.count_unread_user_notifications',
   LIST_CLIPS: 'chat.list_clips',
   CREATE_CLIP: 'chat.create_clip',
   DELETE_CLIP: 'chat.delete_clip',
@@ -1088,6 +1092,10 @@ export interface ChannelCanvasView { id: string; organizationId: string; convers
 export interface PutChannelCanvasPayload extends ConversationActorPayload { title?: string; body?: string }
 export type ChannelListItemStatus = 'todo' | 'doing' | 'done';
 export interface ChannelListItemView { id: string; listId: string; title: string; status: ChannelListItemStatus; assigneeId: string | null; sortOrder: number; createdAt: string }
+export interface ChannelListItemMutationResult {
+  item: ChannelListItemView;
+  notification: UserNotificationView | null;
+}
 export interface ChannelListView { id: string; organizationId: string; conversationId: string; name: string; createdBy: string; createdAt: string; items: ChannelListItemView[] }
 export interface CreateChannelListPayload extends ConversationActorPayload { name: string }
 export interface UpdateChannelListPayload extends ConversationActorPayload { listId: string; name?: string }
@@ -1095,6 +1103,36 @@ export interface DeleteChannelListPayload extends ConversationActorPayload { lis
 export interface CreateChannelListItemPayload extends ConversationActorPayload { listId: string; title: string; status?: ChannelListItemStatus; assigneeId?: string | null; sortOrder?: number }
 export interface UpdateChannelListItemPayload extends Omit<CreateChannelListItemPayload, 'title'> { itemId: string; title?: string }
 export interface DeleteChannelListItemPayload extends ConversationActorPayload { listId: string; itemId: string }
+export type UserNotificationType = 'list_assignment';
+export interface UserNotificationView {
+  id: string;
+  organizationId: string;
+  userId: string;
+  actorId: string;
+  type: UserNotificationType | string;
+  title: string;
+  body: string;
+  conversationId: string | null;
+  listId: string | null;
+  listItemId: string | null;
+  meta: Record<string, unknown>;
+  readAt: string | null;
+  createdAt: string;
+  unread: boolean;
+}
+export interface ListUserNotificationsPayload {
+  actorId: string;
+  page?: number;
+  limit?: number;
+  unreadOnly?: boolean;
+}
+export interface MarkUserNotificationReadPayload {
+  actorId: string;
+  notificationId: string;
+}
+export interface MarkAllUserNotificationsReadPayload {
+  actorId: string;
+}
 export interface ChannelClipView { id: string; organizationId: string; conversationId: string; messageId: string | null; createdBy: string; mediaUrl: string; mediaType: 'audio' | 'video'; durationSeconds: number | null; createdAt: string }
 export interface CreateChannelClipPayload extends ConversationActorPayload { messageId?: string | null; mediaUrl: string; mediaType: 'audio' | 'video'; durationSeconds?: number | null }
 export interface DeleteChannelClipPayload extends ConversationActorPayload { clipId: string }

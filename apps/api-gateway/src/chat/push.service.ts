@@ -173,6 +173,37 @@ export class PushService {
     );
   }
 
+  /**
+   * Task assignment push — respects DND / mode none, but still notifies online
+   * users (tab may be backgrounded).
+   */
+  async notifyAssignment(input: {
+    recipientId: string;
+    senderId: string;
+    title: string;
+    body: string;
+    conversationId: string;
+    notificationId: string;
+  }): Promise<void> {
+    if (!this.enabled) return;
+    if (!input.recipientId || input.recipientId === input.senderId) return;
+
+    const prefs = await this.prefs.get(input.recipientId);
+    if (prefs.mode === 'none') return;
+    if (prefs.respectStatus) {
+      const mode = await this.presence.getManualMode(input.recipientId);
+      if (mode === PresenceStatus.DND) return;
+    }
+
+    await this.sendToUser(input.recipientId, {
+      title: input.title,
+      body: input.body,
+      conversationId: input.conversationId,
+      type: 'list_assignment',
+      notificationId: input.notificationId,
+    });
+  }
+
   private async sendToUser(
     userId: string,
     payload: {
@@ -183,6 +214,7 @@ export class PushService {
       callId?: string;
       media?: string;
       kind?: string;
+      notificationId?: string;
     },
   ): Promise<void> {
     const subs = await this.readAll(userId);
