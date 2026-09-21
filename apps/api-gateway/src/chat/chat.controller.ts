@@ -68,6 +68,7 @@ import {
   AddChannelBookmarkDto,
   AddMembersDto,
   BlockUserDto,
+  BookmarkCollectionNameDto,
   ChatPageQueryDto,
   CreateChannelInviteDto,
   EmailChannelInviteDto,
@@ -89,6 +90,7 @@ import {
   ListMediaQueryDto,
   MarkSeenDto,
   MarkUnreadDto,
+  MoveBookmarkDto,
   MuteConversationDto,
   PinConversationDto,
   PinMessageDto,
@@ -418,7 +420,12 @@ export class ChatController {
   @Patch('presence')
   async setMyPresence(
     @CurrentUser() user: AuthenticatedUser,
-    @Body() body: { status?: string; customStatus?: string | null },
+    @Body()
+    body: {
+      status?: string;
+      customStatus?: string | null;
+      statusClearsAt?: string | null;
+    },
   ) {
     const allowed = new Set([
       PresenceStatus.ONLINE,
@@ -430,10 +437,19 @@ export class ChatController {
     if (!allowed.has(status)) {
       throw new BadRequestException('Invalid presence status');
     }
+    let statusClearsAt: string | null | undefined = body.statusClearsAt;
+    if (statusClearsAt !== undefined && statusClearsAt !== null) {
+      const parsed = new Date(statusClearsAt);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new BadRequestException('statusClearsAt must be a valid date');
+      }
+      statusClearsAt = parsed.toISOString();
+    }
     const data = await this.presence.setStatus(
       user.id,
       status,
       body.customStatus,
+      statusClearsAt,
     );
     this.chatGateway.emitPresenceUpdate(data);
     return { message: 'Presence updated', data };
@@ -969,6 +985,7 @@ export class ChatController {
         user.id,
         PresenceStatus.ONLINE,
         result.customStatus ?? null,
+        result.customStatus ? undefined : null,
       );
       this.chatGateway.emitPresenceUpdate(presence);
       return {
@@ -992,12 +1009,16 @@ export class ChatController {
     if (!messageResult) {
       throw new BadRequestAppException('Slash command produced no message');
     }
-    const { recipientIds, ...message } = messageResult;
-    this.chatGateway.broadcastMessage(message, recipientIds);
+    const { recipientIds, ...message } = messageResult as any;
+    this.chatGateway.broadcastMessage(message, recipientIds ?? []);
     this.dispatchOutgoingWebhooksForMessage(message);
     return {
       message: 'Slash command executed',
-      data: { kind: 'message' as const, message },
+      data: {
+        kind: 'message' as const,
+        message,
+        ephemeral: result.ephemeral ?? null,
+      },
     };
   }
 
@@ -1547,13 +1568,80 @@ export class ChatController {
     @CurrentUser() user: AuthenticatedUser,
     @Query() query: ListBookmarksQueryDto,
   ) {
+    const collectionRaw = query.collectionId?.trim();
+    const collectionId =
+      collectionRaw === 'none'
+        ? null
+        : collectionRaw || undefined;
     const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_BOOKMARKS, {
       actorId: user.id,
       page: query.page,
       limit: query.limit,
       conversationId: query.conversationId?.trim() || undefined,
+      collectionId,
     });
     return { message: 'Bookmarks retrieved', data };
+  }
+
+  @Get('bookmark-collections')
+  async listBookmarkCollections(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.LIST_BOOKMARK_COLLECTIONS,
+      { actorId: user.id },
+    );
+    return { message: 'Bookmark collections retrieved', data };
+  }
+
+  @Post('bookmark-collections')
+  @HttpCode(HttpStatus.CREATED)
+  async createBookmarkCollection(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: BookmarkCollectionNameDto,
+  ) {
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.CREATE_BOOKMARK_COLLECTION,
+      { actorId: user.id, name: dto.name },
+    );
+    return { message: 'Bookmark collection created', data };
+  }
+
+  @Patch('bookmark-collections/:collectionId')
+  async updateBookmarkCollection(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('collectionId', ParseUuidPipe) collectionId: string,
+    @Body() dto: BookmarkCollectionNameDto,
+  ) {
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.UPDATE_BOOKMARK_COLLECTION,
+      { actorId: user.id, collectionId, name: dto.name },
+    );
+    return { message: 'Bookmark collection updated', data };
+  }
+
+  @Delete('bookmark-collections/:collectionId')
+  async deleteBookmarkCollection(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('collectionId', ParseUuidPipe) collectionId: string,
+  ) {
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.DELETE_BOOKMARK_COLLECTION,
+      { actorId: user.id, collectionId },
+    );
+    return { message: 'Bookmark collection deleted', data };
+  }
+
+  @Patch('bookmarks/:messageId/collection')
+  async moveBookmark(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('messageId', ParseUuidPipe) messageId: string,
+    @Body() dto: MoveBookmarkDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.MOVE_BOOKMARK, {
+      actorId: user.id,
+      messageId,
+      collectionId: dto.collectionId === undefined ? null : dto.collectionId,
+    });
+    return { message: 'Bookmark moved', data };
   }
 
   @Get('threads')
@@ -1636,6 +1724,7 @@ export class ChatController {
     const data = await this.proxy.sendChat(CHAT_PATTERNS.SAVE_BOOKMARK, {
       actorId: user.id,
       messageId: dto.messageId,
+      collectionId: dto.collectionId,
     });
     return { message: 'Message saved', data };
   }

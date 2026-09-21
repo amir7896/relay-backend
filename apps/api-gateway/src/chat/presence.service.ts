@@ -6,6 +6,7 @@ import type { ConversationView, PresenceView } from '@app/contracts';
 const ONLINE_TTL_SECONDS = 45;
 const SOCKETS_TTL_SECONDS = 86_400;
 const MODE_TTL_SECONDS = 86_400 * 7;
+const CLEAR_SCHEDULE_KEY = 'chat:presence:status-clear-zset';
 
 const MANUAL_STATUSES = new Set<PresenceStatus>([
   PresenceStatus.AWAY,
@@ -44,12 +45,16 @@ export class PresenceService {
     await this.redis.del(this.onlineKey(userId));
     const lastSeenAt = new Date().toISOString();
     await this.redis.set(this.lastSeenKey(userId), lastSeenAt);
-    const customStatus = await this.redis.get(this.customKey(userId));
+    const [customStatus, clearsAt] = await Promise.all([
+      this.redis.get(this.customKey(userId)),
+      this.redis.get(this.clearsAtKey(userId)),
+    ]);
     return {
       userId,
       status: PresenceStatus.OFFLINE,
       lastSeenAt,
       customStatus: customStatus || null,
+      statusClearsAt: clearsAt || null,
     };
   }
 
@@ -64,6 +69,7 @@ export class PresenceService {
     userId: string,
     status: PresenceStatus,
     customStatus?: string | null,
+    statusClearsAt?: string | null,
   ): Promise<PresenceView> {
     if (status === PresenceStatus.OFFLINE) {
       return this.getPresence(userId);
@@ -94,7 +100,43 @@ export class PresenceService {
       }
     }
 
+    if (statusClearsAt !== undefined) {
+      await this.setStatusClearsAt(userId, statusClearsAt);
+    }
+
     return this.getPresence(userId);
+  }
+
+  /**
+   * Clears custom status + manual availability when the scheduled time is due.
+   * Returns updated presence views for broadcasting.
+   */
+  async clearDueStatuses(limit = 40): Promise<PresenceView[]> {
+    const now = Date.now();
+    const due = await this.redis.zrangebyscore(
+      CLEAR_SCHEDULE_KEY,
+      0,
+      now,
+      'LIMIT',
+      0,
+      limit,
+    );
+    if (!due.length) return [];
+
+    const cleared: PresenceView[] = [];
+    for (const userId of due) {
+      const score = await this.redis.zscore(CLEAR_SCHEDULE_KEY, userId);
+      if (score === null || Number(score) > now) continue;
+      await this.redis
+        .multi()
+        .zrem(CLEAR_SCHEDULE_KEY, userId)
+        .del(this.clearsAtKey(userId))
+        .del(this.customKey(userId))
+        .del(this.modeKey(userId))
+        .exec();
+      cleared.push(await this.getPresence(userId));
+    }
+    return cleared;
   }
 
   async getPresence(userId: string): Promise<PresenceView> {
@@ -105,6 +147,7 @@ export class PresenceService {
         status: PresenceStatus.OFFLINE,
         lastSeenAt: null,
         customStatus: null,
+        statusClearsAt: null,
       }
     );
   }
@@ -153,15 +196,17 @@ export class PresenceService {
       pipeline.get(this.lastSeenKey(userId));
       pipeline.get(this.modeKey(userId));
       pipeline.get(this.customKey(userId));
+      pipeline.get(this.clearsAtKey(userId));
     }
     const replies = await pipeline.exec();
 
     userIds.forEach((userId, index) => {
-      const base = index * 4;
+      const base = index * 5;
       const onlineReply = replies?.[base];
       const lastSeenReply = replies?.[base + 1];
       const modeReply = replies?.[base + 2];
       const customReply = replies?.[base + 3];
+      const clearsReply = replies?.[base + 4];
       const isOnline = Number(onlineReply?.[1] ?? 0) === 1;
       const lastSeenAt =
         typeof lastSeenReply?.[1] === 'string' ? lastSeenReply[1] : null;
@@ -169,6 +214,8 @@ export class PresenceService {
         typeof modeReply?.[1] === 'string' ? modeReply[1] : null;
       const customStatus =
         typeof customReply?.[1] === 'string' ? customReply[1] : null;
+      const statusClearsAt =
+        typeof clearsReply?.[1] === 'string' ? clearsReply[1] : null;
 
       let status = PresenceStatus.OFFLINE;
       if (isOnline) {
@@ -184,10 +231,40 @@ export class PresenceService {
         status,
         lastSeenAt: isOnline ? null : lastSeenAt,
         customStatus: customStatus || null,
+        statusClearsAt: statusClearsAt || null,
       });
     });
 
     return result;
+  }
+
+  private async setStatusClearsAt(
+    userId: string,
+    statusClearsAt: string | null,
+  ): Promise<void> {
+    if (!statusClearsAt) {
+      await this.redis
+        .multi()
+        .del(this.clearsAtKey(userId))
+        .zrem(CLEAR_SCHEDULE_KEY, userId)
+        .exec();
+      return;
+    }
+    const at = new Date(statusClearsAt);
+    if (Number.isNaN(at.getTime())) {
+      return;
+    }
+    const iso = at.toISOString();
+    const score = at.getTime();
+    const ttlSeconds = Math.max(
+      60,
+      Math.ceil((score - Date.now()) / 1000) + MODE_TTL_SECONDS,
+    );
+    await this.redis
+      .multi()
+      .set(this.clearsAtKey(userId), iso, 'EX', ttlSeconds)
+      .zadd(CLEAR_SCHEDULE_KEY, score, userId)
+      .exec();
   }
 
   private onlineKey(userId: string): string {
@@ -208,6 +285,10 @@ export class PresenceService {
 
   private customKey(userId: string): string {
     return `chat:presence:custom:${userId}`;
+  }
+
+  private clearsAtKey(userId: string): string {
+    return `chat:presence:clearsAt:${userId}`;
   }
 
   async countOnlineUsers(): Promise<number> {

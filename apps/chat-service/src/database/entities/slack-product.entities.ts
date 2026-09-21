@@ -37,6 +37,8 @@ export class ChannelListItem {
   @Column({ type: 'varchar', length: 500 }) title!: string;
   @Column({ type: 'varchar', length: 16, default: 'todo' }) status!: 'todo' | 'doing' | 'done';
   @Column({ type: 'uuid', nullable: true }) assigneeId!: string | null;
+  @Column({ type: 'timestamptz', nullable: true }) dueAt!: Date | null;
+  @Column({ type: 'timestamptz', nullable: true }) dueRemindedAt!: Date | null;
   @Column({ type: 'int', default: 0 }) sortOrder!: number;
   @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
 }
@@ -192,6 +194,31 @@ export class UserNotification {
   @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
 }
 
+@Entity({ name: 'canvas_comments' })
+@Index(['conversationId', 'createdAt'])
+export class CanvasComment {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column('uuid') organizationId!: string;
+  @Column('uuid') conversationId!: string;
+  @Column('uuid') authorId!: string;
+  @Column({ type: 'varchar', length: 240, default: '' }) anchorText!: string;
+  @Column({ type: 'int', default: 0 }) anchorOffset!: number;
+  @Column({ type: 'varchar', length: 2000 }) body!: string;
+  @Column({ type: 'timestamptz', nullable: true }) resolvedAt!: Date | null;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
+  @UpdateDateColumn({ type: 'timestamptz' }) updatedAt!: Date;
+}
+
+@Entity({ name: 'bookmark_collections' })
+@Index(['userId', 'createdAt'])
+export class BookmarkCollection {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column('uuid') organizationId!: string;
+  @Column('uuid') userId!: string;
+  @Column({ type: 'varchar', length: 120 }) name!: string;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
+}
+
 export const SLACK_PRODUCT_ENTITIES = [
   ChannelCanvas,
   ChannelList,
@@ -205,4 +232,6 @@ export const SLACK_PRODUCT_ENTITIES = [
   AppOauthConnection,
   AppExternalRef,
   UserNotification,
+  CanvasComment,
+  BookmarkCollection,
 ];

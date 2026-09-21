@@ -19,6 +19,7 @@ import { NotificationPrefsService } from './notification-prefs.service';
 import { ScheduledMessageDispatcher } from './scheduled-message.dispatcher';
 import { StandupDispatcher } from './standup.dispatcher';
 import { ReminderDispatcher } from './reminder.dispatcher';
+import { StatusClearDispatcher } from './status-clear.dispatcher';
 import { DisappearingMessageDispatcher } from './disappearing-message.dispatcher';
 import { IntegrationsController } from './integrations.controller';
 import { AppOauthService } from './app-oauth.service';
@@ -54,6 +55,7 @@ import { AppOauthService } from './app-oauth.service';
     ScheduledMessageDispatcher,
     StandupDispatcher,
     ReminderDispatcher,
+    StatusClearDispatcher,
     DisappearingMessageDispatcher,
     AppOauthService,
   ],

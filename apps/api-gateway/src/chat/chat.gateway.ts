@@ -319,7 +319,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   async setPresence(
     @ConnectedSocket() client: AuthedSocket,
     @MessageBody()
-    body: { status?: string; customStatus?: string | null },
+    body: {
+      status?: string;
+      customStatus?: string | null;
+      statusClearsAt?: string | null;
+    },
   ) {
     const userId = this.requireUser(client);
     const allowed = new Set([
@@ -332,10 +336,19 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!allowed.has(status)) {
       return { status: 'error', message: 'Invalid presence status' };
     }
+    let statusClearsAt: string | null | undefined = body.statusClearsAt;
+    if (statusClearsAt !== undefined && statusClearsAt !== null) {
+      const parsed = new Date(statusClearsAt);
+      if (Number.isNaN(parsed.getTime())) {
+        return { status: 'error', message: 'Invalid statusClearsAt' };
+      }
+      statusClearsAt = parsed.toISOString();
+    }
     const presence = await this.presence.setStatus(
       userId,
       status,
       body.customStatus,
+      statusClearsAt,
     );
     this.broadcastPresenceView(
       presence,
@@ -956,6 +969,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       status: PresenceStatus;
       lastSeenAt: string | null;
       customStatus?: string | null;
+      statusClearsAt?: string | null;
     },
     conversationIds: string[],
   ): void {
@@ -967,6 +981,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       status: presence.status,
       lastSeenAt: presence.lastSeenAt,
       customStatus: presence.customStatus ?? null,
+      statusClearsAt: presence.statusClearsAt ?? null,
     };
     this.server.to(`user:${presence.userId}`).emit('chat:presence', payload);
     void this.fanOutPresence(payload, conversationIds);
@@ -978,6 +993,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     status: PresenceStatus;
     lastSeenAt: string | null;
     customStatus?: string | null;
+    statusClearsAt?: string | null;
   }): void {
     if (!this.server) {
       return;
@@ -987,6 +1003,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       status: presence.status,
       lastSeenAt: presence.lastSeenAt,
       customStatus: presence.customStatus ?? null,
+      statusClearsAt: presence.statusClearsAt ?? null,
     });
   }
 

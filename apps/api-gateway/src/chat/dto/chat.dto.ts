@@ -18,6 +18,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateBy,
   ValidateIf,
 } from 'class-validator';
@@ -508,6 +509,16 @@ export class SaveBookmarkDto {
   @ApiProperty({ format: 'uuid' })
   @IsUUID('4')
   messageId!: string;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    nullable: true,
+    description: 'Optional bookmark collection folder',
+  })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsUUID('4')
+  collectionId?: string | null;
 }
 
 export class ChatPageQueryDto {
@@ -535,6 +546,34 @@ export class ListBookmarksQueryDto extends ChatPageQueryDto {
   @IsOptional()
   @IsUUID('4')
   conversationId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Filter by collection id, or pass "none" for uncategorized bookmarks',
+  })
+  @IsOptional()
+  @IsString()
+  collectionId?: string;
+}
+
+export class BookmarkCollectionNameDto {
+  @ApiProperty({ example: 'Design notes' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(120)
+  name!: string;
+}
+
+export class MoveBookmarkDto {
+  @ApiPropertyOptional({
+    format: 'uuid',
+    nullable: true,
+    description: 'Target folder, or null to remove from folders',
+  })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsUUID('4')
+  collectionId?: string | null;
 }
 
 export class ListRemindersQueryDto extends ChatPageQueryDto {

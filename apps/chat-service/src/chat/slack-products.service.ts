@@ -175,6 +175,85 @@ export class SlackProductsService {
     return this.toCanvasView(row, p.conversationId);
   }
 
+  private toCanvasCommentView(row: any) {
+    return {
+      id: String(row.id),
+      conversationId: String(row.conversationId),
+      authorId: String(row.authorId),
+      anchorText: String(row.anchorText ?? ''),
+      anchorOffset: Number(row.anchorOffset) || 0,
+      body: String(row.body ?? ''),
+      resolvedAt: row.resolvedAt ? new Date(row.resolvedAt).toISOString() : null,
+      createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
+      updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : '',
+    };
+  }
+
+  async listCanvasComments(p: any) {
+    await this.requireMembership(p.conversationId, p.actorId);
+    const rows = await this.queryRows(
+      `SELECT * FROM canvas_comments
+       WHERE "organizationId"=$1 AND "conversationId"=$2
+       ORDER BY "createdAt" DESC
+       LIMIT 200`,
+      [requireOrganizationId(), p.conversationId],
+    );
+    return rows.map((row) => this.toCanvasCommentView(row));
+  }
+
+  async createCanvasComment(p: any) {
+    await this.requireMembership(p.conversationId, p.actorId);
+    const body = this.text(p.body, 'body', 2000);
+    const anchorText = String(p.anchorText ?? '').trim().slice(0, 240);
+    const anchorOffset = Math.max(0, Math.floor(Number(p.anchorOffset) || 0));
+    const row = await this.queryOne(
+      `INSERT INTO canvas_comments (
+         "organizationId","conversationId","authorId","anchorText","anchorOffset","body"
+       ) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [
+        requireOrganizationId(),
+        p.conversationId,
+        p.actorId,
+        anchorText,
+        anchorOffset,
+        body,
+      ],
+    );
+    if (!row) return RpcErrors.internal('Could not create canvas comment') as never;
+    return this.toCanvasCommentView(row);
+  }
+
+  async resolveCanvasComment(p: any) {
+    await this.requireMembership(p.conversationId, p.actorId);
+    const row = await this.queryOne(
+      `UPDATE canvas_comments
+       SET "resolvedAt"=CASE WHEN "resolvedAt" IS NULL THEN now() ELSE NULL END,
+           "updatedAt"=now()
+       WHERE id=$1 AND "conversationId"=$2 AND "organizationId"=$3
+       RETURNING *`,
+      [p.commentId, p.conversationId, requireOrganizationId()],
+    );
+    if (!row) return RpcErrors.notFound('Canvas comment') as never;
+    return this.toCanvasCommentView(row);
+  }
+
+  async deleteCanvasComment(p: any) {
+    await this.requireMembership(p.conversationId, p.actorId);
+    const existing = await this.queryOne(
+      `SELECT * FROM canvas_comments
+       WHERE id=$1 AND "conversationId"=$2 AND "organizationId"=$3`,
+      [p.commentId, p.conversationId, requireOrganizationId()],
+    );
+    if (!existing) return RpcErrors.notFound('Canvas comment') as never;
+    if (
+      String(existing.authorId) !== String(p.actorId)
+    ) {
+      return RpcErrors.forbidden('Only the author can delete this comment') as never;
+    }
+    await this.db.query(`DELETE FROM canvas_comments WHERE id=$1`, [p.commentId]);
+    return { deleted: true };
+  }
+
   async listLists(p: any) {
     await this.requireMembership(p.conversationId, p.actorId);
     const lists = await this.queryRows(
@@ -204,9 +283,27 @@ export class SlackProductsService {
         | 'doing'
         | 'done',
       assigneeId: row.assigneeId ? String(row.assigneeId) : null,
+      dueAt: row.dueAt ? new Date(row.dueAt).toISOString() : null,
       sortOrder: Number(row.sortOrder) || 0,
       createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
     };
+  }
+
+  /** undefined = leave unchanged; null = clear; string = set. */
+  private parseDueAt(value: unknown): string | null | undefined {
+    if (value === undefined) return undefined;
+    if (value === null || value === '') return null;
+    const raw = String(value).trim();
+    if (!raw) return null;
+    // Date-only (YYYY-MM-DD) → noon UTC so the calendar day is stable.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      return `${raw}T12:00:00.000Z`;
+    }
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) {
+      return RpcErrors.badRequest('dueAt must be a valid date') as never;
+    }
+    return parsed.toISOString();
   }
 
   private toListView(row: any, items: any[] = []) {
@@ -277,9 +374,18 @@ export class SlackProductsService {
       p.assigneeId === undefined
         ? null
         : await this.resolveAssigneeId(p.conversationId, p.assigneeId);
+    const dueAt = p.dueAt === undefined ? null : this.parseDueAt(p.dueAt);
     const row = await this.queryOne(
-      `INSERT INTO channel_list_items ("listId","title","status","assigneeId","sortOrder") VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [p.listId, this.text(p.title, 'title', 500), status, assigneeId, Number(p.sortOrder) || 0],
+      `INSERT INTO channel_list_items ("listId","title","status","assigneeId","dueAt","sortOrder")
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [
+        p.listId,
+        this.text(p.title, 'title', 500),
+        status,
+        assigneeId,
+        dueAt,
+        Number(p.sortOrder) || 0,
+      ],
     );
     if (!row) return RpcErrors.internal('Could not create list item') as never;
     const item = this.toListItemView(row);
@@ -292,7 +398,15 @@ export class SlackProductsService {
             item,
           })
         : null;
-    return { item, notification };
+    const channelMessage = assigneeId
+      ? await this.postAssignmentChannelAlert({
+          actorId: p.actorId,
+          conversationId: p.conversationId,
+          listId: p.listId,
+          item,
+        })
+      : null;
+    return { item, notification, channelMessage };
   }
 
   async updateListItem(p: any) {
@@ -312,15 +426,20 @@ export class SlackProductsService {
       p.assigneeId === undefined
         ? undefined
         : await this.resolveAssigneeId(p.conversationId, p.assigneeId);
+    const dueAt = this.parseDueAt(p.dueAt);
     const row = await this.queryOne(
       `UPDATE channel_list_items SET title=COALESCE($1,title), status=COALESCE($2,status),
        "assigneeId"=CASE WHEN $3::boolean THEN $4::uuid ELSE "assigneeId" END,
-       "sortOrder"=COALESCE($5,"sortOrder") WHERE id=$6 AND "listId"=$7 RETURNING *`,
+       "dueAt"=CASE WHEN $5::boolean THEN $6::timestamptz ELSE "dueAt" END,
+       "dueRemindedAt"=CASE WHEN $5::boolean THEN NULL ELSE "dueRemindedAt" END,
+       "sortOrder"=COALESCE($7,"sortOrder") WHERE id=$8 AND "listId"=$9 RETURNING *`,
       [
         p.title === undefined ? null : this.text(p.title, 'title', 500),
         p.status ?? null,
         p.assigneeId !== undefined,
         assigneeId ?? null,
+        p.dueAt !== undefined,
+        dueAt ?? null,
         p.sortOrder ?? null,
         p.itemId,
         p.listId,
@@ -340,7 +459,16 @@ export class SlackProductsService {
             item,
           })
         : null;
-    return { item, notification };
+    const channelMessage =
+      assigneeChanged && nextAssignee
+        ? await this.postAssignmentChannelAlert({
+            actorId: p.actorId,
+            conversationId: p.conversationId,
+            listId: p.listId,
+            item,
+          })
+        : null;
+    return { item, notification, channelMessage };
   }
 
   private toUserNotificationView(row: any) {
@@ -421,6 +549,107 @@ export class SlackProductsService {
     );
     if (!row) return null;
     return this.toUserNotificationView(row);
+  }
+
+  private async postAssignmentChannelAlert(input: {
+    actorId: string;
+    conversationId: string;
+    listId: string;
+    item: {
+      id: string;
+      title: string;
+      assigneeId: string | null;
+    };
+  }) {
+    if (!input.item.assigneeId) return null;
+    const context = await this.queryOne(
+      `SELECT l.name AS "listName"
+       FROM channel_lists l
+       WHERE l.id=$1 AND l."conversationId"=$2
+       LIMIT 1`,
+      [input.listId, input.conversationId],
+    );
+    const listName = String(context?.listName ?? 'List').trim() || 'List';
+    const title = String(input.item.title ?? '').trim() || 'task';
+    return this.postBotMessage({
+      organizationId: requireOrganizationId(),
+      conversationId: input.conversationId,
+      senderId: input.actorId,
+      botUsername: 'Lists',
+      mentions: [input.item.assigneeId],
+      body: `<@${input.item.assigneeId}> assigned to *${title}* in _${listName}_`,
+    });
+  }
+
+  async dispatchDueListItems() {
+    const due = await this.queryRows(
+      `SELECT i.id, i.title, i."assigneeId", i."dueAt", i.status,
+              l.id AS "listId", l.name AS "listName",
+              l."organizationId", l."conversationId",
+              c.name AS "channelName", c.type AS "channelType"
+       FROM channel_list_items i
+       JOIN channel_lists l ON l.id = i."listId"
+       JOIN conversations c ON c.id = l."conversationId"
+       WHERE i."dueAt" IS NOT NULL
+         AND i."dueAt" <= now()
+         AND i."dueRemindedAt" IS NULL
+         AND i.status <> 'done'
+         AND i."assigneeId" IS NOT NULL
+       ORDER BY i."dueAt" ASC
+       LIMIT 40`,
+    );
+    const notifications: ReturnType<SlackProductsService['toUserNotificationView']>[] =
+      [];
+    for (const row of due) {
+      const claimed = await this.queryOne(
+        `UPDATE channel_list_items
+         SET "dueRemindedAt"=now()
+         WHERE id=$1 AND "dueRemindedAt" IS NULL
+         RETURNING id`,
+        [row.id],
+      );
+      if (!claimed) continue;
+      const listName = String(row.listName ?? 'List').trim() || 'List';
+      const channelRaw = String(row.channelName ?? '').trim();
+      const channelLabel =
+        row.channelType === 'group'
+          ? `#${channelRaw.replace(/^#/, '') || 'channel'}`
+          : channelRaw || 'Direct message';
+      const itemTitle = String(row.title ?? 'Task').trim() || 'Task';
+      const title = 'Task due';
+      const body = `"${itemTitle}" in ${listName} · ${channelLabel}`.slice(
+        0,
+        500,
+      );
+      const notif = await this.queryOne(
+        `INSERT INTO user_notifications (
+           "organizationId","userId","actorId","type","title","body",
+           "conversationId","listId","listItemId","meta"
+         ) VALUES ($1,$2,$3,'list_due',$4,$5,$6,$7,$8,$9::jsonb)
+         RETURNING *`,
+        [
+          String(row.organizationId),
+          String(row.assigneeId),
+          String(row.assigneeId),
+          title,
+          body,
+          String(row.conversationId),
+          String(row.listId),
+          String(row.id),
+          JSON.stringify({
+            listName,
+            channelName: channelRaw || null,
+            channelType: row.channelType ?? null,
+            itemTitle,
+            dueAt: row.dueAt
+              ? new Date(row.dueAt).toISOString()
+              : null,
+          }),
+        ],
+      );
+      if (notif) notifications.push(this.toUserNotificationView(notif));
+    }
+    return { notifications };
   }
 
   async listUserNotifications(p: any) {
@@ -1718,7 +1947,11 @@ export class SlackProductsService {
     body: string;
     botUsername: string;
     threadRootId?: string | null;
+    mentions?: string[];
   }) {
+    const mentions = Array.isArray(opts.mentions)
+      ? opts.mentions.filter(Boolean).map(String)
+      : [];
     const saved = await this.queryOne(
       `INSERT INTO messages (
          "organizationId","conversationId","senderId",body,type,
@@ -1727,7 +1960,7 @@ export class SlackProductsService {
        ) VALUES (
          $1,$2,$3,$4,'text',
          NULL,$5,NULL,NULL,NULL,NULL,
-         '[]'::jsonb,NULL,NULL,$6,NULL
+         $7::jsonb,NULL,NULL,$6,NULL
        ) RETURNING *`,
       [
         opts.organizationId,
@@ -1736,6 +1969,7 @@ export class SlackProductsService {
         opts.body.slice(0, 4000),
         opts.threadRootId ?? null,
         opts.botUsername.slice(0, 80),
+        JSON.stringify(mentions),
       ],
     );
     if (!saved) return null;
@@ -1756,19 +1990,26 @@ export class SlackProductsService {
       senderId: String(saved.senderId),
       body: String(saved.body),
       type: 'text',
+      replyTo: null,
       replyToMessageId: null,
       threadRootId: opts.threadRootId ? String(opts.threadRootId) : null,
+      replyCount: 0,
+      attachment: null,
       attachmentUrl: null,
       attachmentMime: null,
       attachmentName: null,
       attachmentSize: null,
-      mentions: [],
+      mentions,
       reactions: [],
       linkPreview: null,
       poll: null,
       pinned: false,
+      pinnedAt: null,
+      pinnedByUserId: null,
+      forwarded: false,
       editedAt: null,
       deletedForEveryone: false,
+      undelivered: false,
       botUsername: opts.botUsername,
       botIconUrl: null,
       seenBy: [] as string[],

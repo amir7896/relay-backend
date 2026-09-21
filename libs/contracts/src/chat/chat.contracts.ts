@@ -26,6 +26,11 @@ export const CHAT_PATTERNS = {
   SAVE_BOOKMARK: 'chat.save_bookmark',
   REMOVE_BOOKMARK: 'chat.remove_bookmark',
   LIST_BOOKMARKS: 'chat.list_bookmarks',
+  LIST_BOOKMARK_COLLECTIONS: 'chat.list_bookmark_collections',
+  CREATE_BOOKMARK_COLLECTION: 'chat.create_bookmark_collection',
+  UPDATE_BOOKMARK_COLLECTION: 'chat.update_bookmark_collection',
+  DELETE_BOOKMARK_COLLECTION: 'chat.delete_bookmark_collection',
+  MOVE_BOOKMARK: 'chat.move_bookmark',
   SCHEDULE_MESSAGE: 'chat.schedule_message',
   LIST_SCHEDULED_MESSAGES: 'chat.list_scheduled_messages',
   CANCEL_SCHEDULED_MESSAGE: 'chat.cancel_scheduled_message',
@@ -105,6 +110,10 @@ export const CHAT_PATTERNS = {
   DELETE_USER_GROUP: 'chat.delete_user_group',
   GET_CANVAS: 'chat.get_canvas',
   PUT_CANVAS: 'chat.put_canvas',
+  LIST_CANVAS_COMMENTS: 'chat.list_canvas_comments',
+  CREATE_CANVAS_COMMENT: 'chat.create_canvas_comment',
+  RESOLVE_CANVAS_COMMENT: 'chat.resolve_canvas_comment',
+  DELETE_CANVAS_COMMENT: 'chat.delete_canvas_comment',
   LIST_CHANNEL_LISTS: 'chat.list_channel_lists',
   GET_CHANNEL_LIST: 'chat.get_channel_list',
   CREATE_CHANNEL_LIST: 'chat.create_channel_list',
@@ -154,6 +163,7 @@ export const CHAT_PATTERNS = {
   INGEST_APP_EVENT: 'chat.ingest_app_event',
   LIST_APP_PROJECTS: 'chat.list_app_projects',
   DISPATCH_DUE_STANDUPS: 'chat.dispatch_due_standups',
+  DISPATCH_DUE_LIST_ITEMS: 'chat.dispatch_due_list_items',
   RUN_STANDUP_NOW: 'chat.run_standup_now',
   COLLECT_STANDUP_REPLY: 'chat.collect_standup_reply',
   SUMMARIZE_STANDUP: 'chat.summarize_standup',
@@ -700,6 +710,7 @@ export interface VotePollPayload extends ConversationActorPayload {
 export interface SaveBookmarkPayload {
   actorId: string;
   messageId: string;
+  collectionId?: string | null;
 }
 
 export interface RemoveBookmarkPayload {
@@ -712,12 +723,21 @@ export interface ListBookmarksPayload {
   page: number;
   limit: number;
   conversationId?: string;
+  collectionId?: string | null;
+}
+
+export interface BookmarkCollectionView {
+  id: string;
+  name: string;
+  createdAt: string;
+  bookmarkCount: number;
 }
 
 export interface BookmarkView {
   id: string;
   conversationId: string;
   messageId: string;
+  collectionId: string | null;
   createdAt: string;
   message: MessageView;
   conversationName: string | null;
@@ -800,6 +820,8 @@ export interface PresenceView {
   status: PresenceStatus;
   lastSeenAt: string | null;
   customStatus: string | null;
+  /** ISO timestamp when custom status / availability should auto-clear. */
+  statusClearsAt?: string | null;
 }
 
 export interface BlockView {
@@ -1090,8 +1112,28 @@ export interface DeleteUserGroupPayload {
 
 export interface ChannelCanvasView { id: string; organizationId: string; conversationId: string; title: string; body: string; updatedBy: string; createdAt: string; updatedAt: string }
 export interface PutChannelCanvasPayload extends ConversationActorPayload { title?: string; body?: string }
+export interface CanvasCommentView {
+  id: string;
+  conversationId: string;
+  authorId: string;
+  anchorText: string;
+  anchorOffset: number;
+  body: string;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 export type ChannelListItemStatus = 'todo' | 'doing' | 'done';
-export interface ChannelListItemView { id: string; listId: string; title: string; status: ChannelListItemStatus; assigneeId: string | null; sortOrder: number; createdAt: string }
+export interface ChannelListItemView {
+  id: string;
+  listId: string;
+  title: string;
+  status: ChannelListItemStatus;
+  assigneeId: string | null;
+  dueAt: string | null;
+  sortOrder: number;
+  createdAt: string;
+}
 export interface ChannelListItemMutationResult {
   item: ChannelListItemView;
   notification: UserNotificationView | null;
@@ -1100,8 +1142,18 @@ export interface ChannelListView { id: string; organizationId: string; conversat
 export interface CreateChannelListPayload extends ConversationActorPayload { name: string }
 export interface UpdateChannelListPayload extends ConversationActorPayload { listId: string; name?: string }
 export interface DeleteChannelListPayload extends ConversationActorPayload { listId: string }
-export interface CreateChannelListItemPayload extends ConversationActorPayload { listId: string; title: string; status?: ChannelListItemStatus; assigneeId?: string | null; sortOrder?: number }
-export interface UpdateChannelListItemPayload extends Omit<CreateChannelListItemPayload, 'title'> { itemId: string; title?: string }
+export interface CreateChannelListItemPayload extends ConversationActorPayload {
+  listId: string;
+  title: string;
+  status?: ChannelListItemStatus;
+  assigneeId?: string | null;
+  dueAt?: string | null;
+  sortOrder?: number;
+}
+export interface UpdateChannelListItemPayload extends Omit<CreateChannelListItemPayload, 'title'> {
+  itemId: string;
+  title?: string;
+}
 export interface DeleteChannelListItemPayload extends ConversationActorPayload { listId: string; itemId: string }
 export type UserNotificationType = 'list_assignment';
 export interface UserNotificationView {

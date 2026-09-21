@@ -81,6 +81,53 @@ export class SlackProductsController {
     this.chatGateway.broadcastCanvas(data);
     return { message: 'Canvas saved', data };
   }
+  @Get('conversations/:id/canvas/comments')
+  listCanvasComments(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    return this.wrap(
+      'Canvas comments retrieved',
+      CHAT_PATTERNS.LIST_CANVAS_COMMENTS,
+      this.payload(u, id),
+    );
+  }
+  @Post('conversations/:id/canvas/comments')
+  createCanvasComment(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() b: Record<string, unknown>,
+  ) {
+    return this.wrap(
+      'Canvas comment created',
+      CHAT_PATTERNS.CREATE_CANVAS_COMMENT,
+      this.payload(u, id, b),
+    );
+  }
+  @Post('conversations/:id/canvas/comments/:commentId/resolve')
+  resolveCanvasComment(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('commentId', ParseUuidPipe) commentId: string,
+  ) {
+    return this.wrap(
+      'Canvas comment updated',
+      CHAT_PATTERNS.RESOLVE_CANVAS_COMMENT,
+      this.payload(u, id, { commentId }),
+    );
+  }
+  @Delete('conversations/:id/canvas/comments/:commentId')
+  deleteCanvasComment(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('commentId', ParseUuidPipe) commentId: string,
+  ) {
+    return this.wrap(
+      'Canvas comment deleted',
+      CHAT_PATTERNS.DELETE_CANVAS_COMMENT,
+      this.payload(u, id, { commentId }),
+    );
+  }
   @Get('conversations/:id/lists') lists(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string) { return this.wrap('Lists retrieved', CHAT_PATTERNS.LIST_CHANNEL_LISTS, this.payload(u, id)); }
   @Post('conversations/:id/lists') createList(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Body() b: Record<string, unknown>) { return this.wrap('List created', CHAT_PATTERNS.CREATE_CHANNEL_LIST, this.payload(u, id, b)); }
   @Get('conversations/:id/lists/:listId') getList(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Param('listId', ParseUuidPipe) listId: string) { return this.wrap('List retrieved', CHAT_PATTERNS.GET_CHANNEL_LIST, this.payload(u, id, { listId })); }
@@ -96,8 +143,19 @@ export class SlackProductsController {
     const result = (await this.proxy.sendChat(
       CHAT_PATTERNS.CREATE_CHANNEL_LIST_ITEM,
       this.payload(u, id, { listId, ...b }),
-    )) as { item: Record<string, unknown>; notification?: Record<string, unknown> | null };
+    )) as {
+      item: Record<string, unknown>;
+      notification?: Record<string, unknown> | null;
+      channelMessage?: (Record<string, unknown> & {
+        conversationId: string;
+        recipientIds?: string[];
+      }) | null;
+    };
     await this.deliverAssignmentNotification(result.notification as any);
+    if (result.channelMessage) {
+      const { recipientIds, ...view } = result.channelMessage;
+      this.chatGateway.broadcastMessage(view as any, recipientIds ?? []);
+    }
     return { message: 'List item created', data: result.item };
   }
 
@@ -112,8 +170,19 @@ export class SlackProductsController {
     const result = (await this.proxy.sendChat(
       CHAT_PATTERNS.UPDATE_CHANNEL_LIST_ITEM,
       this.payload(u, id, { listId, itemId, ...b }),
-    )) as { item: Record<string, unknown>; notification?: Record<string, unknown> | null };
+    )) as {
+      item: Record<string, unknown>;
+      notification?: Record<string, unknown> | null;
+      channelMessage?: (Record<string, unknown> & {
+        conversationId: string;
+        recipientIds?: string[];
+      }) | null;
+    };
     await this.deliverAssignmentNotification(result.notification as any);
+    if (result.channelMessage) {
+      const { recipientIds, ...view } = result.channelMessage;
+      this.chatGateway.broadcastMessage(view as any, recipientIds ?? []);
+    }
     return { message: 'List item updated', data: result.item };
   }
 

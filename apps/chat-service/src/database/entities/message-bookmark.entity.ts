@@ -36,6 +36,10 @@ export class MessageBookmark {
   @Column({ type: 'uuid' })
   userId!: string;
 
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  collectionId!: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

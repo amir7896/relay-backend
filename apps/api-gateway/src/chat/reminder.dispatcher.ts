@@ -47,28 +47,64 @@ export class ReminderDispatcher implements OnModuleInit, OnModuleDestroy {
       const due = await this.proxy.sendChat<ReminderDispatchResult[]>(
         CHAT_PATTERNS.DISPATCH_DUE_REMINDERS,
         {},
+        { skipTenant: true },
       );
-      if (!Array.isArray(due) || due.length === 0) {
-        return;
+      if (Array.isArray(due) && due.length > 0) {
+        for (const reminder of due) {
+          this.chatGateway.emitReminder(reminder.userId, {
+            id: reminder.id,
+            conversationId: reminder.conversationId,
+            messageId: reminder.messageId,
+            bodySnippet: reminder.bodySnippet,
+            remindAt: reminder.remindAt,
+          });
+          void this.push.notifyOfflineRecipients({
+            recipientIds: [reminder.userId],
+            // System-style: exclude filter skips sender — use empty sentinel
+            senderId: '',
+            title: 'Reminder',
+            body: reminder.bodySnippet,
+            conversationId: reminder.conversationId,
+            mentionUserIds: [],
+            mutedRecipientIds: [],
+          });
+        }
       }
-      for (const reminder of due) {
-        this.chatGateway.emitReminder(reminder.userId, {
-          id: reminder.id,
-          conversationId: reminder.conversationId,
-          messageId: reminder.messageId,
-          bodySnippet: reminder.bodySnippet,
-          remindAt: reminder.remindAt,
-        });
-        void this.push.notifyOfflineRecipients({
-          recipientIds: [reminder.userId],
-          // System-style: exclude filter skips sender — use empty sentinel
-          senderId: '',
-          title: 'Reminder',
-          body: reminder.bodySnippet,
-          conversationId: reminder.conversationId,
-          mentionUserIds: [],
-          mutedRecipientIds: [],
-        });
+
+      const listDue = await this.proxy.sendChat<{
+        notifications?: Array<{
+          id: string;
+          userId: string;
+          actorId: string;
+          title: string;
+          body: string;
+          conversationId: string | null;
+          type?: string;
+          listId?: string | null;
+          listItemId?: string | null;
+          meta?: Record<string, unknown>;
+          readAt?: string | null;
+          createdAt?: string;
+          unread?: boolean;
+          organizationId?: string;
+        }>;
+      }>(CHAT_PATTERNS.DISPATCH_DUE_LIST_ITEMS, {}, { skipTenant: true });
+      for (const notification of listDue?.notifications ?? []) {
+        if (!notification?.userId) continue;
+        this.chatGateway.emitUserNotification(
+          notification.userId,
+          notification,
+        );
+        if (notification.conversationId) {
+          void this.push.notifyAssignment({
+            recipientId: notification.userId,
+            senderId: notification.actorId,
+            title: notification.title,
+            body: notification.body,
+            conversationId: notification.conversationId,
+            notificationId: notification.id,
+          });
+        }
       }
     } catch (error) {
       this.logger.warn(

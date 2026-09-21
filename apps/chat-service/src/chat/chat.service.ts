@@ -179,6 +179,18 @@ const BUILTIN_SLASH_COMMANDS: Array<{
   { name: 'me', description: 'Post an action line (*does something*)' },
   { name: 'status', description: 'Set your custom status (ephemeral)' },
   {
+    name: 'remind',
+    description: 'Remind yourself about a note or the latest message (/remind 1h …)',
+  },
+  {
+    name: 'poll',
+    description: 'Create a poll (/poll Question? | A | B)',
+  },
+  {
+    name: 'assign',
+    description: 'Assign a list task (/assign @name title)',
+  },
+  {
     name: 'standup',
     description: 'Reply to today’s standup, or /standup summary',
   },
@@ -2165,19 +2177,45 @@ export class ChatService {
     }
     await this.requireMembership(message.conversationId, payload.actorId);
 
+    let collectionId: string | null | undefined = payload.collectionId;
+    if (collectionId === undefined) {
+      collectionId = undefined;
+    } else if (collectionId === null || collectionId === '') {
+      collectionId = null;
+    } else {
+      const collection = await this.messageBookmarks.manager.query(
+        `SELECT id FROM bookmark_collections
+         WHERE id=$1 AND "userId"=$2 AND "organizationId"=$3 LIMIT 1`,
+        [collectionId, payload.actorId, requireOrganizationId()],
+      );
+      if (!Array.isArray(collection) || !collection[0]) {
+        return RpcErrors.notFound('Bookmark collection') as never;
+      }
+      collectionId = String(collection[0].id);
+    }
+
     const existing = await this.messageBookmarks.findOne({
       where: { messageId: message.id, userId: payload.actorId },
     });
-    const saved =
-      existing ??
-      (await this.messageBookmarks.save(
+    let saved: MessageBookmark;
+    if (existing) {
+      if (collectionId !== undefined) {
+        existing.collectionId = collectionId;
+        saved = await this.messageBookmarks.save(existing);
+      } else {
+        saved = existing;
+      }
+    } else {
+      saved = await this.messageBookmarks.save(
         this.messageBookmarks.create({
           organizationId: requireOrganizationId(),
           conversationId: message.conversationId,
           messageId: message.id,
           userId: payload.actorId,
+          collectionId: collectionId ?? null,
         }),
-      ));
+      );
+    }
 
     const conversation = await this.conversations.findOne({
       where: {
@@ -2232,6 +2270,14 @@ export class ChatService {
       await this.requireMembership(payload.conversationId, payload.actorId);
       qb.andWhere('b.conversationId = :conversationId', {
         conversationId: payload.conversationId,
+      });
+    }
+
+    if (payload.collectionId === null) {
+      qb.andWhere('b.collectionId IS NULL');
+    } else if (payload.collectionId) {
+      qb.andWhere('b.collectionId = :collectionId', {
+        collectionId: payload.collectionId,
       });
     }
 
@@ -2293,6 +2339,120 @@ export class ChatService {
     }
 
     return buildPaginatedResult(items, total, payload.page, payload.limit);
+  }
+
+  async listBookmarkCollections(payload: { actorId: string }) {
+    const rows = await this.messageBookmarks.manager.query(
+      `SELECT c.id, c.name, c."createdAt",
+              COUNT(b.id)::int AS "bookmarkCount"
+       FROM bookmark_collections c
+       LEFT JOIN message_bookmarks b
+         ON b."collectionId" = c.id AND b."userId" = c."userId"
+       WHERE c."userId"=$1 AND c."organizationId"=$2
+       GROUP BY c.id
+       ORDER BY c."createdAt" DESC`,
+      [payload.actorId, requireOrganizationId()],
+    );
+    const list = Array.isArray(rows) ? rows : [];
+    return list.map((row: any) => ({
+      id: String(row.id),
+      name: String(row.name ?? ''),
+      createdAt: row.createdAt
+        ? new Date(row.createdAt).toISOString()
+        : '',
+      bookmarkCount: Number(row.bookmarkCount) || 0,
+    }));
+  }
+
+  async createBookmarkCollection(payload: {
+    actorId: string;
+    name: string;
+  }) {
+    const name = String(payload.name ?? '').trim();
+    if (!name || name.length > 120) {
+      return RpcErrors.badRequest('name is required (max 120 characters)');
+    }
+    const rows = await this.messageBookmarks.manager.query(
+      `INSERT INTO bookmark_collections ("organizationId","userId","name")
+       VALUES ($1,$2,$3) RETURNING *`,
+      [requireOrganizationId(), payload.actorId, name],
+    );
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return RpcErrors.internal('Could not create collection');
+    return {
+      id: String(row.id),
+      name: String(row.name ?? ''),
+      createdAt: row.createdAt
+        ? new Date(row.createdAt).toISOString()
+        : '',
+      bookmarkCount: 0,
+    };
+  }
+
+  async updateBookmarkCollection(payload: {
+    actorId: string;
+    collectionId: string;
+    name: string;
+  }) {
+    const name = String(payload.name ?? '').trim();
+    if (!name || name.length > 120) {
+      return RpcErrors.badRequest('name is required (max 120 characters)');
+    }
+    const rows = await this.messageBookmarks.manager.query(
+      `UPDATE bookmark_collections SET name=$1
+       WHERE id=$2 AND "userId"=$3 AND "organizationId"=$4
+       RETURNING *`,
+      [name, payload.collectionId, payload.actorId, requireOrganizationId()],
+    );
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return RpcErrors.notFound('Bookmark collection');
+    const countRows = await this.messageBookmarks.manager.query(
+      `SELECT COUNT(*)::int AS c FROM message_bookmarks
+       WHERE "collectionId"=$1 AND "userId"=$2`,
+      [payload.collectionId, payload.actorId],
+    );
+    return {
+      id: String(row.id),
+      name: String(row.name ?? ''),
+      createdAt: row.createdAt
+        ? new Date(row.createdAt).toISOString()
+        : '',
+      bookmarkCount: Number(countRows?.[0]?.c) || 0,
+    };
+  }
+
+  async deleteBookmarkCollection(payload: {
+    actorId: string;
+    collectionId: string;
+  }) {
+    await this.messageBookmarks.manager.query(
+      `UPDATE message_bookmarks SET "collectionId"=NULL
+       WHERE "collectionId"=$1 AND "userId"=$2 AND "organizationId"=$3`,
+      [payload.collectionId, payload.actorId, requireOrganizationId()],
+    );
+    const result = await this.messageBookmarks.manager.query(
+      `DELETE FROM bookmark_collections
+       WHERE id=$1 AND "userId"=$2 AND "organizationId"=$3
+       RETURNING id`,
+      [payload.collectionId, payload.actorId, requireOrganizationId()],
+    );
+    const deleted = Array.isArray(result) && result[0] ? true : false;
+    return { deleted };
+  }
+
+  async moveBookmark(payload: {
+    actorId: string;
+    messageId: string;
+    collectionId?: string | null;
+  }) {
+    return this.saveBookmark({
+      actorId: payload.actorId,
+      messageId: payload.messageId,
+      collectionId:
+        payload.collectionId === undefined
+          ? null
+          : payload.collectionId,
+    });
   }
 
   async listPinnedMessages(payload: ConversationActorPayload) {
@@ -4726,6 +4886,18 @@ export class ChatService {
       };
     }
 
+    if (name === 'remind') {
+      return this.handleRemindSlash(payload, conversation, text);
+    }
+
+    if (name === 'poll') {
+      return this.handlePollSlash(payload, conversation, text);
+    }
+
+    if (name === 'assign') {
+      return this.handleAssignSlash(payload, conversation, text);
+    }
+
     if (name === 'standup') {
       return this.handleStandupSlash(payload, conversation, text);
     }
@@ -4851,6 +5023,262 @@ export class ChatService {
         ),
         recipientIds: this.recipientIds(conversation),
       },
+    };
+  }
+
+  private async handleRemindSlash(
+    payload: InvokeSlashCommandPayload,
+    conversation: Conversation,
+    text: string,
+  ): Promise<InvokeSlashCommandResult> {
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.toLowerCase() === 'help') {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'Usage: `/remind 30m check deploy` · `/remind 1h` (latest message) · `/remind tomorrow …` · `/remind 4h …`',
+      };
+    }
+
+    const whenMatch = trimmed.match(
+      /^(30m|1h|4h|tomorrow)\b(?:\s+(.*))?$/i,
+    );
+    if (!whenMatch) {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'Start with a time: `30m`, `1h`, `4h`, or `tomorrow`. Example: `/remind 1h review the PR`',
+      };
+    }
+    const whenToken = whenMatch[1].toLowerCase();
+    const note = (whenMatch[2] ?? '').trim();
+
+    const remindAt = new Date();
+    if (whenToken === '30m') {
+      remindAt.setMinutes(remindAt.getMinutes() + 30);
+    } else if (whenToken === '1h') {
+      remindAt.setHours(remindAt.getHours() + 1);
+    } else if (whenToken === '4h') {
+      remindAt.setHours(remindAt.getHours() + 4);
+    } else {
+      remindAt.setDate(remindAt.getDate() + 1);
+      remindAt.setHours(9, 0, 0, 0);
+      if (remindAt.getTime() < Date.now() + REMIND_MIN_DELAY_MS) {
+        remindAt.setDate(remindAt.getDate() + 1);
+      }
+    }
+
+    let messageId: string | null = null;
+    if (note) {
+      const posted = await this.sendMessage({
+        actorId: payload.actorId,
+        conversationId: conversation.id,
+        body: `⏰ Reminder: ${note}`.slice(0, 4000),
+        type: MessageType.TEXT,
+      });
+      messageId = posted.id;
+      const reminder = await this.createReminder({
+        actorId: payload.actorId,
+        conversationId: conversation.id,
+        messageId,
+        remindAt: remindAt.toISOString(),
+      });
+      return {
+        kind: 'message',
+        message: posted,
+        ephemeral: `Reminder set for ${reminder.remindAt}`,
+      };
+    }
+
+    const latest = await this.messages.findOne({
+      where: {
+        conversationId: conversation.id,
+        organizationId: requireOrganizationId(),
+        deletedForEveryoneAt: IsNull(),
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (!latest) {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'No messages to remind about. Add a note: `/remind 1h follow up with design`',
+      };
+    }
+    const reminder = await this.createReminder({
+      actorId: payload.actorId,
+      conversationId: conversation.id,
+      messageId: latest.id,
+      remindAt: remindAt.toISOString(),
+    });
+    return {
+      kind: 'ephemeral',
+      ephemeral: `Reminder set for ${reminder.remindAt} on the latest message`,
+    };
+  }
+
+  private async handlePollSlash(
+    payload: InvokeSlashCommandPayload,
+    _conversation: Conversation,
+    text: string,
+  ): Promise<InvokeSlashCommandResult> {
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.toLowerCase() === 'help') {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'Usage: `/poll Lunch spot? | Pizza | Sushi | Salad`\nOr: `/poll "Ship Friday?" Yes | No | Maybe`',
+      };
+    }
+
+    let question = '';
+    let optionsPart = '';
+    const quoted = trimmed.match(/^"([^"]+)"\s*(.*)$/);
+    if (quoted) {
+      question = quoted[1].trim();
+      optionsPart = quoted[2].trim();
+    } else if (trimmed.includes('|')) {
+      const firstPipe = trimmed.indexOf('|');
+      const before = trimmed.slice(0, firstPipe).trim();
+      optionsPart = trimmed.slice(firstPipe + 1).trim();
+      const qMark = before.lastIndexOf('?');
+      if (qMark >= 0) {
+        question = before.slice(0, qMark + 1).trim();
+        const leftover = before.slice(qMark + 1).trim();
+        if (leftover) {
+          optionsPart = `${leftover} | ${optionsPart}`;
+        }
+      } else {
+        // First segment before first | is question if it looks like one
+        const parts = trimmed.split('|').map((p) => p.trim()).filter(Boolean);
+        question = parts.shift() ?? '';
+        optionsPart = parts.join(' | ');
+      }
+    } else {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'Add options separated by `|`. Example: `/poll Favorite color? | Red | Blue | Green`',
+      };
+    }
+
+    const options = optionsPart
+      .split('|')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (!question || options.length < 2) {
+      return {
+        kind: 'ephemeral',
+        ephemeral: 'Need a question and at least 2 options separated by `|`.',
+      };
+    }
+
+    const message = await this.createPoll({
+      actorId: payload.actorId,
+      conversationId: payload.conversationId,
+      question,
+      options,
+      allowMultiple: false,
+    });
+    return { kind: 'message', message };
+  }
+
+  private async handleAssignSlash(
+    payload: InvokeSlashCommandPayload,
+    conversation: Conversation,
+    text: string,
+  ): Promise<InvokeSlashCommandResult> {
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.toLowerCase() === 'help') {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'Usage: `/assign @Name task title` — creates a list item and notifies the assignee.',
+      };
+    }
+
+    const mentionMatch = trimmed.match(/^<@([0-9a-f-]{36})>\s+(.+)$/i);
+    const nameMatch = trimmed.match(/^@?([^\s]+)\s+(.+)$/);
+    let assigneeId: string | null = null;
+    let title = '';
+
+    if (mentionMatch) {
+      assigneeId = mentionMatch[1];
+      title = mentionMatch[2].trim();
+    } else if (nameMatch) {
+      const handle = nameMatch[1].replace(/^@/, '').toLowerCase();
+      title = nameMatch[2].trim();
+      const members = conversation.members.filter((m) => !m.leftAt);
+      // Match by userId prefix or exact id
+      const byId = members.find(
+        (m) => m.userId.toLowerCase() === handle || m.userId.startsWith(handle),
+      );
+      if (byId) {
+        assigneeId = byId.userId;
+      } else {
+        return {
+          kind: 'ephemeral',
+          ephemeral:
+            'Pick an assignee with a mention from the slash menu, e.g. `/assign @Ada Ship landing page`',
+        };
+      }
+    } else {
+      return {
+        kind: 'ephemeral',
+        ephemeral: 'Usage: `/assign @Name task title`',
+      };
+    }
+
+    if (!title || title.length < 2) {
+      return {
+        kind: 'ephemeral',
+        ephemeral: 'Add a task title after the assignee.',
+      };
+    }
+
+    let lists = await this.slackProducts.listLists({
+      actorId: payload.actorId,
+      conversationId: conversation.id,
+    });
+    if (!Array.isArray(lists) || lists.length === 0) {
+      await this.slackProducts.createList({
+        actorId: payload.actorId,
+        conversationId: conversation.id,
+        name: 'Tasks',
+      });
+      lists = await this.slackProducts.listLists({
+        actorId: payload.actorId,
+        conversationId: conversation.id,
+      });
+    }
+    const list = Array.isArray(lists) ? lists[0] : null;
+    if (!list?.id) {
+      return {
+        kind: 'ephemeral',
+        ephemeral: 'Could not find or create a list in this channel.',
+      };
+    }
+
+    const result = await this.slackProducts.createListItem({
+      actorId: payload.actorId,
+      conversationId: conversation.id,
+      listId: list.id,
+      title: title.slice(0, 500),
+      assigneeId,
+      status: 'todo',
+    });
+
+    const itemTitle = result?.item?.title ?? title;
+    if (result?.channelMessage) {
+      return {
+        kind: 'message',
+        message: result.channelMessage as any,
+        ephemeral: `Assigned “${itemTitle}” in ${list.name ?? 'Tasks'}.`,
+      };
+    }
+    return {
+      kind: 'ephemeral',
+      ephemeral: `Assigned “${itemTitle}” in ${list.name ?? 'Tasks'}. Open the Lists tab to view it.`,
     };
   }
 
@@ -6863,6 +7291,7 @@ export class ChatService {
       id: bookmark.id,
       conversationId: bookmark.conversationId,
       messageId: bookmark.messageId,
+      collectionId: bookmark.collectionId ?? null,
       createdAt: bookmark.createdAt.toISOString(),
       message: this.toMessageView(
         message,

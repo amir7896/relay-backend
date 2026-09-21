@@ -222,6 +222,58 @@ export class ChatController {
     return this.withOrg(payload, () => this.chatService.listBookmarks(payload));
   }
 
+  @MessagePattern(CHAT_PATTERNS.LIST_BOOKMARK_COLLECTIONS)
+  listBookmarkCollections(@Payload() payload: { actorId: string } & TenantChatPayload) {
+    return this.withOrg(payload, () =>
+      this.chatService.listBookmarkCollections(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_BOOKMARK_COLLECTION)
+  createBookmarkCollection(
+    @Payload() payload: { actorId: string; name: string } & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.createBookmarkCollection(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UPDATE_BOOKMARK_COLLECTION)
+  updateBookmarkCollection(
+    @Payload()
+    payload: {
+      actorId: string;
+      collectionId: string;
+      name: string;
+    } & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.updateBookmarkCollection(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.DELETE_BOOKMARK_COLLECTION)
+  deleteBookmarkCollection(
+    @Payload()
+    payload: { actorId: string; collectionId: string } & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () =>
+      this.chatService.deleteBookmarkCollection(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.MOVE_BOOKMARK)
+  moveBookmark(
+    @Payload()
+    payload: {
+      actorId: string;
+      messageId: string;
+      collectionId?: string | null;
+    } & TenantChatPayload,
+  ) {
+    return this.withOrg(payload, () => this.chatService.moveBookmark(payload));
+  }
+
   @MessagePattern(CHAT_PATTERNS.LIST_PINNED_MESSAGES)
   listPinnedMessages(
     @Payload() payload: ConversationActorPayload & TenantChatPayload,
@@ -757,6 +809,10 @@ export class ChatController {
 
   @MessagePattern(CHAT_PATTERNS.GET_CANVAS) getCanvas(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getCanvas(p)); }
   @MessagePattern(CHAT_PATTERNS.PUT_CANVAS) putCanvas(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.putCanvas(p)); }
+  @MessagePattern(CHAT_PATTERNS.LIST_CANVAS_COMMENTS) listCanvasComments(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listCanvasComments(p)); }
+  @MessagePattern(CHAT_PATTERNS.CREATE_CANVAS_COMMENT) createCanvasComment(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createCanvasComment(p)); }
+  @MessagePattern(CHAT_PATTERNS.RESOLVE_CANVAS_COMMENT) resolveCanvasComment(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.resolveCanvasComment(p)); }
+  @MessagePattern(CHAT_PATTERNS.DELETE_CANVAS_COMMENT) deleteCanvasComment(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.deleteCanvasComment(p)); }
   @MessagePattern(CHAT_PATTERNS.LIST_CHANNEL_LISTS) listChannelLists(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listLists(p)); }
   @MessagePattern(CHAT_PATTERNS.GET_CHANNEL_LIST) getChannelList(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getList(p)); }
   @MessagePattern(CHAT_PATTERNS.CREATE_CHANNEL_LIST) createChannelList(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createList(p)); }
@@ -806,6 +862,7 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.INGEST_APP_EVENT) ingestAppEvent(@Payload() p: any) { return this.integrations.ingestEvent(p); }
   @MessagePattern(CHAT_PATTERNS.LIST_APP_PROJECTS) listAppProjects(@Payload() p: any) { return this.withOrg(p, () => this.integrations.listProjects(p)); }
   @MessagePattern(CHAT_PATTERNS.DISPATCH_DUE_STANDUPS) dispatchDueStandups() { return this.slackProducts.dispatchDueStandups(); }
+  @MessagePattern(CHAT_PATTERNS.DISPATCH_DUE_LIST_ITEMS) dispatchDueListItems() { return this.slackProducts.dispatchDueListItems(); }
   @MessagePattern(CHAT_PATTERNS.RUN_STANDUP_NOW) runStandupNow(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.runStandupNow(p)); }
   @MessagePattern(CHAT_PATTERNS.COLLECT_STANDUP_REPLY) collectStandupReply(@Payload() p: any) { return this.slackProducts.collectStandupReply(p); }
   @MessagePattern(CHAT_PATTERNS.SUMMARIZE_STANDUP) summarizeStandup(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.summarizeStandup(p)); }
