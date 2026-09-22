@@ -33,6 +33,7 @@ export const CHAT_PATTERNS = {
   MOVE_BOOKMARK: 'chat.move_bookmark',
   SCHEDULE_MESSAGE: 'chat.schedule_message',
   LIST_SCHEDULED_MESSAGES: 'chat.list_scheduled_messages',
+  LIST_MY_SCHEDULED_MESSAGES: 'chat.list_my_scheduled_messages',
   CANCEL_SCHEDULED_MESSAGE: 'chat.cancel_scheduled_message',
   DISPATCH_DUE_SCHEDULED: 'chat.dispatch_due_scheduled',
   UPSERT_DRAFT: 'chat.upsert_draft',
@@ -50,6 +51,7 @@ export const CHAT_PATTERNS = {
   MARK_UNREAD: 'chat.mark_unread',
   MUTE_CONVERSATION: 'chat.mute_conversation',
   PIN_CONVERSATION: 'chat.pin_conversation',
+  REORDER_PINNED_CONVERSATIONS: 'chat.reorder_pinned_conversations',
   SET_DISAPPEARING: 'chat.set_disappearing',
   EXPIRE_DUE_MESSAGES: 'chat.expire_due_messages',
   DELETE_MESSAGE: 'chat.delete_message',
@@ -110,6 +112,7 @@ export const CHAT_PATTERNS = {
   DELETE_USER_GROUP: 'chat.delete_user_group',
   GET_CANVAS: 'chat.get_canvas',
   PUT_CANVAS: 'chat.put_canvas',
+  SAVE_CANVAS_YDOC: 'chat.save_canvas_ydoc',
   LIST_CANVAS_COMMENTS: 'chat.list_canvas_comments',
   CREATE_CANVAS_COMMENT: 'chat.create_canvas_comment',
   RESOLVE_CANVAS_COMMENT: 'chat.resolve_canvas_comment',
@@ -122,6 +125,9 @@ export const CHAT_PATTERNS = {
   CREATE_CHANNEL_LIST_ITEM: 'chat.create_channel_list_item',
   UPDATE_CHANNEL_LIST_ITEM: 'chat.update_channel_list_item',
   DELETE_CHANNEL_LIST_ITEM: 'chat.delete_channel_list_item',
+  LIST_CHANNEL_LIST_ITEM_COMMENTS: 'chat.list_channel_list_item_comments',
+  CREATE_CHANNEL_LIST_ITEM_COMMENT: 'chat.create_channel_list_item_comment',
+  DELETE_CHANNEL_LIST_ITEM_COMMENT: 'chat.delete_channel_list_item_comment',
   LIST_USER_NOTIFICATIONS: 'chat.list_user_notifications',
   MARK_USER_NOTIFICATION_READ: 'chat.mark_user_notification_read',
   MARK_ALL_USER_NOTIFICATIONS_READ: 'chat.mark_all_user_notifications_read',
@@ -159,6 +165,7 @@ export const CHAT_PATTERNS = {
   DISCONNECT_APP_OAUTH: 'chat.disconnect_app_oauth',
   UNFURL_APP_LINK: 'chat.unfurl_app_link',
   CREATE_APP_ISSUE_FROM_MESSAGE: 'chat.create_app_issue_from_message',
+  CREATE_APP_ISSUE_FROM_LIST_ITEM: 'chat.create_app_issue_from_list_item',
   CREATE_ZOOM_MEETING: 'chat.create_zoom_meeting',
   INGEST_APP_EVENT: 'chat.ingest_app_event',
   LIST_APP_PROJECTS: 'chat.list_app_projects',
@@ -282,7 +289,7 @@ export interface GlobalSearchHitView {
   conversation: GlobalSearchConversationView;
 }
 
-export type MediaKindFilter = 'all' | 'image' | 'file' | 'audio';
+export type MediaKindFilter = 'all' | 'image' | 'file' | 'audio' | 'video';
 
 export interface ListMediaPayload extends ConversationActorPayload {
   page: number;
@@ -412,6 +419,14 @@ export interface ScheduledMessageView {
   sentMessageId: string | null;
   error: string | null;
   createdAt: string;
+  conversationName?: string | null;
+  conversationType?: ConversationType;
+}
+
+export interface ListMyScheduledMessagesPayload {
+  actorId: string;
+  page?: number;
+  limit?: number;
 }
 
 export interface UpsertDraftPayload extends ConversationActorPayload {
@@ -519,6 +534,12 @@ export interface MuteConversationPayload extends ConversationActorPayload {
 
 export interface PinConversationPayload extends ConversationActorPayload {
   pinned: boolean;
+}
+
+export interface ReorderPinnedConversationsPayload {
+  actorId: string;
+  /** Desired Starred order (top → bottom). All IDs must already be pinned. */
+  conversationIds: string[];
 }
 
 export interface SetDisappearingPayload extends ConversationActorPayload {
@@ -789,6 +810,8 @@ export interface ConversationView {
   lastReadAt: string | null;
   muted: boolean;
   pinned: boolean;
+  /** When the actor starred this conversation (used for Starred order). */
+  pinnedAt: string | null;
   disappearingDurationSeconds: number;
   /** Private chat: current user blocked the peer. */
   blockedByMe: boolean;
@@ -1069,6 +1092,8 @@ export interface InvokeSlashCommandResult {
   ephemeral?: string;
   /** Applied by gateway via PresenceService. */
   customStatus?: string | null;
+  /** List assignment notification to deliver (Activity + push). */
+  notification?: UserNotificationView | null;
 }
 
 export interface UserGroupView {
@@ -1110,7 +1135,23 @@ export interface DeleteUserGroupPayload {
   groupId: string;
 }
 
-export interface ChannelCanvasView { id: string; organizationId: string; conversationId: string; title: string; body: string; updatedBy: string; createdAt: string; updatedAt: string }
+export interface ChannelCanvasView {
+  id: string;
+  organizationId: string;
+  conversationId: string;
+  title: string;
+  body: string;
+  /** Base64-encoded Yjs document state for collaborative editing. */
+  ydocState: string | null;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface SaveCanvasYdocPayload extends ConversationActorPayload {
+  ydocState: string;
+  title?: string;
+  body?: string;
+}
 export interface PutChannelCanvasPayload extends ConversationActorPayload { title?: string; body?: string }
 export interface CanvasCommentView {
   id: string;
@@ -1124,14 +1165,36 @@ export interface CanvasCommentView {
   updatedAt: string;
 }
 export type ChannelListItemStatus = 'todo' | 'doing' | 'done';
+export type ChannelListItemPriority =
+  | 'lowest'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'highest';
 export interface ChannelListItemView {
   id: string;
   listId: string;
   title: string;
+  description: string;
   status: ChannelListItemStatus;
+  priority: ChannelListItemPriority;
+  labels: string[];
+  estimate: number | null;
+  parentItemId: string | null;
   assigneeId: string | null;
   dueAt: string | null;
   sortOrder: number;
+  jiraKey: string | null;
+  jiraUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ChannelListItemCommentView {
+  id: string;
+  listId: string;
+  itemId: string;
+  authorId: string;
+  body: string;
   createdAt: string;
 }
 export interface ChannelListItemMutationResult {
@@ -1145,7 +1208,12 @@ export interface DeleteChannelListPayload extends ConversationActorPayload { lis
 export interface CreateChannelListItemPayload extends ConversationActorPayload {
   listId: string;
   title: string;
+  description?: string;
   status?: ChannelListItemStatus;
+  priority?: ChannelListItemPriority;
+  labels?: string[];
+  estimate?: number | null;
+  parentItemId?: string | null;
   assigneeId?: string | null;
   dueAt?: string | null;
   sortOrder?: number;
@@ -1155,7 +1223,21 @@ export interface UpdateChannelListItemPayload extends Omit<CreateChannelListItem
   title?: string;
 }
 export interface DeleteChannelListItemPayload extends ConversationActorPayload { listId: string; itemId: string }
-export type UserNotificationType = 'list_assignment';
+export interface ListChannelListItemCommentsPayload extends ConversationActorPayload {
+  listId: string;
+  itemId: string;
+}
+export interface CreateChannelListItemCommentPayload extends ConversationActorPayload {
+  listId: string;
+  itemId: string;
+  body: string;
+}
+export interface DeleteChannelListItemCommentPayload extends ConversationActorPayload {
+  listId: string;
+  itemId: string;
+  commentId: string;
+}
+export type UserNotificationType = 'list_assignment' | 'list_due';
 export interface UserNotificationView {
   id: string;
   organizationId: string;

@@ -59,6 +59,9 @@ import { ThreadFollowsIdDefault1743000021000 } from './migrations/1743000021000-
 import { AddUserNotifications1743000022000 } from './migrations/1743000022000-AddUserNotifications';
 import { AddListItemDueAt1743000023000 } from './migrations/1743000023000-AddListItemDueAt';
 import { AddListCanvasBookmarkExtras1743000024000 } from './migrations/1743000024000-AddListCanvasBookmarkExtras';
+import { AddCanvasYdocState1743000025000 } from './migrations/1743000025000-AddCanvasYdocState';
+import { AddListItemJiraFields1743000026000 } from './migrations/1743000026000-AddListItemJiraFields';
+import { AddListItemJiraLink1743000027000 } from './migrations/1743000027000-AddListItemJiraLink';
 
 config({
   path: [
@@ -134,6 +137,9 @@ export default new DataSource({
     AddUserNotifications1743000022000,
     AddListItemDueAt1743000023000,
     AddListCanvasBookmarkExtras1743000024000,
+    AddCanvasYdocState1743000025000,
+    AddListItemJiraFields1743000026000,
+    AddListItemJiraLink1743000027000,
   ],
   synchronize: false,
 });

@@ -93,40 +93,52 @@ export class SlackProductsController {
     );
   }
   @Post('conversations/:id/canvas/comments')
-  createCanvasComment(
+  async createCanvasComment(
     @CurrentUser() u: AuthenticatedUser,
     @Param('id', ParseUuidPipe) id: string,
     @Body() b: Record<string, unknown>,
   ) {
-    return this.wrap(
-      'Canvas comment created',
+    const data = (await this.proxy.sendChat(
       CHAT_PATTERNS.CREATE_CANVAS_COMMENT,
       this.payload(u, id, b),
-    );
+    )) as Record<string, unknown>;
+    this.chatGateway.broadcastCanvasComment(id, {
+      action: 'created',
+      comment: data,
+    });
+    return { message: 'Canvas comment created', data };
   }
   @Post('conversations/:id/canvas/comments/:commentId/resolve')
-  resolveCanvasComment(
+  async resolveCanvasComment(
     @CurrentUser() u: AuthenticatedUser,
     @Param('id', ParseUuidPipe) id: string,
     @Param('commentId', ParseUuidPipe) commentId: string,
   ) {
-    return this.wrap(
-      'Canvas comment updated',
+    const data = (await this.proxy.sendChat(
       CHAT_PATTERNS.RESOLVE_CANVAS_COMMENT,
       this.payload(u, id, { commentId }),
-    );
+    )) as Record<string, unknown>;
+    this.chatGateway.broadcastCanvasComment(id, {
+      action: 'updated',
+      comment: data,
+    });
+    return { message: 'Canvas comment updated', data };
   }
   @Delete('conversations/:id/canvas/comments/:commentId')
-  deleteCanvasComment(
+  async deleteCanvasComment(
     @CurrentUser() u: AuthenticatedUser,
     @Param('id', ParseUuidPipe) id: string,
     @Param('commentId', ParseUuidPipe) commentId: string,
   ) {
-    return this.wrap(
-      'Canvas comment deleted',
+    await this.proxy.sendChat(
       CHAT_PATTERNS.DELETE_CANVAS_COMMENT,
       this.payload(u, id, { commentId }),
     );
+    this.chatGateway.broadcastCanvasComment(id, {
+      action: 'deleted',
+      commentId,
+    });
+    return { message: 'Canvas comment deleted', data: { id: commentId } };
   }
   @Get('conversations/:id/lists') lists(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string) { return this.wrap('Lists retrieved', CHAT_PATTERNS.LIST_CHANNEL_LISTS, this.payload(u, id)); }
   @Post('conversations/:id/lists') createList(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Body() b: Record<string, unknown>) { return this.wrap('List created', CHAT_PATTERNS.CREATE_CHANNEL_LIST, this.payload(u, id, b)); }
@@ -188,6 +200,50 @@ export class SlackProductsController {
 
   @Delete('conversations/:id/lists/:listId/items/:itemId') deleteItem(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Param('listId', ParseUuidPipe) listId: string, @Param('itemId', ParseUuidPipe) itemId: string) { return this.wrap('List item deleted', CHAT_PATTERNS.DELETE_CHANNEL_LIST_ITEM, this.payload(u, id, { listId, itemId })); }
 
+  @Get('conversations/:id/lists/:listId/items/:itemId/comments')
+  listItemComments(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('listId', ParseUuidPipe) listId: string,
+    @Param('itemId', ParseUuidPipe) itemId: string,
+  ) {
+    return this.wrap(
+      'List item comments retrieved',
+      CHAT_PATTERNS.LIST_CHANNEL_LIST_ITEM_COMMENTS,
+      this.payload(u, id, { listId, itemId }),
+    );
+  }
+
+  @Post('conversations/:id/lists/:listId/items/:itemId/comments')
+  createItemComment(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('listId', ParseUuidPipe) listId: string,
+    @Param('itemId', ParseUuidPipe) itemId: string,
+    @Body() b: Record<string, unknown>,
+  ) {
+    return this.wrap(
+      'List item comment created',
+      CHAT_PATTERNS.CREATE_CHANNEL_LIST_ITEM_COMMENT,
+      this.payload(u, id, { listId, itemId, ...b }),
+    );
+  }
+
+  @Delete('conversations/:id/lists/:listId/items/:itemId/comments/:commentId')
+  deleteItemComment(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('listId', ParseUuidPipe) listId: string,
+    @Param('itemId', ParseUuidPipe) itemId: string,
+    @Param('commentId', ParseUuidPipe) commentId: string,
+  ) {
+    return this.wrap(
+      'List item comment deleted',
+      CHAT_PATTERNS.DELETE_CHANNEL_LIST_ITEM_COMMENT,
+      this.payload(u, id, { listId, itemId, commentId }),
+    );
+  }
+
   @Get('notifications')
   listNotifications(
     @CurrentUser() u: AuthenticatedUser,
@@ -232,7 +288,30 @@ export class SlackProductsController {
     });
   }
   @Get('conversations/:id/clips') clips(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string) { return this.wrap('Clips retrieved', CHAT_PATTERNS.LIST_CLIPS, this.payload(u, id)); }
-  @Post('conversations/:id/clips') createClip(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Body() b: Record<string, unknown>) { return this.wrap('Clip created', CHAT_PATTERNS.CREATE_CLIP, this.payload(u, id, b)); }
+  @Post('conversations/:id/clips')
+  async createClip(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() b: Record<string, unknown>,
+  ) {
+    const result = (await this.proxy.sendChat(
+      CHAT_PATTERNS.CREATE_CLIP,
+      this.payload(u, id, b),
+    )) as {
+      clip?: Record<string, unknown>;
+      channelMessage?: (Record<string, unknown> & {
+        conversationId: string;
+        recipientIds?: string[];
+      }) | null;
+    } & Record<string, unknown>;
+
+    const clip = result.clip ?? result;
+    if (result.channelMessage) {
+      const { recipientIds, ...view } = result.channelMessage;
+      this.chatGateway.broadcastMessage(view as any, recipientIds ?? []);
+    }
+    return { message: 'Clip created', data: clip };
+  }
   @Delete('conversations/:id/clips/:clipId')
   async deleteClip(
     @CurrentUser() u: AuthenticatedUser,

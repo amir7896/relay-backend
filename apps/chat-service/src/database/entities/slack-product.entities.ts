@@ -15,6 +15,8 @@ export class ChannelCanvas {
   @Column('uuid') conversationId!: string;
   @Column({ type: 'varchar', length: 160, default: '' }) title!: string;
   @Column({ type: 'text', default: '' }) body!: string;
+  /** Base64 Yjs document state for CRDT collaborative editing. */
+  @Column({ type: 'text', nullable: true }) ydocState!: string | null;
   @Column('uuid') updatedBy!: string;
   @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
   @UpdateDateColumn({ type: 'timestamptz' }) updatedAt!: Date;
@@ -35,11 +37,30 @@ export class ChannelListItem {
   @PrimaryGeneratedColumn('uuid') id!: string;
   @Column('uuid') listId!: string;
   @Column({ type: 'varchar', length: 500 }) title!: string;
+  @Column({ type: 'text', default: '' }) description!: string;
   @Column({ type: 'varchar', length: 16, default: 'todo' }) status!: 'todo' | 'doing' | 'done';
+  @Column({ type: 'varchar', length: 16, default: 'medium' })
+  priority!: 'lowest' | 'low' | 'medium' | 'high' | 'highest';
+  @Column({ type: 'jsonb', default: [] }) labels!: string[];
+  @Column({ type: 'int', nullable: true }) estimate!: number | null;
+  @Column({ type: 'uuid', nullable: true }) parentItemId!: string | null;
   @Column({ type: 'uuid', nullable: true }) assigneeId!: string | null;
   @Column({ type: 'timestamptz', nullable: true }) dueAt!: Date | null;
   @Column({ type: 'timestamptz', nullable: true }) dueRemindedAt!: Date | null;
   @Column({ type: 'int', default: 0 }) sortOrder!: number;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
+  @UpdateDateColumn({ type: 'timestamptz' }) updatedAt!: Date;
+}
+
+@Entity({ name: 'channel_list_item_comments' })
+export class ChannelListItemComment {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column('uuid') organizationId!: string;
+  @Column('uuid') conversationId!: string;
+  @Column('uuid') listId!: string;
+  @Column('uuid') itemId!: string;
+  @Column('uuid') authorId!: string;
+  @Column({ type: 'varchar', length: 4000 }) body!: string;
   @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
 }
 
@@ -223,6 +244,7 @@ export const SLACK_PRODUCT_ENTITIES = [
   ChannelCanvas,
   ChannelList,
   ChannelListItem,
+  ChannelListItemComment,
   ChannelClip,
   ChannelHuddle,
   ChannelWorkflow,

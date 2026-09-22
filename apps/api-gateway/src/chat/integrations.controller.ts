@@ -118,6 +118,44 @@ export class IntegrationsController {
       );
     }
     const messageId = String(body.messageId || '').trim();
+    const listId = String(body.listId || '').trim();
+    const itemId = String(body.itemId || '').trim();
+
+    if (listId && itemId) {
+      if (appKey !== 'jira') {
+        throw new BadRequestAppException('Only Jira supports push-from-list');
+      }
+      const result = (await this.proxy.sendChat(
+        CHAT_PATTERNS.CREATE_APP_ISSUE_FROM_LIST_ITEM,
+        this.payload(user, {
+          conversationId: id,
+          listId,
+          itemId,
+          appKey,
+          title: body.title,
+          body: body.body,
+          projectKey: body.projectKey,
+        }),
+      )) as CreateAppIssueResult & {
+        item?: Record<string, unknown>;
+        alreadyLinked?: boolean;
+      };
+
+      if (result.message) {
+        const { recipientIds, ...view } = result.message as {
+          recipientIds?: string[];
+        } & Record<string, unknown>;
+        this.chatGateway.broadcastMessage(view as any, recipientIds ?? []);
+      }
+
+      return {
+        message: result.alreadyLinked
+          ? 'Already linked to Jira'
+          : 'Issue created from list item',
+        data: result,
+      };
+    }
+
     if (!messageId) throw new BadRequestAppException('messageId is required');
 
     const result = (await this.proxy.sendChat(

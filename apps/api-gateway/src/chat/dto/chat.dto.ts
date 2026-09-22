@@ -597,13 +597,13 @@ export class SearchMessagesQueryDto extends ChatPageQueryDto {
 
 export class ListMediaQueryDto extends ChatPageQueryDto {
   @ApiPropertyOptional({
-    enum: ['all', 'image', 'file', 'audio'],
+    enum: ['all', 'image', 'file', 'audio', 'video'],
     default: 'all',
     description: 'Filter media by kind',
   })
   @IsOptional()
-  @IsIn(['all', 'image', 'file', 'audio'])
-  kind: 'all' | 'image' | 'file' | 'audio' = 'all';
+  @IsIn(['all', 'image', 'file', 'audio', 'video'])
+  kind: 'all' | 'image' | 'file' | 'audio' | 'video' = 'all';
 }
 
 export class CreateSidebarSectionDto {
@@ -640,6 +640,14 @@ export class UpdateSidebarSectionDto {
   @ArrayMaxSize(200)
   @IsUUID('4', { each: true })
   conversationIds?: string[];
+}
+
+export class ReorderStarredConversationsDto {
+  @ApiProperty({ type: [String] })
+  @IsArray()
+  @ArrayMaxSize(200)
+  @IsUUID('4', { each: true })
+  conversationIds!: string[];
 }
 
 export class CreateIncomingWebhookDto {

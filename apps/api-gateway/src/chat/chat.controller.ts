@@ -95,6 +95,7 @@ import {
   PinConversationDto,
   PinMessageDto,
   ReactMessageDto,
+  ReorderStarredConversationsDto,
   SaveBookmarkDto,
   ScheduleMessageDto,
   SearchMessagesQueryDto,
@@ -407,6 +408,31 @@ export class ChatController {
       senderIds,
     });
     return { message: CHAT_SUCCESS_MESSAGES.GLOBAL_SEARCHED, data };
+  }
+
+  @Post('ask')
+  @HttpCode(HttpStatus.OK)
+  async askRelay(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: { question?: string; conversationId?: string | null },
+  ) {
+    const question = String(body?.question ?? '').trim();
+    if (question.length < 3) {
+      throw new BadRequestException('Question is required');
+    }
+    const data = await this.ai.askRelay(
+      user.id,
+      question,
+      body?.conversationId ?? null,
+    );
+    return { message: 'Ask Relay answer ready', data };
+  }
+
+  @Post('digest')
+  @HttpCode(HttpStatus.OK)
+  async dailyDigest(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.ai.dailyDigest(user.id);
+    return { message: 'Daily digest ready', data };
   }
 
   @Get('presence/:userId')
@@ -971,6 +997,49 @@ export class ChatController {
     @Param('id', ParseUuidPipe) id: string,
     @Body() dto: InvokeSlashCommandDto,
   ) {
+    const raw = String(dto.raw ?? '').trim();
+    const aiMatch = raw.match(/^\/ai(?:\s+(.*))?$/i);
+    if (aiMatch) {
+      const question = String(aiMatch[1] ?? '').trim();
+      if (question.length < 3) {
+        return {
+          message: 'Slash command executed',
+          data: {
+            kind: 'ephemeral' as const,
+            ephemeral:
+              'Usage: /ai what happened in this channel?\nAsk Relay needs a short question.',
+          },
+        };
+      }
+      const ask = await this.ai.askRelay(user.id, question, id);
+      const lines = [
+        ask.poweredByAi
+          ? 'Ask Relay (this channel · AI)'
+          : 'Ask Relay (this channel)',
+        '',
+        ask.answer,
+      ];
+      if (ask.citations?.length) {
+        lines.push('', 'Sources:');
+        ask.citations.slice(0, 5).forEach((citation, index) => {
+          const label = citation.conversationName
+            ? `#${citation.conversationName.replace(/^#/, '')}`
+            : 'this channel';
+          lines.push(
+            `${index + 1}. ${label} — ${citation.bodySnippet.slice(0, 120)}`,
+          );
+        });
+      }
+      return {
+        message: 'Slash command executed',
+        data: {
+          kind: 'ephemeral' as const,
+          ephemeral: lines.join('\n'),
+          ask,
+        },
+      };
+    }
+
     const result = await this.proxy.sendChat<InvokeSlashCommandResult>(
       CHAT_PATTERNS.INVOKE_SLASH_COMMAND,
       {
@@ -979,6 +1048,24 @@ export class ChatController {
         raw: dto.raw,
       },
     );
+
+    const notification = result.notification;
+    if (notification?.userId) {
+      this.chatGateway.emitUserNotification(
+        notification.userId,
+        notification as unknown as Record<string, unknown>,
+      );
+      if (notification.conversationId) {
+        void this.push.notifyAssignment({
+          recipientId: notification.userId,
+          senderId: notification.actorId,
+          title: notification.title,
+          body: notification.body,
+          conversationId: notification.conversationId,
+          notificationId: notification.id,
+        });
+      }
+    }
 
     if (result.kind === 'status') {
       const presence = await this.presence.setStatus(
@@ -1009,8 +1096,18 @@ export class ChatController {
     if (!messageResult) {
       throw new BadRequestAppException('Slash command produced no message');
     }
-    const { recipientIds, ...message } = messageResult as any;
+    const { recipientIds, mutedRecipientIds, pushRecipientIds, ...message } =
+      messageResult as any;
     this.chatGateway.broadcastMessage(message, recipientIds ?? []);
+    void this.push.notifyOfflineRecipients({
+      recipientIds: pushRecipientIds ?? recipientIds ?? [],
+      senderId: user.id,
+      title: message.threadRootId ? 'New thread reply' : 'New Relay message',
+      body: (message.body || 'Attachment').slice(0, 120),
+      conversationId: id,
+      mentionUserIds: message.mentions ?? [],
+      mutedRecipientIds: mutedRecipientIds ?? [],
+    });
     this.dispatchOutgoingWebhooksForMessage(message);
     return {
       message: 'Slash command executed',
@@ -1794,6 +1891,23 @@ export class ChatController {
     return { message: CHAT_SUCCESS_MESSAGES.SCHEDULED_MESSAGES_FETCHED, data };
   }
 
+  @Get('scheduled-messages')
+  async listMyScheduledMessages(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.LIST_MY_SCHEDULED_MESSAGES,
+      {
+        actorId: user.id,
+        page: Number(page) || 1,
+        limit: Number(limit) || 40,
+      },
+    );
+    return { message: CHAT_SUCCESS_MESSAGES.SCHEDULED_MESSAGES_FETCHED, data };
+  }
+
   @Delete('conversations/:id/scheduled-messages/:scheduledMessageId')
   async cancelScheduledMessage(
     @CurrentUser() user: AuthenticatedUser,
@@ -1960,6 +2074,17 @@ export class ChatController {
     return { message: 'Conversation summary ready', data };
   }
 
+  @Post('conversations/:id/catch-up')
+  @HttpCode(HttpStatus.OK)
+  async catchMeUp(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() body?: { since?: string | null },
+  ) {
+    const data = await this.ai.catchMeUp(user.id, id, body?.since);
+    return { message: 'Catch-up summary ready', data };
+  }
+
   @Get('conversations/:id/smart-replies')
   async smartReplies(
     @CurrentUser() user: AuthenticatedUser,
@@ -2100,6 +2225,21 @@ export class ChatController {
     await this.presence.attachToConversations([data]);
     await this.applyLastSeenPrivacy([data]);
     return { message: CHAT_SUCCESS_MESSAGES.CONVERSATION_PINNED, data };
+  }
+
+  @Put('sidebar/starred-order')
+  async reorderStarredConversations(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: ReorderStarredConversationsDto,
+  ) {
+    const data = await this.proxy.sendChat<{ conversationIds: string[] }>(
+      CHAT_PATTERNS.REORDER_PINNED_CONVERSATIONS,
+      {
+        actorId: user.id,
+        conversationIds: dto.conversationIds,
+      },
+    );
+    return { message: CHAT_SUCCESS_MESSAGES.STARRED_REORDERED, data };
   }
 
   @Post('conversations/:id/disappearing')

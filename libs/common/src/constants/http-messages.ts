@@ -68,6 +68,7 @@ export const CHAT_SUCCESS_MESSAGES = {
   MESSAGE_DELETED: 'Message deleted successfully',
   CONVERSATION_MUTED: 'Conversation mute updated',
   CONVERSATION_PINNED: 'Conversation pin updated',
+  STARRED_REORDERED: 'Starred conversations reordered',
   DISAPPEARING_UPDATED: 'Disappearing messages updated',
   FILE_UPLOADED: 'File uploaded successfully',
   MEMBERS_ADDED: 'Members added successfully',

@@ -706,6 +706,143 @@ export class IntegrationsService {
     };
   }
 
+  async createIssueFromListItem(p: any) {
+    const appKey = String(p.appKey || 'jira');
+    if (appKey !== 'jira') {
+      return RpcErrors.badRequest('Only Jira supports push-from-list') as never;
+    }
+    const orgId = requireOrganizationId();
+    const item = await this.queryOne(
+      `SELECT i.*, l."conversationId"
+       FROM channel_list_items i
+       JOIN channel_lists l ON l.id = i."listId"
+       WHERE i.id=$1 AND i."listId"=$2 AND l."conversationId"=$3
+         AND l."organizationId"=$4
+       LIMIT 1`,
+      [p.itemId, p.listId, p.conversationId, orgId],
+    );
+    if (!item) return RpcErrors.notFound('List item') as never;
+
+    if (item.jiraKey && item.jiraUrl) {
+      return {
+        appKey,
+        externalId: String(item.jiraKey),
+        externalUrl: String(item.jiraUrl),
+        title: `${item.jiraKey}: ${item.title}`,
+        alreadyLinked: true,
+        item: {
+          id: String(item.id),
+          listId: String(item.listId),
+          title: String(item.title ?? ''),
+          description: String(item.description ?? ''),
+          status: item.status,
+          priority: item.priority,
+          labels: Array.isArray(item.labels) ? item.labels : [],
+          estimate: item.estimate ?? null,
+          parentItemId: item.parentItemId ? String(item.parentItemId) : null,
+          assigneeId: item.assigneeId ? String(item.assigneeId) : null,
+          dueAt: item.dueAt ? new Date(item.dueAt).toISOString() : null,
+          sortOrder: Number(item.sortOrder) || 0,
+          jiraKey: String(item.jiraKey),
+          jiraUrl: String(item.jiraUrl),
+          createdAt: item.createdAt ? new Date(item.createdAt).toISOString() : '',
+          updatedAt: item.updatedAt
+            ? new Date(item.updatedAt).toISOString()
+            : '',
+        },
+      };
+    }
+
+    const title =
+      String(p.title || '').trim() ||
+      String(item.title || 'Untitled').trim().slice(0, 120) ||
+      'Untitled';
+    const description = String(item.description || '').trim();
+    const body =
+      String(p.body || '').trim() ||
+      [
+        description || title,
+        '',
+        `_Pushed from Relay list item ${item.id}_`,
+        item.status ? `Status: ${item.status}` : '',
+        item.priority ? `Priority: ${item.priority}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+    const created = await this.createJiraIssue(p, title, body);
+
+    const updated = await this.queryOne(
+      `UPDATE channel_list_items
+       SET "jiraKey"=$1, "jiraUrl"=$2, "updatedAt"=now()
+       WHERE id=$3 AND "listId"=$4
+       RETURNING *`,
+      [created.externalId, created.externalUrl, item.id, item.listId],
+    );
+
+    await this.db.query(
+      `INSERT INTO app_external_refs (
+         "organizationId","appKey","conversationId","messageId",
+         "externalId","externalUrl",title,"createdBy"
+       ) VALUES ($1,$2,$3,NULL,$4,$5,$6,$7)`,
+      [
+        orgId,
+        appKey,
+        p.conversationId,
+        created.externalId,
+        created.externalUrl,
+        created.title,
+        p.actorId,
+      ],
+    ).catch(() => undefined);
+
+    const botMessage = await this.postBotReply({
+      conversationId: p.conversationId,
+      actorId: p.actorId,
+      body: `Pushed list item **${title}** to Jira: ${created.externalUrl}`,
+      botUsername: 'Jira',
+    });
+
+    return {
+      appKey,
+      ...created,
+      alreadyLinked: false,
+      item: {
+        id: String(updated?.id ?? item.id),
+        listId: String(updated?.listId ?? item.listId),
+        title: String(updated?.title ?? item.title ?? ''),
+        description: String(updated?.description ?? item.description ?? ''),
+        status: updated?.status ?? item.status,
+        priority: updated?.priority ?? item.priority,
+        labels: Array.isArray(updated?.labels)
+          ? updated.labels
+          : Array.isArray(item.labels)
+            ? item.labels
+            : [],
+        estimate: updated?.estimate ?? item.estimate ?? null,
+        parentItemId: (updated?.parentItemId ?? item.parentItemId)
+          ? String(updated?.parentItemId ?? item.parentItemId)
+          : null,
+        assigneeId: (updated?.assigneeId ?? item.assigneeId)
+          ? String(updated?.assigneeId ?? item.assigneeId)
+          : null,
+        dueAt: (updated?.dueAt ?? item.dueAt)
+          ? new Date(updated?.dueAt ?? item.dueAt).toISOString()
+          : null,
+        sortOrder: Number(updated?.sortOrder ?? item.sortOrder) || 0,
+        jiraKey: created.externalId,
+        jiraUrl: created.externalUrl,
+        createdAt: updated?.createdAt
+          ? new Date(updated.createdAt).toISOString()
+          : '',
+        updatedAt: updated?.updatedAt
+          ? new Date(updated.updatedAt).toISOString()
+          : '',
+      },
+      message: botMessage,
+    };
+  }
+
   private async createGithubIssue(p: any, title: string, body: string) {
     const conn = await this.loadConnection('github');
     if (!conn) return RpcErrors.badRequest('Connect GitHub in Apps first') as never;

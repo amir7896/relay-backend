@@ -191,6 +191,10 @@ const BUILTIN_SLASH_COMMANDS: Array<{
     description: 'Assign a list task (/assign @name title)',
   },
   {
+    name: 'ai',
+    description: 'Ask Relay about this channel (/ai what happened here?)',
+  },
+  {
     name: 'standup',
     description: 'Reply to today’s standup, or /standup summary',
   },
@@ -445,10 +449,16 @@ export class ChatService {
     });
 
     lightweight.sort((a, b) => {
-      const aPinned = pinnedAtByConversation.get(a.id) != null ? 1 : 0;
-      const bPinned = pinnedAtByConversation.get(b.id) != null ? 1 : 0;
+      const aPinnedAt = pinnedAtByConversation.get(a.id);
+      const bPinnedAt = pinnedAtByConversation.get(b.id);
+      const aPinned = aPinnedAt != null ? 1 : 0;
+      const bPinned = bPinnedAt != null ? 1 : 0;
       if (aPinned !== bPinned) {
         return bPinned - aPinned;
+      }
+      if (aPinned && bPinned && aPinnedAt && bPinnedAt) {
+        const pinDiff = bPinnedAt.getTime() - aPinnedAt.getTime();
+        if (pinDiff !== 0) return pinDiff;
       }
       const aTime = a.lastMessageAt?.getTime() ?? a.createdAt.getTime();
       const bTime = b.lastMessageAt?.getTime() ?? b.createdAt.getTime();
@@ -1284,9 +1294,16 @@ export class ChatService {
       qb.andWhere(`(m.type = :imageType OR m.attachmentMime ILIKE 'image/%')`, {
         imageType: MessageType.IMAGE,
       });
+    } else if (kind === 'video') {
+      qb.andWhere(
+        `(
+          m.attachmentMime ILIKE 'video/%'
+          OR m."attachmentName" ILIKE 'clip-video-%'
+        )`,
+      );
     } else if (kind === 'audio') {
       qb.andWhere(
-        `(m.type = :audioType OR m.attachmentMime ILIKE 'audio/%' OR m.attachmentMime = 'video/webm')`,
+        `(m.type = :audioType OR m.attachmentMime ILIKE 'audio/%')`,
         { audioType: MessageType.AUDIO },
       );
     } else if (kind === 'file') {
@@ -1298,7 +1315,7 @@ export class ChatService {
             AND (m.attachmentMime IS NULL OR (
               m.attachmentMime NOT ILIKE 'image/%'
               AND m.attachmentMime NOT ILIKE 'audio/%'
-              AND m.attachmentMime <> 'video/webm'
+              AND m.attachmentMime NOT ILIKE 'video/%'
             ))
           )
         )`,
@@ -1306,6 +1323,9 @@ export class ChatService {
           fileType: MessageType.FILE,
           excludeTypes: [MessageType.IMAGE, MessageType.AUDIO],
         },
+      );
+      qb.andWhere(
+        `(m.attachmentMime IS NULL OR m.attachmentMime NOT ILIKE 'video/%')`,
       );
     }
 
@@ -2478,7 +2498,7 @@ export class ChatService {
         { actorId: payload.actorId },
       )
       .orderBy('m.pinnedAt', 'DESC')
-      .take(10)
+      .take(100)
       .getMany();
 
     const replyMap = await this.loadReplyParents(items);
@@ -2670,6 +2690,56 @@ export class ChatService {
       take: 50,
     });
     return items.map((item) => this.toScheduledMessageView(item));
+  }
+
+  async listMyScheduledMessages(payload: {
+    actorId: string;
+    page?: number;
+    limit?: number;
+  }) {
+    const orgId = requireOrganizationId();
+    const page = Math.max(1, Number(payload.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(payload.limit) || 40));
+    const { skip, take } = getSkipTake(page, limit);
+    const [items, total] = await this.scheduledMessages.findAndCount({
+      where: {
+        organizationId: orgId,
+        senderId: payload.actorId,
+        status: 'pending',
+      },
+      order: { scheduledFor: 'ASC' },
+      skip,
+      take,
+    });
+    if (items.length === 0) {
+      return buildPaginatedResult([], total, page, limit);
+    }
+    const conversationIds = [
+      ...new Set(items.map((item) => item.conversationId)),
+    ];
+    const conversations = await this.conversations.find({
+      where: {
+        id: In(conversationIds),
+        organizationId: orgId,
+      },
+      select: { id: true, name: true, type: true },
+    });
+    const conversationById = new Map(
+      conversations.map((item) => [item.id, item]),
+    );
+    return buildPaginatedResult(
+      items.map((item) => {
+        const conversation = conversationById.get(item.conversationId);
+        return {
+          ...this.toScheduledMessageView(item),
+          conversationName: conversation?.name ?? null,
+          conversationType: conversation?.type ?? ConversationType.PRIVATE,
+        };
+      }),
+      total,
+      page,
+      limit,
+    );
   }
 
   async cancelScheduledMessage(payload: CancelScheduledMessagePayload) {
@@ -3259,6 +3329,55 @@ export class ChatService {
     membership.pinnedAt = payload.pinned ? new Date() : null;
     await this.members.save(membership);
     return this.getConversation(payload);
+  }
+
+  async reorderPinnedConversations(payload: {
+    actorId: string;
+    conversationIds: string[];
+  }): Promise<{ conversationIds: string[] }> {
+    if (!Array.isArray(payload.conversationIds) || payload.conversationIds.length > 200) {
+      return RpcErrors.badRequest('Invalid conversation list');
+    }
+    const unique = [
+      ...new Set(
+        payload.conversationIds
+          .map((id) => String(id).trim())
+          .filter((id) =>
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+              id,
+            ),
+          ),
+      ),
+    ];
+    if (unique.length === 0) {
+      return { conversationIds: [] };
+    }
+
+    const memberships = await this.members.find({
+      where: {
+        userId: payload.actorId,
+        conversationId: In(unique),
+        leftAt: IsNull(),
+      },
+    });
+    if (memberships.length !== unique.length) {
+      return RpcErrors.badRequest('All conversations must be ones you belong to');
+    }
+    const unpinned = memberships.filter((row) => !row.pinnedAt);
+    if (unpinned.length > 0) {
+      return RpcErrors.badRequest('All conversations must already be starred');
+    }
+
+    // Newer pinnedAt sorts higher — assign descending timestamps top → bottom.
+    const base = Date.now();
+    const byId = new Map(memberships.map((row) => [row.conversationId, row]));
+    for (let index = 0; index < unique.length; index += 1) {
+      const row = byId.get(unique[index]);
+      if (!row) continue;
+      row.pinnedAt = new Date(base - index * 1000);
+    }
+    await this.members.save(memberships);
+    return { conversationIds: unique };
   }
 
   async markSeen(payload: MarkSeenPayload): Promise<SeenResultView> {
@@ -4898,6 +5017,22 @@ export class ChatService {
       return this.handleAssignSlash(payload, conversation, text);
     }
 
+    if (name === 'ai') {
+      if (!text || text.trim().length < 3) {
+        return {
+          kind: 'ephemeral',
+          ephemeral:
+            'Usage: /ai what happened in this channel?\nAsk Relay answers from messages in this conversation.',
+        };
+      }
+      // Handled on the API gateway (AI lives there). Stub for /help + RPC callers.
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'Ask Relay runs in the composer — send /ai with your question from chat.',
+      };
+    }
+
     if (name === 'standup') {
       return this.handleStandupSlash(payload, conversation, text);
     }
@@ -5269,16 +5404,19 @@ export class ChatService {
     });
 
     const itemTitle = result?.item?.title ?? title;
+    const notification = result?.notification ?? null;
     if (result?.channelMessage) {
       return {
         kind: 'message',
         message: result.channelMessage as any,
         ephemeral: `Assigned “${itemTitle}” in ${list.name ?? 'Tasks'}.`,
+        notification,
       };
     }
     return {
       kind: 'ephemeral',
       ephemeral: `Assigned “${itemTitle}” in ${list.name ?? 'Tasks'}. Open the Lists tab to view it.`,
+      notification,
     };
   }
 
@@ -7123,6 +7261,7 @@ export class ChatService {
       lastReadAt: actor?.lastReadAt?.toISOString() ?? null,
       muted: Boolean(actor?.mutedAt),
       pinned: Boolean(actor?.pinnedAt),
+      pinnedAt: actor?.pinnedAt?.toISOString() ?? null,
       disappearingDurationSeconds:
         conversation.disappearingDurationSeconds ?? 0,
       blockedByMe: blockFlags.blockedByMe,

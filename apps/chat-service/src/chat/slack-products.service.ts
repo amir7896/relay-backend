@@ -57,6 +57,7 @@ const APP_CATALOG = [
   { key: 'zoom', name: 'Zoom', description: 'Start Zoom meetings from a channel.', icon: 'video', category: 'integration' as const },
 ] as const;
 const STATUSES = new Set(['todo', 'doing', 'done']);
+const PRIORITIES = new Set(['lowest', 'low', 'medium', 'high', 'highest']);
 const TRIGGERS = new Set(['message_contains', 'channel_created', 'manual']);
 const ACTIONS = new Set(['post_message', 'webhook', 'set_reminder']);
 
@@ -89,6 +90,61 @@ export class SlackProductsService {
 
   private async queryOne<T = any>(sql: string, params: unknown[] = []): Promise<T | undefined> {
     return (await this.queryRows<T>(sql, params))[0];
+  }
+
+  /** Best-effort Connect audit trail (shown in Connect panel + Analytics). */
+  private async logConnectAudit(opts: {
+    organizationId: string;
+    actorId: string;
+    action: string;
+    conversationId: string;
+    meta?: Record<string, unknown>;
+  }) {
+    try {
+      await this.db.query(
+        `INSERT INTO audit_events
+           ("organizationId","actorId",action,"targetType","targetId",meta)
+         VALUES ($1,$2,$3,'conversation',$4,$5::jsonb)`,
+        [
+          opts.organizationId,
+          opts.actorId,
+          opts.action,
+          opts.conversationId,
+          JSON.stringify(opts.meta ?? {}),
+        ],
+      );
+    } catch {
+      // Audit must never block Connect flows.
+    }
+  }
+
+  private async listConnectActivity(
+    organizationId: string,
+    conversationIds: string[],
+  ) {
+    const ids = conversationIds.filter(Boolean);
+    if (!ids.length) return [];
+    const rows = await this.queryRows(
+      `SELECT id, action, "actorId", meta, "createdAt"
+       FROM audit_events
+       WHERE "organizationId"=$1
+         AND "targetType"='conversation'
+         AND "targetId" = ANY($2::text[])
+         AND action LIKE 'connect.%'
+       ORDER BY "createdAt" DESC
+       LIMIT 40`,
+      [organizationId, ids],
+    );
+    return rows.map((row: any) => ({
+      id: String(row.id),
+      action: String(row.action),
+      actorId: String(row.actorId),
+      meta: (row.meta && typeof row.meta === 'object' ? row.meta : {}) as Record<
+        string,
+        unknown
+      >,
+      createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
+    }));
   }
 
   private async requireMembership(conversationId: string, actorId: string) {
@@ -136,6 +192,7 @@ export class SlackProductsService {
         conversationId,
         title: '',
         body: '',
+        ydocState: null,
         updatedBy: '',
         createdAt: '',
         updatedAt: '',
@@ -147,6 +204,7 @@ export class SlackProductsService {
       conversationId: String(row.conversationId ?? conversationId),
       title: String(row.title ?? ''),
       body: String(row.body ?? ''),
+      ydocState: row.ydocState ? String(row.ydocState) : null,
       updatedBy: String(row.updatedBy ?? ''),
       createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
       updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : '',
@@ -171,6 +229,37 @@ export class SlackProductsService {
        title=EXCLUDED.title, body=EXCLUDED.body, "updatedBy"=EXCLUDED."updatedBy", "updatedAt"=now()
        RETURNING *`,
       [requireOrganizationId(), p.conversationId, String(p.title ?? '').slice(0, 160), String(p.body ?? ''), p.actorId],
+    );
+    return this.toCanvasView(row, p.conversationId);
+  }
+
+  async saveCanvasYdoc(p: any) {
+    await this.requireMembership(p.conversationId, p.actorId);
+    const ydocState = String(p.ydocState ?? '');
+    if (!ydocState || ydocState.length > 5_000_000) {
+      return RpcErrors.badRequest('Invalid canvas document state') as never;
+    }
+    const title =
+      p.title === undefined ? null : String(p.title ?? '').slice(0, 160);
+    const body = p.body === undefined ? null : String(p.body ?? '');
+    const row = await this.queryOne(
+      `INSERT INTO channel_canvases ("organizationId","conversationId","title","body","ydocState","updatedBy")
+       VALUES ($1,$2,COALESCE($3,''),COALESCE($4,''),$5,$6)
+       ON CONFLICT ("organizationId","conversationId") DO UPDATE SET
+         "ydocState"=EXCLUDED."ydocState",
+         title=COALESCE($3, channel_canvases.title),
+         body=COALESCE($4, channel_canvases.body),
+         "updatedBy"=EXCLUDED."updatedBy",
+         "updatedAt"=now()
+       RETURNING *`,
+      [
+        requireOrganizationId(),
+        p.conversationId,
+        title,
+        body,
+        ydocState,
+        p.actorId,
+      ],
     );
     return this.toCanvasView(row, p.conversationId);
   }
@@ -274,19 +363,73 @@ export class SlackProductsService {
   }
 
   private toListItemView(row: any) {
+    const labelsRaw = row.labels;
+    const labels = Array.isArray(labelsRaw)
+      ? labelsRaw.map((label: unknown) => String(label)).filter(Boolean).slice(0, 12)
+      : [];
+    const priority = PRIORITIES.has(String(row.priority))
+      ? String(row.priority)
+      : 'medium';
     return {
       id: String(row.id),
       listId: String(row.listId),
       title: String(row.title ?? ''),
+      description: String(row.description ?? ''),
       status: (row.status === 'doing' || row.status === 'done' ? row.status : 'todo') as
         | 'todo'
         | 'doing'
         | 'done',
+      priority: priority as 'lowest' | 'low' | 'medium' | 'high' | 'highest',
+      labels,
+      estimate:
+        row.estimate === null || row.estimate === undefined
+          ? null
+          : Number(row.estimate),
+      parentItemId: row.parentItemId ? String(row.parentItemId) : null,
       assigneeId: row.assigneeId ? String(row.assigneeId) : null,
       dueAt: row.dueAt ? new Date(row.dueAt).toISOString() : null,
       sortOrder: Number(row.sortOrder) || 0,
+      jiraKey: row.jiraKey ? String(row.jiraKey) : null,
+      jiraUrl: row.jiraUrl ? String(row.jiraUrl) : null,
       createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
+      updatedAt: row.updatedAt
+        ? new Date(row.updatedAt).toISOString()
+        : row.createdAt
+          ? new Date(row.createdAt).toISOString()
+          : '',
     };
+  }
+
+  private parseLabels(value: unknown): string[] | undefined {
+    if (value === undefined) return undefined;
+    if (!Array.isArray(value)) {
+      return RpcErrors.badRequest('labels must be an array of strings') as never;
+    }
+    return value
+      .map((label) => String(label ?? '').trim().slice(0, 32))
+      .filter(Boolean)
+      .slice(0, 12);
+  }
+
+  private parsePriority(value: unknown): string | undefined {
+    if (value === undefined) return undefined;
+    const priority = String(value);
+    if (!PRIORITIES.has(priority)) {
+      return RpcErrors.badRequest(
+        'priority must be lowest, low, medium, high, or highest',
+      ) as never;
+    }
+    return priority;
+  }
+
+  private parseEstimate(value: unknown): number | null | undefined {
+    if (value === undefined) return undefined;
+    if (value === null || value === '') return null;
+    const num = Number(value);
+    if (!Number.isFinite(num) || num < 0 || num > 999) {
+      return RpcErrors.badRequest('estimate must be between 0 and 999') as never;
+    }
+    return Math.round(num);
   }
 
   /** undefined = leave unchanged; null = clear; string = set. */
@@ -370,18 +513,39 @@ export class SlackProductsService {
     await this.requireList(p);
     const status = p.status ?? 'todo';
     if (!STATUSES.has(status)) return RpcErrors.badRequest('status must be todo, doing, or done');
+    const priority = this.parsePriority(p.priority) ?? 'medium';
+    const labels = this.parseLabels(p.labels) ?? [];
+    const estimate = this.parseEstimate(p.estimate);
+    const description =
+      p.description === undefined ? '' : String(p.description ?? '').slice(0, 8000);
+    let parentItemId: string | null = null;
+    if (p.parentItemId) {
+      const parent = await this.queryOne(
+        `SELECT id FROM channel_list_items WHERE id=$1 AND "listId"=$2`,
+        [p.parentItemId, p.listId],
+      );
+      if (!parent) return RpcErrors.badRequest('parentItemId must be in this list') as never;
+      parentItemId = String(parent.id);
+    }
     const assigneeId =
       p.assigneeId === undefined
         ? null
         : await this.resolveAssigneeId(p.conversationId, p.assigneeId);
     const dueAt = p.dueAt === undefined ? null : this.parseDueAt(p.dueAt);
     const row = await this.queryOne(
-      `INSERT INTO channel_list_items ("listId","title","status","assigneeId","dueAt","sortOrder")
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      `INSERT INTO channel_list_items (
+         "listId","title","description","status","priority","labels","estimate",
+         "parentItemId","assigneeId","dueAt","sortOrder"
+       ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11) RETURNING *`,
       [
         p.listId,
         this.text(p.title, 'title', 500),
+        description,
         status,
+        priority,
+        JSON.stringify(labels),
+        estimate === undefined ? null : estimate,
+        parentItemId,
         assigneeId,
         dueAt,
         Number(p.sortOrder) || 0,
@@ -427,15 +591,53 @@ export class SlackProductsService {
         ? undefined
         : await this.resolveAssigneeId(p.conversationId, p.assigneeId);
     const dueAt = this.parseDueAt(p.dueAt);
+    const priority = this.parsePriority(p.priority);
+    const labels = this.parseLabels(p.labels);
+    const estimate = this.parseEstimate(p.estimate);
+    let parentItemId: string | null | undefined = undefined;
+    if (p.parentItemId !== undefined) {
+      if (p.parentItemId === null || p.parentItemId === '') {
+        parentItemId = null;
+      } else if (String(p.parentItemId) === String(p.itemId)) {
+        return RpcErrors.badRequest('Item cannot be its own parent') as never;
+      } else {
+        const parent = await this.queryOne(
+          `SELECT id FROM channel_list_items WHERE id=$1 AND "listId"=$2`,
+          [p.parentItemId, p.listId],
+        );
+        if (!parent) return RpcErrors.badRequest('parentItemId must be in this list') as never;
+        parentItemId = String(parent.id);
+      }
+    }
     const row = await this.queryOne(
-      `UPDATE channel_list_items SET title=COALESCE($1,title), status=COALESCE($2,status),
-       "assigneeId"=CASE WHEN $3::boolean THEN $4::uuid ELSE "assigneeId" END,
-       "dueAt"=CASE WHEN $5::boolean THEN $6::timestamptz ELSE "dueAt" END,
-       "dueRemindedAt"=CASE WHEN $5::boolean THEN NULL ELSE "dueRemindedAt" END,
-       "sortOrder"=COALESCE($7,"sortOrder") WHERE id=$8 AND "listId"=$9 RETURNING *`,
+      `UPDATE channel_list_items SET
+         title=COALESCE($1,title),
+         description=CASE WHEN $2::boolean THEN $3 ELSE description END,
+         status=COALESCE($4,status),
+         priority=COALESCE($5,priority),
+         labels=CASE WHEN $6::boolean THEN $7::jsonb ELSE labels END,
+         estimate=CASE WHEN $8::boolean THEN $9::int ELSE estimate END,
+         "parentItemId"=CASE WHEN $10::boolean THEN $11::uuid ELSE "parentItemId" END,
+         "assigneeId"=CASE WHEN $12::boolean THEN $13::uuid ELSE "assigneeId" END,
+         "dueAt"=CASE WHEN $14::boolean THEN $15::timestamptz ELSE "dueAt" END,
+         "dueRemindedAt"=CASE WHEN $14::boolean THEN NULL ELSE "dueRemindedAt" END,
+         "sortOrder"=COALESCE($16,"sortOrder"),
+         "updatedAt"=now()
+       WHERE id=$17 AND "listId"=$18 RETURNING *`,
       [
         p.title === undefined ? null : this.text(p.title, 'title', 500),
+        p.description !== undefined,
+        p.description === undefined
+          ? ''
+          : String(p.description ?? '').slice(0, 8000),
         p.status ?? null,
+        priority ?? null,
+        labels !== undefined,
+        JSON.stringify(labels ?? []),
+        estimate !== undefined,
+        estimate ?? null,
+        parentItemId !== undefined,
+        parentItemId ?? null,
         p.assigneeId !== undefined,
         assigneeId ?? null,
         p.dueAt !== undefined,
@@ -469,6 +671,82 @@ export class SlackProductsService {
           })
         : null;
     return { item, notification, channelMessage };
+  }
+
+  private toListItemCommentView(row: any) {
+    return {
+      id: String(row.id),
+      listId: String(row.listId),
+      itemId: String(row.itemId),
+      authorId: String(row.authorId),
+      body: String(row.body ?? ''),
+      createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
+    };
+  }
+
+  async listListItemComments(p: any) {
+    await this.requireList(p);
+    const item = await this.queryOne(
+      `SELECT id FROM channel_list_items WHERE id=$1 AND "listId"=$2`,
+      [p.itemId, p.listId],
+    );
+    if (!item) return RpcErrors.notFound('Channel list item') as never;
+    const rows = await this.queryRows(
+      `SELECT * FROM channel_list_item_comments
+       WHERE "itemId"=$1 AND "listId"=$2
+       ORDER BY "createdAt" ASC
+       LIMIT 200`,
+      [p.itemId, p.listId],
+    );
+    return rows.map((row: any) => this.toListItemCommentView(row));
+  }
+
+  async createListItemComment(p: any) {
+    await this.requireList(p);
+    const item = await this.queryOne(
+      `SELECT id FROM channel_list_items WHERE id=$1 AND "listId"=$2`,
+      [p.itemId, p.listId],
+    );
+    if (!item) return RpcErrors.notFound('Channel list item') as never;
+    const body = String(p.body ?? '').trim();
+    if (!body || body.length > 4000) {
+      return RpcErrors.badRequest('Comment body is required (max 4000)') as never;
+    }
+    const row = await this.queryOne(
+      `INSERT INTO channel_list_item_comments
+         ("organizationId","conversationId","listId","itemId","authorId","body")
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [
+        requireOrganizationId(),
+        p.conversationId,
+        p.listId,
+        p.itemId,
+        p.actorId,
+        body,
+      ],
+    );
+    await this.db.query(
+      `UPDATE channel_list_items SET "updatedAt"=now() WHERE id=$1`,
+      [p.itemId],
+    );
+    return this.toListItemCommentView(row);
+  }
+
+  async deleteListItemComment(p: any) {
+    await this.requireList(p);
+    const existing = await this.queryOne(
+      `SELECT * FROM channel_list_item_comments
+       WHERE id=$1 AND "itemId"=$2 AND "listId"=$3`,
+      [p.commentId, p.itemId, p.listId],
+    );
+    if (!existing) return RpcErrors.notFound('Comment') as never;
+    if (String(existing.authorId) !== String(p.actorId)) {
+      return RpcErrors.forbidden('Only the author can delete this comment') as never;
+    }
+    await this.db.query(`DELETE FROM channel_list_item_comments WHERE id=$1`, [
+      p.commentId,
+    ]);
+    return { deleted: true };
   }
 
   private toUserNotificationView(row: any) {
@@ -770,20 +1048,117 @@ export class SlackProductsService {
       }
       durationSeconds = Math.min(durationSeconds, 180);
     }
+
+    const isVideo = p.mediaType === 'video';
+    const attachmentMime = String(
+      p.attachmentMime || (isVideo ? 'video/webm' : 'audio/webm'),
+    ).slice(0, 120);
+    const attachmentName = String(
+      p.attachmentName ||
+        (isVideo ? `clip-video-${Date.now()}.webm` : `clip-audio-${Date.now()}.webm`),
+    ).slice(0, 240);
+    const attachmentSize = Math.max(0, Math.round(Number(p.attachmentSize) || 0));
+    const messageType = isVideo ? 'file' : 'audio';
+    const body = isVideo
+      ? durationSeconds
+        ? `[Video clip · ${durationSeconds}s]`
+        : '[Video clip]'
+      : durationSeconds
+        ? `[Audio clip · ${durationSeconds}s]`
+        : '[Audio clip]';
+
+    const orgId = requireOrganizationId();
+    const savedMessage = await this.queryOne(
+      `INSERT INTO messages (
+         "organizationId","conversationId","senderId",body,type,
+         "replyToMessageId","attachmentUrl","attachmentMime","attachmentName","attachmentSize",
+         mentions,"linkPreview",poll,"botUsername","botIconUrl"
+       ) VALUES (
+         $1,$2,$3,$4,$5,
+         NULL,$6,$7,$8,$9,
+         '[]'::jsonb,NULL,NULL,NULL,NULL
+       ) RETURNING *`,
+      [
+        orgId,
+        p.conversationId,
+        p.actorId,
+        body,
+        messageType,
+        mediaUrl,
+        attachmentMime,
+        attachmentName,
+        attachmentSize,
+      ],
+    );
+    if (!savedMessage) {
+      return RpcErrors.internal('Could not create clip message') as never;
+    }
+
+    await this.db.query(
+      `UPDATE conversations SET "lastMessageAt"=$1, "updatedAt"=now() WHERE id=$2`,
+      [savedMessage.createdAt, p.conversationId],
+    );
+
     const row = await this.queryOne(
       `INSERT INTO channel_clips ("organizationId","conversationId","messageId","createdBy","mediaUrl","mediaType","durationSeconds")
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
       [
-        requireOrganizationId(),
+        orgId,
         p.conversationId,
-        p.messageId ?? null,
+        savedMessage.id,
         p.actorId,
         mediaUrl,
         p.mediaType,
         durationSeconds,
       ],
     );
-    return this.toClipView(row);
+
+    const members = await this.queryRows(
+      `SELECT "userId" FROM conversation_members
+       WHERE "conversationId"=$1 AND "leftAt" IS NULL`,
+      [p.conversationId],
+    );
+    const recipientIds = members.map((member: { userId: string }) =>
+      String(member.userId),
+    );
+    const createdAt = new Date(savedMessage.createdAt).toISOString();
+    const channelMessage = {
+      id: String(savedMessage.id),
+      conversationId: String(p.conversationId),
+      senderId: String(p.actorId),
+      body,
+      type: messageType,
+      replyTo: null,
+      threadRootId: null,
+      replyCount: 0,
+      attachment: {
+        url: mediaUrl,
+        mime: attachmentMime,
+        name: attachmentName,
+        size: attachmentSize,
+      },
+      mentions: [] as string[],
+      reactions: [] as unknown[],
+      linkPreview: null,
+      poll: null,
+      pinned: false,
+      pinnedAt: null,
+      pinnedByUserId: null,
+      forwarded: false,
+      editedAt: null,
+      deletedForEveryone: false,
+      undelivered: false,
+      botUsername: null,
+      botIconUrl: null,
+      seenBy: [] as string[],
+      createdAt,
+      recipientIds,
+    };
+
+    return {
+      clip: this.toClipView(row),
+      channelMessage,
+    };
   }
 
   async deleteClip(p: any) {
@@ -1036,6 +1411,15 @@ export class SlackProductsService {
         const haystack = String(p.message?.body ?? '').toLowerCase();
         if (!needle || !haystack.includes(needle)) continue;
       }
+      const condition = String(workflow.triggerConfig.condition ?? 'always');
+      if (condition === 'weekdays') {
+        const day = new Date().getDay(); // 0 Sun … 6 Sat
+        if (day === 0 || day === 6) continue;
+      }
+      if (condition === 'require_mention') {
+        const body = String(p.message?.body ?? '');
+        if (!/(^|\s)@\w+/.test(body)) continue;
+      }
       try {
         const produced = await this.executeWorkflow(workflow, {
           actorId: p.actorId,
@@ -1260,12 +1644,24 @@ export class SlackProductsService {
       return RpcErrors.badRequest('A pending Connect invite already exists for that email') as never;
     }
     const token = randomBytes(32).toString('hex');
+    const organizationId = requireOrganizationId();
     const row = await this.queryOne(
       `INSERT INTO shared_channel_invites (
          "organizationId","conversationId",email,token,"createdBy","inviteKind"
        ) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [requireOrganizationId(), p.conversationId, email, token, p.actorId, mode],
+      [organizationId, p.conversationId, email, token, p.actorId, mode],
     );
+    await this.logConnectAudit({
+      organizationId,
+      actorId: p.actorId,
+      action: 'connect.invite.created',
+      conversationId: p.conversationId,
+      meta: {
+        inviteId: row?.id,
+        email,
+        inviteKind: mode,
+      },
+    });
     return this.toSharedInviteView(
       row,
       mode === 'workspace_share' ? `/connect-invite/${token}` : undefined,
@@ -1284,6 +1680,10 @@ export class SlackProductsService {
       [p.conversationId, orgId],
     );
     if (asPartner) {
+      const activity = await this.listConnectActivity(orgId, [
+        p.conversationId,
+        String(asPartner.hostConversationId),
+      ]);
       return {
         conversationId: p.conversationId,
         isShared: true,
@@ -1294,6 +1694,7 @@ export class SlackProductsService {
         links: [this.toSharedLinkView(asPartner)],
         connectRole: 'partner' as const,
         hostConversationId: String(asPartner.hostConversationId),
+        activity,
       };
     }
 
@@ -1309,6 +1710,15 @@ export class SlackProductsService {
        ORDER BY "createdAt" DESC`,
       [p.conversationId, orgId],
     );
+    // Include disconnected links for audit UI (not actionable).
+    const allLinks = await this.queryRows(
+      `SELECT * FROM shared_channel_links
+       WHERE "hostConversationId"=$1 AND "hostOrganizationId"=$2
+       ORDER BY "createdAt" DESC
+       LIMIT 20`,
+      [p.conversationId, orgId],
+    );
+    const activity = await this.listConnectActivity(orgId, [p.conversationId]);
     return {
       conversationId: p.conversationId,
       isShared: Boolean(conversation.isShared) || links.length > 0,
@@ -1323,8 +1733,12 @@ export class SlackProductsService {
         ),
       ),
       links: links.map((row: any) => this.toSharedLinkView(row)),
+      linkHistory: allLinks
+        .filter((row: any) => row.status !== 'active')
+        .map((row: any) => this.toSharedLinkView(row)),
       connectRole: 'host' as const,
       hostConversationId: p.conversationId,
+      activity,
     };
   }
 
@@ -1412,6 +1826,18 @@ export class SlackProductsService {
        WHERE id=$2 AND "organizationId"=$3`,
       [invite.email, invite.conversationId, invite.organizationId],
     );
+    await this.logConnectAudit({
+      organizationId: String(invite.organizationId),
+      actorId: p.actorId || invite.createdBy,
+      action: 'connect.invite.accepted',
+      conversationId: String(invite.conversationId),
+      meta: {
+        inviteId: invite.id,
+        email: invite.email,
+        inviteKind: 'guest_email',
+        role: 'guest',
+      },
+    });
     return this.toSharedInviteView(row);
   }
 
@@ -1573,6 +1999,33 @@ export class SlackProductsService {
       ],
     );
 
+    const auditMeta = {
+      inviteId: invite.id,
+      linkId: link?.id,
+      partnerOrganizationId,
+      partnerOrganizationName,
+      partnerConversationId: stub.id,
+      email: invite.email,
+    };
+    await this.logConnectAudit({
+      organizationId: String(invite.organizationId),
+      actorId: p.actorId,
+      action: 'connect.workspace.connected',
+      conversationId: String(invite.conversationId),
+      meta: auditMeta,
+    });
+    await this.logConnectAudit({
+      organizationId: partnerOrganizationId,
+      actorId: p.actorId,
+      action: 'connect.workspace.connected',
+      conversationId: String(stub.id),
+      meta: {
+        ...auditMeta,
+        hostConversationId: invite.conversationId,
+        hostOrganizationId: invite.organizationId,
+      },
+    });
+
     return {
       organizationId: partnerOrganizationId,
       conversationId: String(stub.id),
@@ -1636,6 +2089,27 @@ export class SlackProductsService {
       );
     }
 
+    const auditMeta = {
+      linkId: link.id,
+      hostOrganizationId: link.hostOrganizationId,
+      partnerOrganizationId: link.partnerOrganizationId,
+      disconnectedBy: isHost ? 'host' : 'partner',
+    };
+    await this.logConnectAudit({
+      organizationId: String(link.hostOrganizationId),
+      actorId: p.actorId,
+      action: 'connect.channel.disconnected',
+      conversationId: String(link.hostConversationId),
+      meta: auditMeta,
+    });
+    await this.logConnectAudit({
+      organizationId: String(link.partnerOrganizationId),
+      actorId: p.actorId,
+      action: 'connect.channel.disconnected',
+      conversationId: String(link.partnerConversationId),
+      meta: auditMeta,
+    });
+
     return { disconnected: true, linkId: String(link.id) };
   }
 
@@ -1691,13 +2165,25 @@ export class SlackProductsService {
 
   async revokeSharedInvite(p: any) {
     await this.requireMembership(p.conversationId, p.actorId);
+    const organizationId = requireOrganizationId();
     const row = await this.queryOne(
       `UPDATE shared_channel_invites SET status='revoked'
        WHERE id=$1 AND "organizationId"=$2 AND "conversationId"=$3 AND status='pending'
        RETURNING *`,
-      [p.inviteId, requireOrganizationId(), p.conversationId],
+      [p.inviteId, organizationId, p.conversationId],
     );
     if (!row) return RpcErrors.notFound('Pending Connect invite') as never;
+    await this.logConnectAudit({
+      organizationId,
+      actorId: p.actorId,
+      action: 'connect.invite.revoked',
+      conversationId: p.conversationId,
+      meta: {
+        inviteId: row.id,
+        email: row.email,
+        inviteKind: row.inviteKind,
+      },
+    });
     return this.toSharedInviteView(row);
   }
 
@@ -1717,6 +2203,18 @@ export class SlackProductsService {
        WHERE id=$2`,
       [p.externalLabel || email, p.conversationId],
     );
+    await this.logConnectAudit({
+      organizationId: String(row.organizationId),
+      actorId: p.actorId || row.createdBy,
+      action: 'connect.invite.accepted',
+      conversationId: String(p.conversationId),
+      meta: {
+        inviteId: row.id,
+        email,
+        inviteKind: row.inviteKind || 'guest_email',
+        role: 'guest',
+      },
+    });
     return { updated: true, invite: this.toSharedInviteView(row) };
   }
 

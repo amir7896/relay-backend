@@ -26,6 +26,7 @@ import type {
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
 import { tenantRpcFields } from '../organizations/tenant-context';
 import { CallSessionService } from './call-session.service';
+import { CanvasCollabService } from './canvas-collab.service';
 import { ConversationCacheService } from './conversation-cache.service';
 import { PresenceService } from './presence.service';
 import { PushService } from './push.service';
@@ -89,6 +90,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly calls: CallSessionService,
     private readonly config: ConfigService,
     private readonly push: PushService,
+    private readonly canvasCollab: CanvasCollabService,
   ) {}
 
   async handleConnection(client: AuthedSocket): Promise<void> {
@@ -133,6 +135,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
     const conversationIds = client.data.conversationIds ?? [];
+    for (const conversationId of conversationIds) {
+      this.canvasCollab.leave(conversationId, client.id);
+    }
     const result = await this.presence.disconnect(userId, client.id);
     if (result.status === PresenceStatus.OFFLINE) {
       this.broadcastPresenceView(result, conversationIds);
@@ -204,8 +209,103 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.data.conversationIds = (client.data.conversationIds ?? []).filter(
       (id: string) => id !== conversationId,
     );
+    this.canvasCollab.leave(conversationId, client.id);
     this.logger.debug(`User ${userId} left conversation room ${conversationId}`);
     return { left: conversationId };
+  }
+
+  @SubscribeMessage('chat:canvas_join')
+  async joinCanvas(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() body: { conversationId?: string },
+  ) {
+    const userId = this.requireUser(client);
+    const conversationId = this.requireConversationId(body);
+    // Ensure membership via conversation fetch
+    await this.sendChatFor<ConversationView>(
+      client,
+      CHAT_PATTERNS.GET_CONVERSATION,
+      { actorId: userId, conversationId },
+    );
+    await client.join(`conversation:${conversationId}`);
+    client.data.conversationIds = [
+      ...new Set([...(client.data.conversationIds ?? []), conversationId]),
+    ];
+    const snapshot = await this.canvasCollab.join(
+      conversationId,
+      client.id,
+      userId,
+      client.data.organization ?? null,
+      () =>
+        this.sendChatFor<ChannelCanvasView>(client, CHAT_PATTERNS.GET_CANVAS, {
+          actorId: userId,
+          conversationId,
+        }),
+    );
+    return {
+      status: 'ok',
+      conversationId,
+      state: snapshot.state,
+      title: snapshot.title,
+      body: snapshot.body,
+    };
+  }
+
+  @SubscribeMessage('chat:canvas_leave')
+  leaveCanvas(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() body: { conversationId?: string },
+  ) {
+    const conversationId = this.requireConversationId(body);
+    this.canvasCollab.leave(conversationId, client.id);
+    return { status: 'ok', left: conversationId };
+  }
+
+  @SubscribeMessage('chat:canvas_update')
+  canvasUpdate(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() body: { conversationId?: string; update?: string },
+  ) {
+    const userId = this.requireUser(client);
+    const conversationId = this.requireConversationId(body);
+    const update = typeof body.update === 'string' ? body.update : '';
+    if (!update) {
+      throw new WsException('Canvas update is required');
+    }
+    const result = this.canvasCollab.applyUpdate(
+      conversationId,
+      update,
+      userId,
+    );
+    if (!result.ok) {
+      throw new WsException(result.reason);
+    }
+    client.to(`conversation:${conversationId}`).emit('chat:canvas_update', {
+      conversationId,
+      update,
+      actorId: userId,
+    });
+    return { status: 'ok' };
+  }
+
+  @SubscribeMessage('chat:canvas_awareness')
+  canvasAwareness(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody()
+    body: { conversationId?: string; update?: string },
+  ) {
+    const userId = this.requireUser(client);
+    const conversationId = this.requireConversationId(body);
+    const update = typeof body.update === 'string' ? body.update : '';
+    if (!update || update.length > 64_000) {
+      return { status: 'ok' };
+    }
+    client.to(`conversation:${conversationId}`).emit('chat:canvas_awareness', {
+      conversationId,
+      update,
+      actorId: userId,
+    });
+    return { status: 'ok' };
   }
 
   @SubscribeMessage('chat:message')
@@ -877,6 +977,19 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       'chat:canvas',
       canvas,
       canvas.conversationId,
+      recipientIds,
+    );
+  }
+
+  broadcastCanvasComment(
+    conversationId: string,
+    payload: Record<string, unknown>,
+    recipientIds: string[] = [],
+  ): void {
+    this.emitToMembers(
+      'chat:canvas_comment',
+      payload,
+      conversationId,
       recipientIds,
     );
   }
