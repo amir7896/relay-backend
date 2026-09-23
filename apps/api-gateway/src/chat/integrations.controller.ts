@@ -205,6 +205,59 @@ export class IntegrationsController {
     return { message: 'Zoom meeting created', data: result };
   }
 
+  @Post('conversations/:id/apps/:appKey/events/demo')
+  async demoAppEvent(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('appKey') appKey: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    const key = String(appKey || '').trim().toLowerCase();
+    if (key !== 'github' && key !== 'jira') {
+      throw new BadRequestAppException(
+        'Demo events are only available for GitHub and Jira',
+      );
+    }
+    const result = (await this.proxy.sendChat(
+      CHAT_PATTERNS.DEMO_APP_EVENT,
+      this.payload(user, {
+        conversationId: id,
+        appKey: key,
+        kind: body.kind,
+      }),
+    )) as {
+      posted?: boolean;
+      ignored?: boolean;
+      reason?: string;
+      conversationId?: string;
+      message?: Record<string, unknown> & {
+        conversationId: string;
+        recipientIds?: string[];
+      };
+    };
+
+    if (result?.ignored) {
+      throw new BadRequestAppException(
+        result.reason === 'no_events_channel'
+          ? 'Pick an events channel in Settings first'
+          : `Could not post demo event (${result.reason || 'ignored'})`,
+      );
+    }
+
+    if (result?.message) {
+      const { recipientIds, ...view } = result.message;
+      this.chatGateway.broadcastMessage(view as any, recipientIds ?? []);
+    }
+
+    return {
+      message:
+        key === 'jira'
+          ? 'Demo Jira event posted to the events channel'
+          : 'Demo GitHub event posted to the events channel',
+      data: result,
+    };
+  }
+
   @Public()
   @SkipOrg()
   @Post('integrations/:appKey/events')

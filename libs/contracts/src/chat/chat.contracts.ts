@@ -23,6 +23,8 @@ export const CHAT_PATTERNS = {
   LIST_PINNED_MESSAGES: 'chat.list_pinned_messages',
   CREATE_POLL: 'chat.create_poll',
   VOTE_POLL: 'chat.vote_poll',
+  CREATE_INTERACTIVE: 'chat.create_interactive',
+  INVOKE_MESSAGE_ACTION: 'chat.invoke_message_action',
   SAVE_BOOKMARK: 'chat.save_bookmark',
   REMOVE_BOOKMARK: 'chat.remove_bookmark',
   LIST_BOOKMARKS: 'chat.list_bookmarks',
@@ -40,6 +42,19 @@ export const CHAT_PATTERNS = {
   GET_DRAFT: 'chat.get_draft',
   CLEAR_DRAFT: 'chat.clear_draft',
   LIST_MY_DRAFTS: 'chat.list_my_drafts',
+  LIST_SAVED_REPLIES: 'chat.list_saved_replies',
+  CREATE_SAVED_REPLY: 'chat.create_saved_reply',
+  UPDATE_SAVED_REPLY: 'chat.update_saved_reply',
+  DELETE_SAVED_REPLY: 'chat.delete_saved_reply',
+  LIST_WIKI_PAGES: 'chat.list_wiki_pages',
+  GET_WIKI_PAGE: 'chat.get_wiki_page',
+  CREATE_WIKI_PAGE: 'chat.create_wiki_page',
+  UPDATE_WIKI_PAGE: 'chat.update_wiki_page',
+  DELETE_WIKI_PAGE: 'chat.delete_wiki_page',
+  LIST_INCIDENTS: 'chat.list_incidents',
+  GET_CHANNEL_INCIDENT: 'chat.get_channel_incident',
+  OPEN_INCIDENT: 'chat.open_incident',
+  UPDATE_INCIDENT: 'chat.update_incident',
   CREATE_REMINDER: 'chat.create_reminder',
   LIST_REMINDERS: 'chat.list_reminders',
   CANCEL_REMINDER: 'chat.cancel_reminder',
@@ -117,6 +132,8 @@ export const CHAT_PATTERNS = {
   CREATE_CANVAS_COMMENT: 'chat.create_canvas_comment',
   RESOLVE_CANVAS_COMMENT: 'chat.resolve_canvas_comment',
   DELETE_CANVAS_COMMENT: 'chat.delete_canvas_comment',
+  GET_WHITEBOARD: 'chat.get_whiteboard',
+  SAVE_WHITEBOARD_YDOC: 'chat.save_whiteboard_ydoc',
   LIST_CHANNEL_LISTS: 'chat.list_channel_lists',
   GET_CHANNEL_LIST: 'chat.get_channel_list',
   CREATE_CHANNEL_LIST: 'chat.create_channel_list',
@@ -168,12 +185,14 @@ export const CHAT_PATTERNS = {
   CREATE_APP_ISSUE_FROM_LIST_ITEM: 'chat.create_app_issue_from_list_item',
   CREATE_ZOOM_MEETING: 'chat.create_zoom_meeting',
   INGEST_APP_EVENT: 'chat.ingest_app_event',
+  DEMO_APP_EVENT: 'chat.demo_app_event',
   LIST_APP_PROJECTS: 'chat.list_app_projects',
   DISPATCH_DUE_STANDUPS: 'chat.dispatch_due_standups',
   DISPATCH_DUE_LIST_ITEMS: 'chat.dispatch_due_list_items',
   RUN_STANDUP_NOW: 'chat.run_standup_now',
   COLLECT_STANDUP_REPLY: 'chat.collect_standup_reply',
   SUMMARIZE_STANDUP: 'chat.summarize_standup',
+  GET_STANDUP_BOARD: 'chat.get_standup_board',
 } as const;
 
 export interface CreatePrivateChatPayload {
@@ -453,6 +472,122 @@ export interface DraftInboxView {
   updatedAt: string;
 }
 
+export interface SavedReplyView {
+  id: string;
+  title: string;
+  body: string;
+  shortcut: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ListSavedRepliesPayload {
+  actorId: string;
+}
+
+export interface CreateSavedReplyPayload {
+  actorId: string;
+  title: string;
+  body: string;
+  shortcut?: string | null;
+}
+
+export interface UpdateSavedReplyPayload {
+  actorId: string;
+  replyId: string;
+  title?: string;
+  body?: string;
+  shortcut?: string | null;
+}
+
+export interface DeleteSavedReplyPayload {
+  actorId: string;
+  replyId: string;
+}
+
+export interface WikiPageView {
+  id: string;
+  title: string;
+  slug: string;
+  body: string;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ListWikiPagesPayload {
+  actorId: string;
+  /** Title / slug / body search (optional). */
+  q?: string;
+}
+
+export interface GetWikiPagePayload {
+  actorId: string;
+  pageId: string;
+}
+
+export interface CreateWikiPagePayload {
+  actorId: string;
+  title: string;
+  body: string;
+  slug?: string | null;
+}
+
+export interface UpdateWikiPagePayload {
+  actorId: string;
+  pageId: string;
+  title?: string;
+  body?: string;
+  slug?: string | null;
+}
+
+export interface DeleteWikiPagePayload {
+  actorId: string;
+  pageId: string;
+}
+
+export type IncidentSeverity = 'sev1' | 'sev2' | 'sev3' | 'sev4';
+export type IncidentStatus = 'open' | 'mitigated' | 'resolved';
+
+export interface IncidentView {
+  id: string;
+  conversationId: string;
+  conversationName: string | null;
+  severity: IncidentSeverity;
+  title: string;
+  status: IncidentStatus;
+  openedBy: string;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ListIncidentsPayload {
+  actorId: string;
+  /** Default: active (open + mitigated). Pass "all" for history. */
+  scope?: 'active' | 'all' | 'resolved';
+}
+
+export interface GetChannelIncidentPayload {
+  actorId: string;
+  conversationId: string;
+}
+
+export interface OpenIncidentPayload {
+  actorId: string;
+  conversationId: string;
+  severity: IncidentSeverity;
+  title: string;
+}
+
+export interface UpdateIncidentPayload {
+  actorId: string;
+  incidentId: string;
+  status: IncidentStatus;
+}
+
 export interface CreateReminderPayload extends ConversationActorPayload {
   messageId: string;
   remindAt: string;
@@ -728,6 +863,38 @@ export interface VotePollPayload extends ConversationActorPayload {
   optionId: string;
 }
 
+export type InteractiveActionStyle = 'primary' | 'danger' | 'default';
+export type InteractiveActionValue = 'approve' | 'deny';
+export type InteractiveCardStatus = 'open' | 'approved' | 'denied';
+
+export interface InteractiveActionView {
+  id: string;
+  label: string;
+  style: InteractiveActionStyle;
+  value: InteractiveActionValue;
+}
+
+export interface InteractiveView {
+  kind: 'approval';
+  title: string;
+  status: InteractiveCardStatus;
+  actions: InteractiveActionView[];
+  decidedBy: string | null;
+  decidedAt: string | null;
+  decidedValue: InteractiveActionValue | null;
+  decidedByMe: boolean;
+}
+
+export interface CreateInteractivePayload extends ConversationActorPayload {
+  title: string;
+  kind?: 'approval';
+}
+
+export interface InvokeMessageActionPayload extends ConversationActorPayload {
+  messageId: string;
+  actionId: string;
+}
+
 export interface SaveBookmarkPayload {
   actorId: string;
   messageId: string;
@@ -778,6 +945,7 @@ export interface MessageView {
   mentions: string[];
   linkPreview: LinkPreviewView | null;
   poll: PollView | null;
+  interactive: InteractiveView | null;
   reactions: MessageReactionView[];
   editedAt: string | null;
   pinned: boolean;
@@ -1087,9 +1255,23 @@ export interface InvokeSlashCommandPayload {
 }
 
 export interface InvokeSlashCommandResult {
-  kind: 'message' | 'ephemeral' | 'status';
+  kind: 'message' | 'ephemeral' | 'status' | 'ask';
   message?: SendMessageResult;
   ephemeral?: string;
+  /** Ask Relay payload when kind === 'ask' (gateway /ai). */
+  ask?: {
+    answer: string;
+    poweredByAi: boolean;
+    demoMode?: boolean;
+    citations: Array<{
+      messageId: string;
+      conversationId: string;
+      conversationName: string | null;
+      conversationType?: 'private' | 'group';
+      bodySnippet: string;
+      createdAt?: string;
+    }>;
+  };
   /** Applied by gateway via PresenceService. */
   customStatus?: string | null;
   /** List assignment notification to deliver (Activity + push). */
@@ -1153,6 +1335,20 @@ export interface SaveCanvasYdocPayload extends ConversationActorPayload {
   body?: string;
 }
 export interface PutChannelCanvasPayload extends ConversationActorPayload { title?: string; body?: string }
+
+export interface ChannelWhiteboardView {
+  id: string;
+  organizationId: string;
+  conversationId: string;
+  /** Base64-encoded Yjs document state for collaborative drawing. */
+  ydocState: string | null;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface SaveWhiteboardYdocPayload extends ConversationActorPayload {
+  ydocState: string;
+}
 export interface CanvasCommentView {
   id: string;
   conversationId: string;

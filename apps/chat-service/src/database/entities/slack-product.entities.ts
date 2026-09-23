@@ -22,6 +22,19 @@ export class ChannelCanvas {
   @UpdateDateColumn({ type: 'timestamptz' }) updatedAt!: Date;
 }
 
+@Entity({ name: 'channel_whiteboards' })
+@Index(['organizationId', 'conversationId'], { unique: true })
+export class ChannelWhiteboard {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column('uuid') organizationId!: string;
+  @Column('uuid') conversationId!: string;
+  /** Base64 Yjs document state (strokes + sticky notes). */
+  @Column({ type: 'text', nullable: true }) ydocState!: string | null;
+  @Column('uuid') updatedBy!: string;
+  @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
+  @UpdateDateColumn({ type: 'timestamptz' }) updatedAt!: Date;
+}
+
 @Entity({ name: 'channel_lists' })
 export class ChannelList {
   @PrimaryGeneratedColumn('uuid') id!: string;
@@ -242,6 +255,7 @@ export class BookmarkCollection {
 
 export const SLACK_PRODUCT_ENTITIES = [
   ChannelCanvas,
+  ChannelWhiteboard,
   ChannelList,
   ChannelListItem,
   ChannelListItemComment,

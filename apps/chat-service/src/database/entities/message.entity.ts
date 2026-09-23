@@ -107,6 +107,23 @@ export class Message {
     closed: boolean;
   } | null;
 
+  /** Block Kit–lite interactive card (approvals, action buttons). */
+  @Column({ type: 'jsonb', nullable: true })
+  interactive!: {
+    kind: 'approval';
+    title: string;
+    status: 'open' | 'approved' | 'denied';
+    actions: Array<{
+      id: string;
+      label: string;
+      style: 'primary' | 'danger' | 'default';
+      value: 'approve' | 'deny';
+    }>;
+    decidedBy: string | null;
+    decidedAt: string | null;
+    decidedValue: 'approve' | 'deny' | null;
+  } | null;
+
   @Index()
   @Column({ type: 'timestamptz', nullable: true })
   expiresAt!: Date | null;

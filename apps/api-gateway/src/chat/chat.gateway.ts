@@ -16,6 +16,7 @@ import { MessageType, PresenceStatus } from '@app/common';
 import { AUTH_PATTERNS, CHAT_PATTERNS } from '@app/contracts';
 import type {
   ChannelCanvasView,
+  ChannelWhiteboardView,
   ConversationView,
   MessageView,
   OrganizationView,
@@ -27,6 +28,7 @@ import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
 import { tenantRpcFields } from '../organizations/tenant-context';
 import { CallSessionService } from './call-session.service';
 import { CanvasCollabService } from './canvas-collab.service';
+import { WhiteboardCollabService } from './whiteboard-collab.service';
 import { ConversationCacheService } from './conversation-cache.service';
 import { PresenceService } from './presence.service';
 import { PushService } from './push.service';
@@ -91,6 +93,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly config: ConfigService,
     private readonly push: PushService,
     private readonly canvasCollab: CanvasCollabService,
+    private readonly whiteboardCollab: WhiteboardCollabService,
   ) {}
 
   async handleConnection(client: AuthedSocket): Promise<void> {
@@ -137,6 +140,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const conversationIds = client.data.conversationIds ?? [];
     for (const conversationId of conversationIds) {
       this.canvasCollab.leave(conversationId, client.id);
+      this.whiteboardCollab.leave(conversationId, client.id);
     }
     const result = await this.presence.disconnect(userId, client.id);
     if (result.status === PresenceStatus.OFFLINE) {
@@ -210,6 +214,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       (id: string) => id !== conversationId,
     );
     this.canvasCollab.leave(conversationId, client.id);
+    this.whiteboardCollab.leave(conversationId, client.id);
     this.logger.debug(`User ${userId} left conversation room ${conversationId}`);
     return { left: conversationId };
   }
@@ -305,6 +310,103 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       update,
       actorId: userId,
     });
+    return { status: 'ok' };
+  }
+
+  @SubscribeMessage('chat:whiteboard_join')
+  async joinWhiteboard(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() body: { conversationId?: string },
+  ) {
+    const userId = this.requireUser(client);
+    const conversationId = this.requireConversationId(body);
+    await this.sendChatFor<ConversationView>(
+      client,
+      CHAT_PATTERNS.GET_CONVERSATION,
+      { actorId: userId, conversationId },
+    );
+    await client.join(`conversation:${conversationId}`);
+    client.data.conversationIds = [
+      ...new Set([...(client.data.conversationIds ?? []), conversationId]),
+    ];
+    const snapshot = await this.whiteboardCollab.join(
+      conversationId,
+      client.id,
+      userId,
+      client.data.organization ?? null,
+      () =>
+        this.sendChatFor<ChannelWhiteboardView>(
+          client,
+          CHAT_PATTERNS.GET_WHITEBOARD,
+          {
+            actorId: userId,
+            conversationId,
+          },
+        ),
+    );
+    return {
+      status: 'ok',
+      conversationId,
+      state: snapshot.state,
+    };
+  }
+
+  @SubscribeMessage('chat:whiteboard_leave')
+  leaveWhiteboard(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() body: { conversationId?: string },
+  ) {
+    const conversationId = this.requireConversationId(body);
+    this.whiteboardCollab.leave(conversationId, client.id);
+    return { status: 'ok', left: conversationId };
+  }
+
+  @SubscribeMessage('chat:whiteboard_update')
+  whiteboardUpdate(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() body: { conversationId?: string; update?: string },
+  ) {
+    const userId = this.requireUser(client);
+    const conversationId = this.requireConversationId(body);
+    const update = typeof body.update === 'string' ? body.update : '';
+    if (!update) {
+      throw new WsException('Whiteboard update is required');
+    }
+    const result = this.whiteboardCollab.applyUpdate(
+      conversationId,
+      update,
+      userId,
+    );
+    if (!result.ok) {
+      throw new WsException(result.reason);
+    }
+    client.to(`conversation:${conversationId}`).emit('chat:whiteboard_update', {
+      conversationId,
+      update,
+      actorId: userId,
+    });
+    return { status: 'ok' };
+  }
+
+  @SubscribeMessage('chat:whiteboard_awareness')
+  whiteboardAwareness(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody()
+    body: { conversationId?: string; update?: string },
+  ) {
+    const userId = this.requireUser(client);
+    const conversationId = this.requireConversationId(body);
+    const update = typeof body.update === 'string' ? body.update : '';
+    if (!update || update.length > 64_000) {
+      return { status: 'ok' };
+    }
+    client
+      .to(`conversation:${conversationId}`)
+      .emit('chat:whiteboard_awareness', {
+        conversationId,
+        update,
+        actorId: userId,
+      });
     return { status: 'ok' };
   }
 

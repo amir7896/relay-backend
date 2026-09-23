@@ -14,6 +14,7 @@ import { WsAuthService } from './ws-auth.service';
 import { AiService } from './ai.service';
 import { CallSessionService } from './call-session.service';
 import { CanvasCollabService } from './canvas-collab.service';
+import { WhiteboardCollabService } from './whiteboard-collab.service';
 import { LinkPreviewService } from './link-preview.service';
 import { PushService } from './push.service';
 import { NotificationPrefsService } from './notification-prefs.service';
@@ -50,6 +51,7 @@ import { AppOauthService } from './app-oauth.service';
     ConversationCacheService,
     CallSessionService,
     CanvasCollabService,
+    WhiteboardCollabService,
     AiService,
     LinkPreviewService,
     NotificationPrefsService,

@@ -102,7 +102,7 @@ export class NotificationPrefsService {
   }
 
   /** True when local clock in prefs.timezone falls inside quiet hours window. */
-  isInQuietHours(prefs: NotificationPrefs, now = new Date()): boolean {
+  isInQuietHours(prefs: NotificationPrefs, at = new Date()): boolean {
     if (!prefs.quietHoursEnabled) {
       return false;
     }
@@ -111,7 +111,7 @@ export class NotificationPrefsService {
     if (start === null || end === null) {
       return false;
     }
-    const minutes = this.localMinutes(now, prefs.timezone);
+    const minutes = this.localMinutes(at, prefs.timezone);
     if (minutes === null) {
       return false;
     }

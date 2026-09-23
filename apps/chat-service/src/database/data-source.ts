@@ -41,6 +41,9 @@ import { ScheduledMessage } from './entities/scheduled-message.entity';
 import { MessageBookmark } from './entities/message-bookmark.entity';
 import { ChannelInvite } from './entities/channel-invite.entity';
 import { MessageDraft } from './entities/message-draft.entity';
+import { SavedReply } from './entities/saved-reply.entity';
+import { WikiPage } from './entities/wiki-page.entity';
+import { Incident } from './entities/incident.entity';
 import { MessageReminder } from './entities/message-reminder.entity';
 import { ThreadFollow } from './entities/thread-follow.entity';
 import { MessageEdit } from './entities/message-edit.entity';
@@ -62,6 +65,11 @@ import { AddListCanvasBookmarkExtras1743000024000 } from './migrations/174300002
 import { AddCanvasYdocState1743000025000 } from './migrations/1743000025000-AddCanvasYdocState';
 import { AddListItemJiraFields1743000026000 } from './migrations/1743000026000-AddListItemJiraFields';
 import { AddListItemJiraLink1743000027000 } from './migrations/1743000027000-AddListItemJiraLink';
+import { AddChannelWhiteboards1743000028000 } from './migrations/1743000028000-AddChannelWhiteboards';
+import { AddMessageInteractive1743000029000 } from './migrations/1743000029000-AddMessageInteractive';
+import { AddSavedReplies1743000030000 } from './migrations/1743000030000-AddSavedReplies';
+import { AddWikiPages1743000031000 } from './migrations/1743000031000-AddWikiPages';
+import { AddIncidents1743000032000 } from './migrations/1743000032000-AddIncidents';
 
 config({
   path: [
@@ -90,6 +98,9 @@ export default new DataSource({
     MessageBookmark,
     ChannelInvite,
     MessageDraft,
+    SavedReply,
+    WikiPage,
+    Incident,
     MessageReminder,
     ThreadFollow,
     MessageEdit,
@@ -140,6 +151,11 @@ export default new DataSource({
     AddCanvasYdocState1743000025000,
     AddListItemJiraFields1743000026000,
     AddListItemJiraLink1743000027000,
+    AddChannelWhiteboards1743000028000,
+    AddMessageInteractive1743000029000,
+    AddSavedReplies1743000030000,
+    AddWikiPages1743000031000,
+    AddIncidents1743000032000,
   ],
   synchronize: false,
 });

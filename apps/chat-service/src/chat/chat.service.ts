@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, createHmac, randomBytes, randomUUID } from 'crypto';
-import { In, IsNull, LessThanOrEqual, Repository } from 'typeorm';
+import { ILike, In, IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import { SlackProductsService } from './slack-products.service';
 import {
   ConversationMemberRole,
@@ -37,6 +37,7 @@ import type {
   CreateIncomingWebhookPayload,
   CreateOutgoingWebhookPayload,
   CreatePollPayload,
+  CreateInteractivePayload,
   CreatePrivateChatPayload,
   CreateSlashCommandPayload,
   DeleteMessagePayload,
@@ -48,6 +49,8 @@ import type {
   OutgoingWebhookView,
   InvokeSlashCommandPayload,
   InvokeSlashCommandResult,
+  InvokeMessageActionPayload,
+  InteractiveView,
   JoinChannelPayload,
   ListAuditPayload,
   ListBookmarksPayload,
@@ -100,6 +103,24 @@ import type {
   DraftView,
   ListMyDraftsPayload,
   DraftInboxView,
+  ListSavedRepliesPayload,
+  CreateSavedReplyPayload,
+  UpdateSavedReplyPayload,
+  DeleteSavedReplyPayload,
+  SavedReplyView,
+  ListWikiPagesPayload,
+  GetWikiPagePayload,
+  CreateWikiPagePayload,
+  UpdateWikiPagePayload,
+  DeleteWikiPagePayload,
+  WikiPageView,
+  ListIncidentsPayload,
+  GetChannelIncidentPayload,
+  OpenIncidentPayload,
+  UpdateIncidentPayload,
+  IncidentView,
+  IncidentSeverity,
+  IncidentStatus,
   CreateReminderPayload,
   CancelReminderPayload,
   CompleteReminderPayload,
@@ -136,6 +157,9 @@ import { MessageReaction } from '../database/entities/message-reaction.entity';
 import { MessageBookmark } from '../database/entities/message-bookmark.entity';
 import { ScheduledMessage } from '../database/entities/scheduled-message.entity';
 import { MessageDraft } from '../database/entities/message-draft.entity';
+import { SavedReply } from '../database/entities/saved-reply.entity';
+import { WikiPage } from '../database/entities/wiki-page.entity';
+import { Incident } from '../database/entities/incident.entity';
 import { MessageReminder } from '../database/entities/message-reminder.entity';
 import { ThreadFollow } from '../database/entities/thread-follow.entity';
 import { MessageEdit } from '../database/entities/message-edit.entity';
@@ -167,6 +191,7 @@ const MAX_PENDING_SCHEDULED_PER_CHAT = 20;
 const REMIND_MIN_DELAY_MS = 60 * 1000;
 const REMIND_MAX_AHEAD_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_DRAFT_BODY = 4000;
+const MAX_WIKI_BODY = 20000;
 const DISAPPEARING_DURATIONS = new Set([
   0, 30, 60, 3600, 86_400, 604_800, 7_776_000,
 ]);
@@ -187,12 +212,28 @@ const BUILTIN_SLASH_COMMANDS: Array<{
     description: 'Create a poll (/poll Question? | A | B)',
   },
   {
+    name: 'approve',
+    description: 'Post an approval card (/approve Ship Friday?)',
+  },
+  {
+    name: 'sr',
+    description: 'Insert a saved reply (/sr shortcut)',
+  },
+  {
+    name: 'wiki',
+    description: 'Workspace wiki — list, search, or share a page (/wiki)',
+  },
+  {
+    name: 'incident',
+    description: 'Ops war-room — /incident open sev2 title | resolve',
+  },
+  {
     name: 'assign',
     description: 'Assign a list task (/assign @name title)',
   },
   {
     name: 'ai',
-    description: 'Ask Relay about this channel (/ai what happened here?)',
+    description: 'Ask Relay — opens the Ask panel (/ai …)',
   },
   {
     name: 'standup',
@@ -230,6 +271,12 @@ export class ChatService {
     private readonly scheduledMessages: Repository<ScheduledMessage>,
     @InjectRepository(MessageDraft)
     private readonly messageDrafts: Repository<MessageDraft>,
+    @InjectRepository(SavedReply)
+    private readonly savedReplies: Repository<SavedReply>,
+    @InjectRepository(WikiPage)
+    private readonly wikiPages: Repository<WikiPage>,
+    @InjectRepository(Incident)
+    private readonly incidents: Repository<Incident>,
     @InjectRepository(MessageReminder)
     private readonly messageReminders: Repository<MessageReminder>,
     @InjectRepository(ThreadFollow)
@@ -2185,6 +2232,162 @@ export class ChatService {
     };
   }
 
+  async createInteractive(
+    payload: CreateInteractivePayload,
+  ): Promise<SendMessageResult> {
+    const title = String(payload.title ?? '').trim();
+    if (title.length < 2 || title.length > 280) {
+      return RpcErrors.badRequest(
+        'Approval title must be between 2 and 280 characters',
+      );
+    }
+
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const delivery = await this.resolvePrivateDelivery(
+      conversation,
+      payload.actorId,
+    );
+    if (delivery.forbidden) {
+      return RpcErrors.forbidden('You cannot message this conversation');
+    }
+
+    const saved = await this.messages.save(
+      this.messages.create({
+        organizationId: requireOrganizationId(),
+        conversationId: conversation.id,
+        senderId: payload.actorId,
+        body: title,
+        type: MessageType.INTERACTIVE,
+        replyToMessageId: null,
+        attachmentUrl: null,
+        attachmentMime: null,
+        attachmentName: null,
+        attachmentSize: null,
+        mentions: [],
+        linkPreview: null,
+        poll: null,
+        interactive: {
+          kind: 'approval',
+          title,
+          status: 'open',
+          actions: [
+            {
+              id: randomUUID(),
+              label: 'Approve',
+              style: 'primary',
+              value: 'approve',
+            },
+            {
+              id: randomUUID(),
+              label: 'Deny',
+              style: 'danger',
+              value: 'deny',
+            },
+          ],
+          decidedBy: null,
+          decidedAt: null,
+          decidedValue: null,
+        },
+        undelivered: delivery.undelivered,
+        expiresAt:
+          !delivery.undelivered && conversation.disappearingDurationSeconds > 0
+            ? new Date(
+                Date.now() + conversation.disappearingDurationSeconds * 1000,
+              )
+            : null,
+      }),
+    );
+    conversation.lastMessageAt = saved.createdAt;
+    await this.conversations.save(conversation);
+    await this.recordAudit(
+      payload.actorId,
+      'message.interactive_created',
+      'conversation',
+      conversation.id,
+      { messageId: saved.id, kind: 'approval' },
+    );
+
+    return {
+      ...this.toMessageView(
+        saved,
+        conversation.members,
+        null,
+        [],
+        payload.actorId,
+      ),
+      recipientIds: delivery.recipientIds,
+      mutedRecipientIds: this.mutedRecipientIds(conversation),
+    };
+  }
+
+  async invokeMessageAction(
+    payload: InvokeMessageActionPayload,
+  ): Promise<SendMessageResult> {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    const message = await this.messages.findOne({
+      where: {
+        id: payload.messageId,
+        conversationId: conversation.id,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (
+      !message ||
+      message.type !== MessageType.INTERACTIVE ||
+      !message.interactive
+    ) {
+      return RpcErrors.notFound('Interactive message');
+    }
+    if (message.deletedForEveryoneAt) {
+      return RpcErrors.badRequest('Cannot act on a deleted message');
+    }
+    if (message.interactive.status !== 'open') {
+      return RpcErrors.badRequest('This approval is already decided');
+    }
+
+    const action = message.interactive.actions.find(
+      (item) => item.id === payload.actionId,
+    );
+    if (!action) {
+      return RpcErrors.badRequest('Invalid action');
+    }
+
+    const decidedAt = new Date().toISOString();
+    message.interactive = {
+      ...message.interactive,
+      status: action.value === 'approve' ? 'approved' : 'denied',
+      decidedBy: payload.actorId,
+      decidedAt,
+      decidedValue: action.value,
+    };
+    await this.messages.save(message);
+
+    const reactions = await this.messageReactions.find({
+      where: { messageId: message.id },
+    });
+    const replyTo = message.replyToMessageId
+      ? await this.messages.findOne({ where: { id: message.replyToMessageId } })
+      : null;
+
+    return {
+      ...this.toMessageView(
+        message,
+        conversation.members,
+        replyTo,
+        reactions,
+        payload.actorId,
+      ),
+      recipientIds: this.recipientIds(conversation),
+      mutedRecipientIds: this.mutedRecipientIds(conversation),
+    };
+  }
+
   async saveBookmark(payload: SaveBookmarkPayload): Promise<BookmarkView> {
     const message = await this.messages.findOne({
       where: {
@@ -2939,6 +3142,548 @@ export class ChatService {
     }
 
     return buildPaginatedResult(items, total, payload.page, payload.limit);
+  }
+
+  private toSavedReplyView(row: SavedReply): SavedReplyView {
+    return {
+      id: row.id,
+      title: row.title,
+      body: row.body,
+      shortcut: row.shortcut,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
+  private normalizeShortcut(raw: unknown): string | null {
+    if (raw === null || raw === undefined || raw === '') {
+      return null;
+    }
+    const value = String(raw)
+      .trim()
+      .toLowerCase()
+      .replace(/^\/+/, '')
+      .slice(0, 32);
+    if (!value) return null;
+    if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(value)) {
+      return RpcErrors.badRequest(
+        'Shortcut must be letters, numbers, _ or - (max 32)',
+      ) as never;
+    }
+    return value;
+  }
+
+  async listSavedReplies(
+    payload: ListSavedRepliesPayload,
+  ): Promise<SavedReplyView[]> {
+    const rows = await this.savedReplies.find({
+      where: {
+        organizationId: requireOrganizationId(),
+        userId: payload.actorId,
+      },
+      order: { updatedAt: 'DESC' },
+      take: 100,
+    });
+    return rows.map((row) => this.toSavedReplyView(row));
+  }
+
+  async createSavedReply(
+    payload: CreateSavedReplyPayload,
+  ): Promise<SavedReplyView> {
+    const title = String(payload.title ?? '').trim().slice(0, 80);
+    const body = String(payload.body ?? '').trim().slice(0, MAX_DRAFT_BODY);
+    if (title.length < 1) {
+      return RpcErrors.badRequest('Title is required') as never;
+    }
+    if (body.length < 1) {
+      return RpcErrors.badRequest('Body is required') as never;
+    }
+    const shortcut = this.normalizeShortcut(payload.shortcut);
+    if (shortcut) {
+      const existing = await this.savedReplies.findOne({
+        where: {
+          organizationId: requireOrganizationId(),
+          userId: payload.actorId,
+          shortcut,
+        },
+      });
+      if (existing) {
+        return RpcErrors.badRequest(
+          `Shortcut /${shortcut} is already used`,
+        ) as never;
+      }
+    }
+    const saved = await this.savedReplies.save(
+      this.savedReplies.create({
+        organizationId: requireOrganizationId(),
+        userId: payload.actorId,
+        title,
+        body,
+        shortcut,
+      }),
+    );
+    return this.toSavedReplyView(saved);
+  }
+
+  async updateSavedReply(
+    payload: UpdateSavedReplyPayload,
+  ): Promise<SavedReplyView> {
+    const row = await this.savedReplies.findOne({
+      where: {
+        id: payload.replyId,
+        organizationId: requireOrganizationId(),
+        userId: payload.actorId,
+      },
+    });
+    if (!row) {
+      return RpcErrors.notFound('Saved reply') as never;
+    }
+    if (payload.title !== undefined) {
+      const title = String(payload.title ?? '').trim().slice(0, 80);
+      if (!title) {
+        return RpcErrors.badRequest('Title is required') as never;
+      }
+      row.title = title;
+    }
+    if (payload.body !== undefined) {
+      const body = String(payload.body ?? '').trim().slice(0, MAX_DRAFT_BODY);
+      if (!body) {
+        return RpcErrors.badRequest('Body is required') as never;
+      }
+      row.body = body;
+    }
+    if (payload.shortcut !== undefined) {
+      const shortcut = this.normalizeShortcut(payload.shortcut);
+      if (shortcut) {
+        const clash = await this.savedReplies.findOne({
+          where: {
+            organizationId: requireOrganizationId(),
+            userId: payload.actorId,
+            shortcut,
+          },
+        });
+        if (clash && clash.id !== row.id) {
+          return RpcErrors.badRequest(
+            `Shortcut /${shortcut} is already used`,
+          ) as never;
+        }
+      }
+      row.shortcut = shortcut;
+    }
+    const saved = await this.savedReplies.save(row);
+    return this.toSavedReplyView(saved);
+  }
+
+  async deleteSavedReply(
+    payload: DeleteSavedReplyPayload,
+  ): Promise<{ deleted: true }> {
+    const result = await this.savedReplies.delete({
+      id: payload.replyId,
+      organizationId: requireOrganizationId(),
+      userId: payload.actorId,
+    });
+    if (!result.affected) {
+      return RpcErrors.notFound('Saved reply') as never;
+    }
+    return { deleted: true };
+  }
+
+  private toWikiPageView(row: WikiPage): WikiPageView {
+    return {
+      id: row.id,
+      title: row.title,
+      slug: row.slug,
+      body: row.body,
+      createdBy: row.createdBy,
+      updatedBy: row.updatedBy,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
+  private slugifyWiki(raw: string): string {
+    const slug = String(raw ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80);
+    return slug || 'page';
+  }
+
+  private async allocateWikiSlug(
+    base: string,
+    excludeId?: string,
+  ): Promise<string> {
+    const organizationId = requireOrganizationId();
+    let candidate = this.slugifyWiki(base);
+    for (let i = 0; i < 40; i += 1) {
+      const trySlug = i === 0 ? candidate : `${candidate.slice(0, 72)}-${i + 1}`;
+      const clash = await this.wikiPages.findOne({
+        where: { organizationId, slug: trySlug },
+      });
+      if (!clash || (excludeId && clash.id === excludeId)) {
+        return trySlug;
+      }
+    }
+    return `${candidate.slice(0, 60)}-${randomUUID().slice(0, 8)}`;
+  }
+
+  async listWikiPages(
+    payload: ListWikiPagesPayload,
+  ): Promise<WikiPageView[]> {
+    const organizationId = requireOrganizationId();
+    const q = String(payload.q ?? '').trim().slice(0, 120);
+    const where = q
+      ? [
+          { organizationId, title: ILike(`%${escapeIlikePattern(q)}%`) },
+          { organizationId, slug: ILike(`%${escapeIlikePattern(q)}%`) },
+        ]
+      : { organizationId };
+    const rows = await this.wikiPages.find({
+      where,
+      order: { updatedAt: 'DESC' },
+      take: 100,
+    });
+    return rows.map((row) => this.toWikiPageView(row));
+  }
+
+  async getWikiPage(payload: GetWikiPagePayload): Promise<WikiPageView> {
+    const row = await this.wikiPages.findOne({
+      where: {
+        id: payload.pageId,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (!row) {
+      return RpcErrors.notFound('Wiki page') as never;
+    }
+    return this.toWikiPageView(row);
+  }
+
+  async createWikiPage(
+    payload: CreateWikiPagePayload,
+  ): Promise<WikiPageView> {
+    const title = String(payload.title ?? '').trim().slice(0, 120);
+    const body = String(payload.body ?? '').trim().slice(0, MAX_WIKI_BODY);
+    if (title.length < 1) {
+      return RpcErrors.badRequest('Title is required') as never;
+    }
+    if (body.length < 1) {
+      return RpcErrors.badRequest('Body is required') as never;
+    }
+    const requestedSlug = payload.slug
+      ? this.slugifyWiki(String(payload.slug))
+      : this.slugifyWiki(title);
+    const slug = await this.allocateWikiSlug(requestedSlug);
+    const saved = await this.wikiPages.save(
+      this.wikiPages.create({
+        organizationId: requireOrganizationId(),
+        title,
+        slug,
+        body,
+        createdBy: payload.actorId,
+        updatedBy: payload.actorId,
+      }),
+    );
+    return this.toWikiPageView(saved);
+  }
+
+  async updateWikiPage(
+    payload: UpdateWikiPagePayload,
+  ): Promise<WikiPageView> {
+    const row = await this.wikiPages.findOne({
+      where: {
+        id: payload.pageId,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (!row) {
+      return RpcErrors.notFound('Wiki page') as never;
+    }
+    if (payload.title !== undefined) {
+      const title = String(payload.title ?? '').trim().slice(0, 120);
+      if (!title) {
+        return RpcErrors.badRequest('Title is required') as never;
+      }
+      row.title = title;
+    }
+    if (payload.body !== undefined) {
+      const body = String(payload.body ?? '').trim().slice(0, MAX_WIKI_BODY);
+      if (!body) {
+        return RpcErrors.badRequest('Body is required') as never;
+      }
+      row.body = body;
+    }
+    if (payload.slug !== undefined && payload.slug !== null) {
+      const next = this.slugifyWiki(String(payload.slug));
+      row.slug = await this.allocateWikiSlug(next, row.id);
+    }
+    row.updatedBy = payload.actorId;
+    const saved = await this.wikiPages.save(row);
+    return this.toWikiPageView(saved);
+  }
+
+  async deleteWikiPage(
+    payload: DeleteWikiPagePayload,
+  ): Promise<{ deleted: true }> {
+    const result = await this.wikiPages.delete({
+      id: payload.pageId,
+      organizationId: requireOrganizationId(),
+    });
+    if (!result.affected) {
+      return RpcErrors.notFound('Wiki page') as never;
+    }
+    return { deleted: true };
+  }
+
+  private toIncidentView(
+    row: Incident,
+    conversationName: string | null,
+  ): IncidentView {
+    return {
+      id: row.id,
+      conversationId: row.conversationId,
+      conversationName,
+      severity: row.severity,
+      title: row.title,
+      status: row.status,
+      openedBy: row.openedBy,
+      resolvedBy: row.resolvedBy,
+      resolvedAt: row.resolvedAt ? row.resolvedAt.toISOString() : null,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
+  private parseIncidentSeverity(raw: unknown): IncidentSeverity | null {
+    const value = String(raw ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/^sever(?:ity)?\s*/i, 'sev');
+    if (
+      value === 'sev1' ||
+      value === 'sev2' ||
+      value === 'sev3' ||
+      value === 'sev4'
+    ) {
+      return value;
+    }
+    if (value === '1' || value === '2' || value === '3' || value === '4') {
+      return `sev${value}` as IncidentSeverity;
+    }
+    return null;
+  }
+
+  private async conversationNameFor(
+    conversationId: string,
+  ): Promise<string | null> {
+    const conversation = await this.conversations.findOne({
+      where: {
+        id: conversationId,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (!conversation) return null;
+    if (conversation.type === ConversationType.GROUP) {
+      return conversation.name?.trim() || 'Channel';
+    }
+    return 'Direct message';
+  }
+
+  async listIncidents(
+    payload: ListIncidentsPayload,
+  ): Promise<IncidentView[]> {
+    const organizationId = requireOrganizationId();
+    const scope = payload.scope ?? 'active';
+    const statusFilter =
+      scope === 'resolved'
+        ? (['resolved'] as IncidentStatus[])
+        : scope === 'all'
+          ? undefined
+          : (['open', 'mitigated'] as IncidentStatus[]);
+
+    const rows = await this.incidents.find({
+      where: statusFilter
+        ? { organizationId, status: In(statusFilter) }
+        : { organizationId },
+      order: { updatedAt: 'DESC' },
+      take: 100,
+    });
+
+    const views: IncidentView[] = [];
+    for (const row of rows) {
+      views.push(
+        this.toIncidentView(row, await this.conversationNameFor(row.conversationId)),
+      );
+    }
+    return views;
+  }
+
+  async getChannelIncident(
+    payload: GetChannelIncidentPayload,
+  ): Promise<IncidentView | null> {
+    await this.requireMembership(payload.conversationId, payload.actorId);
+    const row = await this.incidents.findOne({
+      where: {
+        organizationId: requireOrganizationId(),
+        conversationId: payload.conversationId,
+        status: In(['open', 'mitigated'] as IncidentStatus[]),
+      },
+      order: { updatedAt: 'DESC' },
+    });
+    if (!row) return null;
+    return this.toIncidentView(
+      row,
+      await this.conversationNameFor(row.conversationId),
+    );
+  }
+
+  async openIncident(
+    payload: OpenIncidentPayload,
+  ): Promise<{ incident: IncidentView; message: SendMessageResult }> {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    if (conversation.type !== ConversationType.GROUP) {
+      return RpcErrors.badRequest(
+        'Incidents can only be opened in group channels',
+      ) as never;
+    }
+
+    const severity = this.parseIncidentSeverity(payload.severity);
+    if (!severity) {
+      return RpcErrors.badRequest(
+        'Severity must be sev1, sev2, sev3, or sev4',
+      ) as never;
+    }
+    const title = String(payload.title ?? '').trim().slice(0, 200);
+    if (title.length < 2) {
+      return RpcErrors.badRequest('Incident title is required') as never;
+    }
+
+    const existing = await this.incidents.findOne({
+      where: {
+        organizationId: requireOrganizationId(),
+        conversationId: conversation.id,
+        status: In(['open', 'mitigated'] as IncidentStatus[]),
+      },
+    });
+    if (existing) {
+      return RpcErrors.badRequest(
+        `This channel already has an active incident (${existing.severity}: ${existing.title}). Resolve it first.`,
+      ) as never;
+    }
+
+    const saved = await this.incidents.save(
+      this.incidents.create({
+        organizationId: requireOrganizationId(),
+        conversationId: conversation.id,
+        severity,
+        title,
+        status: 'open',
+        openedBy: payload.actorId,
+        resolvedBy: null,
+        resolvedAt: null,
+      }),
+    );
+
+    const body = [
+      `🚨 **INCIDENT ${severity.toUpperCase()}**`,
+      '',
+      title,
+      '',
+      `_War room open — status: open · use \`/incident mitigate\` or \`/incident resolve\`_`,
+    ].join('\n');
+
+    const message = await this.sendMessage({
+      actorId: payload.actorId,
+      conversationId: conversation.id,
+      body,
+      type: MessageType.TEXT,
+    });
+
+    return {
+      incident: this.toIncidentView(saved, conversation.name?.trim() || 'Channel'),
+      message,
+    };
+  }
+
+  async updateIncident(
+    payload: UpdateIncidentPayload,
+  ): Promise<{ incident: IncidentView; message: SendMessageResult | null }> {
+    const row = await this.incidents.findOne({
+      where: {
+        id: payload.incidentId,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (!row) {
+      return RpcErrors.notFound('Incident') as never;
+    }
+    await this.requireMembership(row.conversationId, payload.actorId);
+
+    const next = String(payload.status ?? '')
+      .trim()
+      .toLowerCase() as IncidentStatus;
+    if (next !== 'open' && next !== 'mitigated' && next !== 'resolved') {
+      return RpcErrors.badRequest(
+        'Status must be open, mitigated, or resolved',
+      ) as never;
+    }
+    if (row.status === 'resolved' && next !== 'resolved') {
+      return RpcErrors.badRequest('Resolved incidents cannot be reopened') as never;
+    }
+    if (row.status === next) {
+      return {
+        incident: this.toIncidentView(
+          row,
+          await this.conversationNameFor(row.conversationId),
+        ),
+        message: null,
+      };
+    }
+
+    row.status = next;
+    if (next === 'resolved') {
+      row.resolvedBy = payload.actorId;
+      row.resolvedAt = new Date();
+    } else {
+      row.resolvedBy = null;
+      row.resolvedAt = null;
+    }
+    const saved = await this.incidents.save(row);
+
+    const label =
+      next === 'resolved'
+        ? 'RESOLVED'
+        : next === 'mitigated'
+          ? 'MITIGATED'
+          : 'REOPENED';
+    const emoji = next === 'resolved' ? '✅' : next === 'mitigated' ? '🛡️' : '🚨';
+    const body = [
+      `${emoji} **INCIDENT ${saved.severity.toUpperCase()} — ${label}**`,
+      '',
+      saved.title,
+      '',
+      `_Status updated to ${next}_`,
+    ].join('\n');
+
+    const message = await this.sendMessage({
+      actorId: payload.actorId,
+      conversationId: saved.conversationId,
+      body,
+      type: MessageType.TEXT,
+    });
+
+    return {
+      incident: this.toIncidentView(
+        saved,
+        await this.conversationNameFor(saved.conversationId),
+      ),
+      message,
+    };
   }
 
   async createReminder(
@@ -5013,6 +5758,22 @@ export class ChatService {
       return this.handlePollSlash(payload, conversation, text);
     }
 
+    if (name === 'approve') {
+      return this.handleApproveSlash(payload, conversation, text);
+    }
+
+    if (name === 'sr' || name === 'savedreply') {
+      return this.handleSavedReplySlash(payload, text);
+    }
+
+    if (name === 'wiki') {
+      return this.handleWikiSlash(payload, conversation, text);
+    }
+
+    if (name === 'incident') {
+      return this.handleIncidentSlash(payload, conversation, text);
+    }
+
     if (name === 'assign') {
       return this.handleAssignSlash(payload, conversation, text);
     }
@@ -5022,14 +5783,14 @@ export class ChatService {
         return {
           kind: 'ephemeral',
           ephemeral:
-            'Usage: /ai what happened in this channel?\nAsk Relay answers from messages in this conversation.',
+            'Usage: /ai what happened in this channel?\nAsk Relay opens the Ask panel (handled by the API gateway).',
         };
       }
-      // Handled on the API gateway (AI lives there). Stub for /help + RPC callers.
+      // Primary path is the gateway (`kind: 'ask'`) or ThreadView composer intercept.
       return {
         kind: 'ephemeral',
         ephemeral:
-          'Ask Relay runs in the composer — send /ai with your question from chat.',
+          'Ask Relay is available in the Ask panel (lightbulb) or type /ai in the composer. The gateway answers with channel-scoped citations.',
       };
     }
 
@@ -5316,6 +6077,331 @@ export class ChatService {
       allowMultiple: false,
     });
     return { kind: 'message', message };
+  }
+
+  private async handleApproveSlash(
+    payload: InvokeSlashCommandPayload,
+    _conversation: Conversation,
+    text: string,
+  ): Promise<InvokeSlashCommandResult> {
+    const title = text.trim();
+    if (!title || title.toLowerCase() === 'help') {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'Usage: `/approve Ship Friday release?`\nPosts an interactive Approve / Deny card everyone can decide on.',
+      };
+    }
+    if (title.length < 2) {
+      return {
+        kind: 'ephemeral',
+        ephemeral: 'Add a short request after /approve.',
+      };
+    }
+    const message = await this.createInteractive({
+      actorId: payload.actorId,
+      conversationId: payload.conversationId,
+      title: title.slice(0, 280),
+      kind: 'approval',
+    });
+    return { kind: 'message', message };
+  }
+
+  private async handleSavedReplySlash(
+    payload: InvokeSlashCommandPayload,
+    text: string,
+  ): Promise<InvokeSlashCommandResult> {
+    const shortcut = text.trim().toLowerCase().replace(/^\/+/, '');
+    if (!shortcut || shortcut === 'help' || shortcut === 'list') {
+      const replies = await this.listSavedReplies({ actorId: payload.actorId });
+      if (!replies.length) {
+        return {
+          kind: 'ephemeral',
+          ephemeral:
+            'No saved replies yet. Open the Saved replies button in the composer to create one, then use `/sr shortcut`.',
+        };
+      }
+      const lines = replies
+        .slice(0, 12)
+        .map(
+          (item) =>
+            `• ${item.title}${item.shortcut ? ` (\`/sr ${item.shortcut}\`)` : ''}`,
+        )
+        .join('\n');
+      return {
+        kind: 'ephemeral',
+        ephemeral: `Saved replies:\n${lines}\n\nInsert one with \`/sr shortcut\`.`,
+      };
+    }
+    const candidate = shortcut.trim().toLowerCase().replace(/^\/+/, '');
+    if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(candidate)) {
+      return {
+        kind: 'ephemeral',
+        ephemeral: 'Usage: `/sr onit` (shortcut: letters, numbers, _ or -)',
+      };
+    }
+    const row = await this.savedReplies.findOne({
+      where: {
+        organizationId: requireOrganizationId(),
+        userId: payload.actorId,
+        shortcut: candidate,
+      },
+    });
+    if (!row) {
+      return {
+        kind: 'ephemeral',
+        ephemeral: `No saved reply with shortcut \`${candidate}\`. Try \`/sr list\`.`,
+      };
+    }
+    // Post the saved reply as a message (demo-friendly).
+    const posted = await this.sendMessage({
+      actorId: payload.actorId,
+      conversationId: payload.conversationId,
+      body: row.body,
+      type: MessageType.TEXT,
+    });
+    return { kind: 'message', message: posted };
+  }
+
+  private async handleWikiSlash(
+    payload: InvokeSlashCommandPayload,
+    _conversation: Conversation,
+    text: string,
+  ): Promise<InvokeSlashCommandResult> {
+    const raw = text.trim();
+    const lower = raw.toLowerCase();
+
+    if (!raw || lower === 'help' || lower === 'list') {
+      const pages = await this.listWikiPages({ actorId: payload.actorId });
+      if (!pages.length) {
+        return {
+          kind: 'ephemeral',
+          ephemeral:
+            'No wiki pages yet. Open **Wiki** in the sidebar to create one, then share with `/wiki share <slug-or-title>`.',
+        };
+      }
+      const lines = pages
+        .slice(0, 12)
+        .map((item) => `• **${item.title}** (\`${item.slug}\`)`)
+        .join('\n');
+      return {
+        kind: 'ephemeral',
+        ephemeral: `Workspace wiki:\n${lines}\n\nShare into this channel: \`/wiki share ${pages[0]?.slug ?? 'slug'}\`\nSearch: \`/wiki find keyword\``,
+      };
+    }
+
+    if (lower.startsWith('find ') || lower.startsWith('search ')) {
+      const q = raw.replace(/^(find|search)\s+/i, '').trim();
+      const pages = await this.listWikiPages({
+        actorId: payload.actorId,
+        q,
+      });
+      if (!pages.length) {
+        return {
+          kind: 'ephemeral',
+          ephemeral: `No wiki pages match “${q}”.`,
+        };
+      }
+      const lines = pages
+        .slice(0, 12)
+        .map((item) => `• **${item.title}** (\`${item.slug}\`)`)
+        .join('\n');
+      return {
+        kind: 'ephemeral',
+        ephemeral: `Wiki search “${q}”:\n${lines}\n\nShare: \`/wiki share slug\``,
+      };
+    }
+
+    const shareMatch = raw.match(/^(share|post|send)\s+(.+)$/i);
+    const lookup = (shareMatch ? shareMatch[2] : raw).trim();
+
+    const organizationId = requireOrganizationId();
+    const slugCandidate = this.slugifyWiki(lookup);
+    let page =
+      (await this.wikiPages.findOne({
+        where: { organizationId, slug: slugCandidate },
+      })) ||
+      (await this.wikiPages.findOne({
+        where: {
+          organizationId,
+          title: ILike(escapeIlikePattern(lookup)),
+        },
+      }));
+
+    if (!page && lookup.length >= 2) {
+      const matches = await this.listWikiPages({
+        actorId: payload.actorId,
+        q: lookup,
+      });
+      if (matches.length === 1) {
+        page = await this.wikiPages.findOne({
+          where: { id: matches[0].id, organizationId },
+        });
+      } else if (matches.length > 1) {
+        const lines = matches
+          .slice(0, 8)
+          .map((item) => `• **${item.title}** (\`${item.slug}\`)`)
+          .join('\n');
+        return {
+          kind: 'ephemeral',
+          ephemeral: `Several pages match “${lookup}”:\n${lines}\n\nBe specific: \`/wiki share exact-slug\``,
+        };
+      }
+    }
+
+    if (!page) {
+      return {
+        kind: 'ephemeral',
+        ephemeral: `No wiki page for “${lookup}”. Create one in the sidebar Wiki, or try \`/wiki list\`.`,
+      };
+    }
+
+    const snippet = page.body
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 280);
+    const body = [
+      `📘 **Wiki: ${page.title}**`,
+      '',
+      snippet + (page.body.trim().length > 280 ? '…' : ''),
+      '',
+      `_Workspace wiki · \`${page.slug}\` — open **Wiki** in the sidebar to read the full page._`,
+    ].join('\n');
+
+    const posted = await this.sendMessage({
+      actorId: payload.actorId,
+      conversationId: payload.conversationId,
+      body,
+      type: MessageType.TEXT,
+    });
+    return { kind: 'message', message: posted };
+  }
+
+  private async handleIncidentSlash(
+    payload: InvokeSlashCommandPayload,
+    conversation: Conversation,
+    text: string,
+  ): Promise<InvokeSlashCommandResult> {
+    const raw = text.trim();
+    const lower = raw.toLowerCase();
+
+    if (!raw || lower === 'help') {
+      return {
+        kind: 'ephemeral',
+        ephemeral: [
+          'Ops war-room commands:',
+          '• `/incident open sev2 Database down` — declare an incident',
+          '• `/incident status` — show active incident in this channel',
+          '• `/incident mitigate` — mark mitigated',
+          '• `/incident resolve` — close the war room',
+          '• `/incident list` — active incidents across the workspace',
+        ].join('\n'),
+      };
+    }
+
+    if (lower === 'list' || lower === 'active') {
+      const items = await this.listIncidents({
+        actorId: payload.actorId,
+        scope: 'active',
+      });
+      if (!items.length) {
+        return {
+          kind: 'ephemeral',
+          ephemeral: 'No active incidents in this workspace.',
+        };
+      }
+      const lines = items
+        .slice(0, 12)
+        .map(
+          (item) =>
+            `• ${item.severity.toUpperCase()} **${item.title}** — ${item.conversationName ?? 'channel'} (${item.status})`,
+        )
+        .join('\n');
+      return {
+        kind: 'ephemeral',
+        ephemeral: `Active incidents:\n${lines}`,
+      };
+    }
+
+    if (lower === 'status') {
+      const current = await this.getChannelIncident({
+        actorId: payload.actorId,
+        conversationId: conversation.id,
+      });
+      if (!current) {
+        return {
+          kind: 'ephemeral',
+          ephemeral:
+            'No active incident in this channel. Open one with `/incident open sev2 title`.',
+        };
+      }
+      return {
+        kind: 'ephemeral',
+        ephemeral: `Active: **${current.severity.toUpperCase()}** ${current.title} (${current.status})`,
+      };
+    }
+
+    if (lower === 'mitigate' || lower === 'resolve' || lower === 'resolved') {
+      const current = await this.getChannelIncident({
+        actorId: payload.actorId,
+        conversationId: conversation.id,
+      });
+      if (!current) {
+        return {
+          kind: 'ephemeral',
+          ephemeral: 'No active incident to update in this channel.',
+        };
+      }
+      const status: IncidentStatus =
+        lower === 'mitigate' ? 'mitigated' : 'resolved';
+      const result = await this.updateIncident({
+        actorId: payload.actorId,
+        incidentId: current.id,
+        status,
+      });
+      if (result.message) {
+        return { kind: 'message', message: result.message };
+      }
+      return {
+        kind: 'ephemeral',
+        ephemeral: `Incident already ${status}.`,
+      };
+    }
+
+    const openMatch = raw.match(
+      /^(?:open|declare|start)\s+(sev[1-4]|[1-4])\s+(.+)$/i,
+    );
+    if (openMatch) {
+      const severity = this.parseIncidentSeverity(openMatch[1]);
+      const title = openMatch[2].trim();
+      if (!severity || !title) {
+        return {
+          kind: 'ephemeral',
+          ephemeral: 'Usage: `/incident open sev2 Database is down`',
+        };
+      }
+      try {
+        const result = await this.openIncident({
+          actorId: payload.actorId,
+          conversationId: conversation.id,
+          severity,
+          title,
+        });
+        return { kind: 'message', message: result.message };
+      } catch (err) {
+        const message =
+          err && typeof err === 'object' && 'message' in err
+            ? String((err as { message: unknown }).message)
+            : 'Could not open incident';
+        return { kind: 'ephemeral', ephemeral: message };
+      }
+    }
+
+    return {
+      kind: 'ephemeral',
+      ephemeral:
+        'Usage: `/incident open sev2 title` · `/incident status` · `/incident resolve` · `/incident list`',
+    };
   }
 
   private async handleAssignSlash(
@@ -7363,6 +8449,10 @@ export class ChatService {
         !deletedForEveryone && message.poll
           ? this.toPollView(message.poll, actorId)
           : null,
+      interactive:
+        !deletedForEveryone && message.interactive
+          ? this.toInteractiveView(message.interactive, actorId)
+          : null,
       editedAt: message.editedAt?.toISOString() ?? null,
       pinned: Boolean(message.pinnedAt) && !deletedForEveryone,
       pinnedAt:
@@ -7408,6 +8498,29 @@ export class ChatService {
       allowMultiple: Boolean(poll.allowMultiple),
       closed: Boolean(poll.closed),
       totalVotes: options.reduce((sum, option) => sum + option.voteCount, 0),
+    };
+  }
+
+  private toInteractiveView(
+    interactive: NonNullable<Message['interactive']>,
+    actorId?: string,
+  ): InteractiveView {
+    return {
+      kind: 'approval',
+      title: String(interactive.title ?? ''),
+      status: interactive.status,
+      actions: (interactive.actions ?? []).map((action) => ({
+        id: action.id,
+        label: action.label,
+        style: action.style,
+        value: action.value,
+      })),
+      decidedBy: interactive.decidedBy ?? null,
+      decidedAt: interactive.decidedAt ?? null,
+      decidedValue: interactive.decidedValue ?? null,
+      decidedByMe: Boolean(
+        actorId && interactive.decidedBy && interactive.decidedBy === actorId,
+      ),
     };
   }
 

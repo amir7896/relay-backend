@@ -16,14 +16,82 @@ export class AiService {
     private readonly config: ConfigService,
   ) {}
 
+  /** RELAY_DEMO_MODE or DEMO_AI — polished answers without Ollama/OpenAI. */
+  private isDemoAi(): boolean {
+    return this.envFlag('DEMO_AI', true);
+  }
+
+  private isRelayDemoMode(): boolean {
+    return this.envFlag('RELAY_DEMO_MODE', false);
+  }
+
+  private envFlag(name: string, followDemoMode: boolean): boolean {
+    const raw = this.config.get<string>(name)?.trim().toLowerCase();
+    if (raw === 'true' || raw === '1' || raw === 'yes') return true;
+    if (raw === 'false' || raw === '0' || raw === 'no') return false;
+    return followDemoMode ? this.isRelayDemoMode() : false;
+  }
+
+  private demoSummarizeLines(lines: string[], label: string): string {
+    const pick = lines.slice(-8).map((line) => line.replace(/^-\s*/, '').trim()).filter(Boolean);
+    if (pick.length === 0) {
+      return `${label}: nothing concrete yet.`;
+    }
+    const bullets = pick.slice(0, 5).map((line) => `• ${line.slice(0, 160)}`);
+    return [
+      `${label} (demo AI · grounded in recent messages):`,
+      ...bullets,
+      pick.length > 5 ? `• …and ${pick.length - 5} more` : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private demoAskFromCitations(
+    question: string,
+    citations: Array<{
+      conversationName: string | null;
+      bodySnippet: string;
+    }>,
+    mentionsMode: boolean,
+  ): string {
+    const top = citations.slice(0, 4);
+    const refs = top
+      .map((item, index) => {
+        const where = item.conversationName
+          ? `#${item.conversationName.replace(/^#/, '')}`
+          : 'this channel';
+        return `[${index + 1}] ${where}: “${item.bodySnippet.slice(0, 140)}”`;
+      })
+      .join('\n');
+    if (mentionsMode) {
+      return [
+        `Here’s who @mentioned you recently (demo AI · grounded citations):`,
+        refs,
+        '',
+        `Asked: “${question.slice(0, 120)}”`,
+      ].join('\n');
+    }
+    return [
+      `Based on matching workspace messages for “${question.slice(0, 120)}” (demo AI · grounded citations):`,
+      refs,
+      '',
+      'Open a citation below to jump to the source thread.',
+    ].join('\n');
+  }
+
   /**
    * Shared LLM call. Prefers Ollama (local) when configured, then OpenAI.
    * Set AI_PROVIDER=ollama|openai|auto (default auto).
+   * DEMO_AI / RELAY_DEMO_MODE skips remote calls (callers use templates).
    */
   private async chatComplete(opts: {
     messages: ChatMessageParam[];
     temperature?: number;
   }): Promise<{ content: string; provider: 'ollama' | 'openai' } | null> {
+    if (this.isDemoAi()) {
+      return null;
+    }
     const preferred = (
       this.config.get<string>('AI_PROVIDER') || 'auto'
     )
@@ -116,7 +184,7 @@ export class AiService {
   async summarizeConversation(
     actorId: string,
     conversationId: string,
-  ): Promise<{ summary: string; poweredByAi: boolean }> {
+  ): Promise<{ summary: string; poweredByAi: boolean; demoMode?: boolean }> {
     const history = await this.proxy.sendChat<PaginatedResult<MessageView>>(
       CHAT_PATTERNS.LIST_MESSAGES,
       { actorId, conversationId, page: 1, limit: 40 },
@@ -144,6 +212,14 @@ export class AiService {
     });
     if (ai?.content) {
       return { summary: ai.content, poweredByAi: true };
+    }
+
+    if (this.isDemoAi()) {
+      return {
+        summary: this.demoSummarizeLines(lines, 'Channel summary'),
+        poweredByAi: true,
+        demoMode: true,
+      };
     }
 
     const recent = lines.slice(-6);
@@ -265,6 +341,19 @@ export class AiService {
       }
     }
 
+    if (this.isDemoAi() && lines.length > 0) {
+      return {
+        summary: this.demoSummarizeLines(
+          lines,
+          `Catch me up · ${unread.length} unread`,
+        ),
+        poweredByAi: true,
+        messageCount: unread.length,
+        firstUnreadMessageId,
+        since: sinceRaw,
+      };
+    }
+
     const highlights = lines.slice(0, 8);
     return {
       summary:
@@ -328,27 +417,19 @@ export class AiService {
     }
 
     const lower = text.toLowerCase();
+    let replies: string[];
     if (lower.includes('?')) {
-      return {
-        replies: ['Yes, sounds good', 'Let me check', 'Not sure yet'],
-        poweredByAi: false,
-      };
-    }
-    if (lower.includes('thanks') || lower.includes('thank you')) {
-      return {
-        replies: ["You're welcome!", 'Anytime', 'Happy to help'],
-        poweredByAi: false,
-      };
-    }
-    if (lower.includes('meet') || lower.includes('call')) {
-      return {
-        replies: ['Works for me', 'What time?', 'Can we do async?'],
-        poweredByAi: false,
-      };
+      replies = ['Yes, sounds good', 'Let me check', 'Not sure yet'];
+    } else if (lower.includes('thanks') || lower.includes('thank you')) {
+      replies = ["You're welcome!", 'Anytime', 'Happy to help'];
+    } else if (lower.includes('meet') || lower.includes('call')) {
+      replies = ['Works for me', 'What time?', 'Can we do async?'];
+    } else {
+      replies = ['On it', 'Got it', 'Will follow up'];
     }
     return {
-      replies: ['On it', 'Got it', 'Will follow up'],
-      poweredByAi: false,
+      replies,
+      poweredByAi: this.isDemoAi(),
     };
   }
 
@@ -414,9 +495,11 @@ export class AiService {
     }
 
     return {
-      translatedText: `[${lang}] ${text}`,
+      translatedText: this.isDemoAi()
+        ? `(${lang}) ${text}`
+        : `[${lang}] ${text}`,
       detectedLanguage: null,
-      poweredByAi: false,
+      poweredByAi: this.isDemoAi(),
     };
   }
 
@@ -424,6 +507,7 @@ export class AiService {
    * Ask Relay — hybrid RAG: FTS retrieve → LLM answer with citations.
    * Mention-style questions use the mentions index (not keyword search).
    * Without a running LLM, returns a ranked excerpt digest.
+   * DEMO_AI / RELAY_DEMO_MODE always returns a polished grounded answer.
    */
   async askRelay(
     actorId: string,
@@ -432,6 +516,7 @@ export class AiService {
   ): Promise<{
     answer: string;
     poweredByAi: boolean;
+    demoMode?: boolean;
     citations: Array<{
       messageId: string;
       conversationId: string;
@@ -644,9 +729,26 @@ export class AiService {
             }`,
         )
         .join('\n');
+      if (this.isDemoAi()) {
+        return {
+          answer: this.demoAskFromCitations(cleaned, citations, true),
+          poweredByAi: true,
+          demoMode: true,
+          citations: citations.slice(0, 5),
+        };
+      }
       return {
         answer: `Recent messages that @mentioned you:\n${digest}`,
         poweredByAi: false,
+        citations: citations.slice(0, 5),
+      };
+    }
+
+    if (this.isDemoAi()) {
+      return {
+        answer: this.demoAskFromCitations(cleaned, citations, false),
+        poweredByAi: true,
+        demoMode: true,
         citations: citations.slice(0, 5),
       };
     }
@@ -763,12 +865,16 @@ export class AiService {
 
     return {
       generatedAt: new Date().toISOString(),
-      poweredByAi: Boolean(ai?.content) || anyAi,
+      poweredByAi: Boolean(ai?.content) || anyAi || this.isDemoAi(),
       overview:
         ai?.content ||
-        `You have unread activity in ${sections.length} conversation${
-          sections.length === 1 ? '' : 's'
-        }. Open each section below to jump in.`,
+        (this.isDemoAi()
+          ? `Morning digest (demo AI): ${sections.length} conversation${
+              sections.length === 1 ? '' : 's'
+            } need attention — start with the highest unread counts below.`
+          : `You have unread activity in ${sections.length} conversation${
+              sections.length === 1 ? '' : 's'
+            }. Open each section below to jump in.`),
       sections,
     };
   }

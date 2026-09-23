@@ -68,6 +68,7 @@ export class SlackProductsController {
   }
 
   @Get('conversations/:id/canvas') getCanvas(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string) { return this.wrap('Canvas retrieved', CHAT_PATTERNS.GET_CANVAS, this.payload(u, id)); }
+  @Get('conversations/:id/whiteboard') getWhiteboard(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string) { return this.wrap('Whiteboard retrieved', CHAT_PATTERNS.GET_WHITEBOARD, this.payload(u, id)); }
   @Put('conversations/:id/canvas')
   async putCanvas(
     @CurrentUser() u: AuthenticatedUser,
@@ -373,13 +374,29 @@ export class SlackProductsController {
         throw new BadRequestAppException('Could not create Connect invite token');
       }
       const inviteUrl = `${this.mail.publicAppUrl}/connect-invite/${rawToken}`;
+      const emailed = await this.mail.send({
+        to: email,
+        subject: 'You’re invited to a shared Relay channel',
+        text: [
+          `You’ve been invited to connect on Relay.`,
+          '',
+          `Open this link to join:`,
+          inviteUrl,
+          '',
+          `If you didn’t expect this, you can ignore the email.`,
+        ].join('\n'),
+        html: `<p>You’ve been invited to connect on <strong>Relay</strong>.</p><p><a href="${inviteUrl}">Accept invite</a></p><p style="color:#666;font-size:12px">${inviteUrl}</p>`,
+      });
       return {
-        message: 'Workspace Connect invite created',
+        message: emailed.delivered
+          ? 'Workspace Connect invite created and emailed'
+          : 'Workspace Connect invite created',
         data: {
           ...shared,
           token: rawToken,
           inviteUrl,
           inviteKind: 'workspace_share' as const,
+          emailDelivered: emailed.delivered,
         },
       };
     }
@@ -431,7 +448,26 @@ export class SlackProductsController {
       inviteKind: 'guest_email' as const,
     };
 
-    return { message: 'Connect invite created', data };
+    const emailed = await this.mail.send({
+      to: email,
+      subject: 'You’re invited to join a Relay channel',
+      text: [
+        `You’ve been invited as a guest on Relay.`,
+        '',
+        `Open this link to accept:`,
+        inviteUrl,
+        '',
+        `If you didn’t expect this, you can ignore the email.`,
+      ].join('\n'),
+      html: `<p>You’re invited as a guest on <strong>Relay</strong>.</p><p><a href="${inviteUrl}">Accept invite</a></p><p style="color:#666;font-size:12px">${inviteUrl}</p>`,
+    });
+
+    return {
+      message: emailed.delivered
+        ? 'Connect invite created and emailed'
+        : 'Connect invite created',
+      data: { ...data, emailDelivered: emailed.delivered },
+    };
   }
 
   @Get('conversations/:id/connect')
@@ -649,6 +685,19 @@ export class SlackProductsController {
     }
     return { message: 'Standup posted', data: result };
   }
+  @Get('conversations/:id/standup')
+  standupBoard(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Query('appKey') appKey?: string,
+  ) {
+    return this.wrap(
+      'Standup board retrieved',
+      CHAT_PATTERNS.GET_STANDUP_BOARD,
+      this.payload(u, id, appKey ? { appKey } : {}),
+    );
+  }
+
   @Post('conversations/:id/standup/summary')
   async standupSummary(
     @CurrentUser() u: AuthenticatedUser,

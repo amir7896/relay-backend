@@ -207,6 +207,16 @@ export class ChatController {
     return this.withOrg(payload, () => this.chatService.votePoll(payload));
   }
 
+  @MessagePattern(CHAT_PATTERNS.CREATE_INTERACTIVE)
+  createInteractive(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.createInteractive(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.INVOKE_MESSAGE_ACTION)
+  invokeMessageAction(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.invokeMessageAction(payload));
+  }
+
   @MessagePattern(CHAT_PATTERNS.SAVE_BOOKMARK)
   saveBookmark(@Payload() payload: SaveBookmarkPayload & TenantChatPayload) {
     return this.withOrg(payload, () => this.chatService.saveBookmark(payload));
@@ -343,6 +353,73 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.LIST_MY_DRAFTS)
   listMyDrafts(@Payload() payload: ListMyDraftsPayload & TenantChatPayload) {
     return this.withOrg(payload, () => this.chatService.listMyDrafts(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_SAVED_REPLIES)
+  listSavedReplies(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.listSavedReplies(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_SAVED_REPLY)
+  createSavedReply(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.createSavedReply(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UPDATE_SAVED_REPLY)
+  updateSavedReply(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.updateSavedReply(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.DELETE_SAVED_REPLY)
+  deleteSavedReply(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.deleteSavedReply(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_WIKI_PAGES)
+  listWikiPages(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.listWikiPages(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.GET_WIKI_PAGE)
+  getWikiPage(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.getWikiPage(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_WIKI_PAGE)
+  createWikiPage(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.createWikiPage(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UPDATE_WIKI_PAGE)
+  updateWikiPage(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.updateWikiPage(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.DELETE_WIKI_PAGE)
+  deleteWikiPage(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.deleteWikiPage(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_INCIDENTS)
+  listIncidents(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.listIncidents(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.GET_CHANNEL_INCIDENT)
+  getChannelIncident(@Payload() payload: any) {
+    return this.withOrg(payload, () =>
+      this.chatService.getChannelIncident(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.OPEN_INCIDENT)
+  openIncident(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.openIncident(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UPDATE_INCIDENT)
+  updateIncident(@Payload() payload: any) {
+    return this.withOrg(payload, () => this.chatService.updateIncident(payload));
   }
 
   @MessagePattern(CHAT_PATTERNS.CREATE_REMINDER)
@@ -836,6 +913,8 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.CREATE_CANVAS_COMMENT) createCanvasComment(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createCanvasComment(p)); }
   @MessagePattern(CHAT_PATTERNS.RESOLVE_CANVAS_COMMENT) resolveCanvasComment(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.resolveCanvasComment(p)); }
   @MessagePattern(CHAT_PATTERNS.DELETE_CANVAS_COMMENT) deleteCanvasComment(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.deleteCanvasComment(p)); }
+  @MessagePattern(CHAT_PATTERNS.GET_WHITEBOARD) getWhiteboard(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getWhiteboard(p)); }
+  @MessagePattern(CHAT_PATTERNS.SAVE_WHITEBOARD_YDOC) saveWhiteboardYdoc(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.saveWhiteboardYdoc(p)); }
   @MessagePattern(CHAT_PATTERNS.LIST_CHANNEL_LISTS) listChannelLists(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.listLists(p)); }
   @MessagePattern(CHAT_PATTERNS.GET_CHANNEL_LIST) getChannelList(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getList(p)); }
   @MessagePattern(CHAT_PATTERNS.CREATE_CHANNEL_LIST) createChannelList(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createList(p)); }
@@ -887,12 +966,14 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.CREATE_APP_ISSUE_FROM_LIST_ITEM) createAppIssueFromListItem(@Payload() p: any) { return this.withOrg(p, () => this.integrations.createIssueFromListItem(p)); }
   @MessagePattern(CHAT_PATTERNS.CREATE_ZOOM_MEETING) createZoomMeeting(@Payload() p: any) { return this.withOrg(p, () => this.integrations.createZoomMeeting(p)); }
   @MessagePattern(CHAT_PATTERNS.INGEST_APP_EVENT) ingestAppEvent(@Payload() p: any) { return this.integrations.ingestEvent(p); }
+  @MessagePattern(CHAT_PATTERNS.DEMO_APP_EVENT) demoAppEvent(@Payload() p: any) { return this.withOrg(p, () => this.integrations.demoInboundEvent(p)); }
   @MessagePattern(CHAT_PATTERNS.LIST_APP_PROJECTS) listAppProjects(@Payload() p: any) { return this.withOrg(p, () => this.integrations.listProjects(p)); }
   @MessagePattern(CHAT_PATTERNS.DISPATCH_DUE_STANDUPS) dispatchDueStandups() { return this.slackProducts.dispatchDueStandups(); }
   @MessagePattern(CHAT_PATTERNS.DISPATCH_DUE_LIST_ITEMS) dispatchDueListItems() { return this.slackProducts.dispatchDueListItems(); }
   @MessagePattern(CHAT_PATTERNS.RUN_STANDUP_NOW) runStandupNow(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.runStandupNow(p)); }
   @MessagePattern(CHAT_PATTERNS.COLLECT_STANDUP_REPLY) collectStandupReply(@Payload() p: any) { return this.slackProducts.collectStandupReply(p); }
   @MessagePattern(CHAT_PATTERNS.SUMMARIZE_STANDUP) summarizeStandup(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.summarizeStandup(p)); }
+  @MessagePattern(CHAT_PATTERNS.GET_STANDUP_BOARD) getStandupBoard(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getStandupBoard(p)); }
 
   @MessagePattern(CHAT_PATTERNS.DELETE_GROUP)
   deleteGroup(

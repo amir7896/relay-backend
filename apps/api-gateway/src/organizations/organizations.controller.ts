@@ -57,6 +57,11 @@ export class OrganizationsController {
     private readonly audit: AuditLoggerService,
   ) {}
 
+  private envFlag(name: string): boolean {
+    const raw = this.config.get<string>(name)?.trim().toLowerCase();
+    return raw === 'true' || raw === '1' || raw === 'yes';
+  }
+
   @Get()
   async list(@CurrentUser() user: AuthenticatedUser) {
     const data = await this.proxy.sendAuth<OrganizationView[]>(
@@ -96,7 +101,7 @@ export class OrganizationsController {
     );
 
     try {
-      await this.proxy.sendChat<ConversationView>(
+      const general = await this.proxy.sendChat<ConversationView>(
         CHAT_PATTERNS.CREATE_GROUP,
         {
           actorId: user.id,
@@ -106,6 +111,57 @@ export class OrganizationsController {
         },
         { skipTenant: true },
       );
+
+      const seedStandup =
+        this.envFlag('DEMO_STANDUP_ON_GENERAL') ||
+        this.envFlag('RELAY_DEMO_MODE');
+      if (seedStandup && general?.id) {
+        try {
+          await this.proxy.sendChat(
+            CHAT_PATTERNS.INSTALL_APP,
+            {
+              actorId: user.id,
+              organizationId: data.id,
+              appKey: 'standup',
+              config: {
+                conversationId: general.id,
+                time: '09:30',
+                timezone: 'UTC',
+                weekdays: [1, 2, 3, 4, 5],
+                questions: [
+                  'What did you do yesterday?',
+                  'What will you do today?',
+                  'Any blockers?',
+                ],
+                summaryOffsetMinutes: 480,
+              },
+            },
+            { skipTenant: true },
+          );
+          const posted = (await this.proxy.sendChat(
+            CHAT_PATTERNS.RUN_STANDUP_NOW,
+            {
+              actorId: user.id,
+              organizationId: data.id,
+              appKey: 'standup',
+              conversationId: general.id,
+            },
+            { skipTenant: true },
+          )) as { message?: Record<string, unknown> & { conversationId: string; recipientIds?: string[] } };
+          if (posted?.message) {
+            // Standup prompt is in DB; clients pick it up on next channel load.
+            this.logger.log(
+              `Seeded standup bot + open run on #general for org ${data.id}`,
+            );
+          }
+        } catch (seedError) {
+          this.logger.warn(
+            `Could not seed standup on #general for org ${data.id}: ${
+              seedError instanceof Error ? seedError.message : 'unknown'
+            }`,
+          );
+        }
+      }
     } catch (error) {
       this.logger.warn(
         `Could not seed #general for org ${data.id}: ${

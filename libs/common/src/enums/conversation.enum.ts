@@ -18,6 +18,8 @@ export enum MessageType {
   CALL = 'call',
   /** Interactive poll card. */
   POLL = 'poll',
+  /** Interactive action card (approvals / Block Kit–lite buttons). */
+  INTERACTIVE = 'interactive',
 }
 
 export enum PresenceStatus {

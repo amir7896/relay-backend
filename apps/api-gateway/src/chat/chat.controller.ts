@@ -76,6 +76,8 @@ import {
   CreateIncomingWebhookDto,
   CreateOutgoingWebhookDto,
   CreatePollDto,
+  InvokeMessageActionDto,
+  VotePollDto,
   CreatePrivateChatDto,
   CreateReminderDto,
   ListBookmarksQueryDto,
@@ -107,9 +109,14 @@ import {
   UpdateSidebarSectionDto,
   UpdateUserGroupDto,
   UpsertDraftDto,
+  CreateSavedReplyDto,
+  UpdateSavedReplyDto,
+  CreateWikiPageDto,
+  UpdateWikiPageDto,
+  OpenIncidentDto,
+  UpdateIncidentDto,
   UpdateNotificationPrefsDto,
   UpdateChannelNotificationPrefsDto,
-  VotePollDto,
 } from './dto/chat.dto';
 import { PresenceService } from './presence.service';
 import { AiService } from './ai.service';
@@ -1012,30 +1019,15 @@ export class ChatController {
         };
       }
       const ask = await this.ai.askRelay(user.id, question, id);
-      const lines = [
-        ask.poweredByAi
-          ? 'Ask Relay (this channel · AI)'
-          : 'Ask Relay (this channel)',
-        '',
-        ask.answer,
-      ];
-      if (ask.citations?.length) {
-        lines.push('', 'Sources:');
-        ask.citations.slice(0, 5).forEach((citation, index) => {
-          const label = citation.conversationName
-            ? `#${citation.conversationName.replace(/^#/, '')}`
-            : 'this channel';
-          lines.push(
-            `${index + 1}. ${label} — ${citation.bodySnippet.slice(0, 120)}`,
-          );
-        });
-      }
       return {
         message: 'Slash command executed',
         data: {
-          kind: 'ephemeral' as const,
-          ephemeral: lines.join('\n'),
+          kind: 'ask' as const,
           ask,
+          // Keep a short ephemeral for older clients.
+          ephemeral: ask.poweredByAi
+            ? 'Ask Relay answered in the Ask panel.'
+            : 'Ask Relay opened with local matches — see the Ask panel.',
         },
       };
     }
@@ -1403,6 +1395,67 @@ export class ChatController {
     return { message: 'Notification preferences retrieved', data };
   }
 
+  @Get('conversations/:id/schedule-context')
+  async getScheduleContext(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    const conversation = await this.proxy.sendChat<{
+      id: string;
+      type: 'private' | 'group';
+      members: Array<{ userId: string }>;
+    }>(CHAT_PATTERNS.GET_CONVERSATION, {
+      actorId: user.id,
+      conversationId: id,
+    });
+    const myPrefs = await this.notificationPrefs.get(user.id);
+    const myTimezone = myPrefs.timezone || 'UTC';
+
+    if (conversation.type !== 'private') {
+      return {
+        message: 'Schedule context retrieved',
+        data: {
+          conversationId: id,
+          conversationType: conversation.type,
+          myTimezone,
+          peer: null as null,
+        },
+      };
+    }
+
+    const peerId = conversation.members
+      .map((member) => member.userId)
+      .find((memberId) => memberId !== user.id);
+    if (!peerId) {
+      return {
+        message: 'Schedule context retrieved',
+        data: {
+          conversationId: id,
+          conversationType: conversation.type,
+          myTimezone,
+          peer: null as null,
+        },
+      };
+    }
+
+    const peerPrefs = await this.notificationPrefs.get(peerId);
+    return {
+      message: 'Schedule context retrieved',
+      data: {
+        conversationId: id,
+        conversationType: conversation.type,
+        myTimezone,
+        peer: {
+          userId: peerId,
+          timezone: peerPrefs.timezone || 'UTC',
+          quietHoursEnabled: peerPrefs.quietHoursEnabled,
+          quietStart: peerPrefs.quietStart,
+          quietEnd: peerPrefs.quietEnd,
+        },
+      },
+    };
+  }
+
   @Patch('notification-prefs')
   async updateNotificationPrefs(
     @CurrentUser() user: AuthenticatedUser,
@@ -1658,6 +1711,29 @@ export class ChatController {
     await this.conversationCache.setMemberIds(id, recipientIds);
     this.chatGateway.broadcastMessage(data, recipientIds);
     return { message: 'Vote recorded', data };
+  }
+
+  @Post('conversations/:id/messages/:messageId/actions')
+  @HttpCode(HttpStatus.OK)
+  async invokeMessageAction(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Param('messageId', ParseUuidPipe) messageId: string,
+    @Body() dto: InvokeMessageActionDto,
+  ) {
+    const result = await this.proxy.sendChat<SendMessageResult>(
+      CHAT_PATTERNS.INVOKE_MESSAGE_ACTION,
+      {
+        actorId: user.id,
+        conversationId: id,
+        messageId,
+        actionId: dto.actionId,
+      },
+    );
+    const { recipientIds, mutedRecipientIds: _muted, ...data } = result;
+    await this.conversationCache.setMemberIds(id, recipientIds);
+    this.chatGateway.broadcastMessage(data, recipientIds);
+    return { message: 'Action recorded', data };
   }
 
   @Get('bookmarks')
@@ -1974,6 +2050,207 @@ export class ChatController {
       limit: query.limit,
     });
     return { message: 'Drafts retrieved', data };
+  }
+
+  @Get('saved-replies')
+  async listSavedReplies(@CurrentUser() user: AuthenticatedUser) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_SAVED_REPLIES, {
+      actorId: user.id,
+    });
+    return { message: 'Saved replies retrieved', data };
+  }
+
+  @Post('saved-replies')
+  @HttpCode(HttpStatus.CREATED)
+  async createSavedReply(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateSavedReplyDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.CREATE_SAVED_REPLY, {
+      actorId: user.id,
+      title: dto.title,
+      body: dto.body,
+      shortcut: dto.shortcut,
+    });
+    return { message: 'Saved reply created', data };
+  }
+
+  @Patch('saved-replies/:replyId')
+  async updateSavedReply(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('replyId', ParseUuidPipe) replyId: string,
+    @Body() dto: UpdateSavedReplyDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.UPDATE_SAVED_REPLY, {
+      actorId: user.id,
+      replyId,
+      title: dto.title,
+      body: dto.body,
+      shortcut: dto.shortcut,
+    });
+    return { message: 'Saved reply updated', data };
+  }
+
+  @Delete('saved-replies/:replyId')
+  async deleteSavedReply(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('replyId', ParseUuidPipe) replyId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.DELETE_SAVED_REPLY, {
+      actorId: user.id,
+      replyId,
+    });
+    return { message: 'Saved reply deleted', data };
+  }
+
+  @Get('wiki-pages')
+  async listWikiPages(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('q') q?: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_WIKI_PAGES, {
+      actorId: user.id,
+      q: q?.trim() || undefined,
+    });
+    return { message: 'Wiki pages retrieved', data };
+  }
+
+  @Get('wiki-pages/:pageId')
+  async getWikiPage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('pageId', ParseUuidPipe) pageId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.GET_WIKI_PAGE, {
+      actorId: user.id,
+      pageId,
+    });
+    return { message: 'Wiki page retrieved', data };
+  }
+
+  @Post('wiki-pages')
+  @HttpCode(HttpStatus.CREATED)
+  async createWikiPage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateWikiPageDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.CREATE_WIKI_PAGE, {
+      actorId: user.id,
+      title: dto.title,
+      body: dto.body,
+      slug: dto.slug,
+    });
+    return { message: 'Wiki page created', data };
+  }
+
+  @Patch('wiki-pages/:pageId')
+  async updateWikiPage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('pageId', ParseUuidPipe) pageId: string,
+    @Body() dto: UpdateWikiPageDto,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.UPDATE_WIKI_PAGE, {
+      actorId: user.id,
+      pageId,
+      title: dto.title,
+      body: dto.body,
+      slug: dto.slug,
+    });
+    return { message: 'Wiki page updated', data };
+  }
+
+  @Delete('wiki-pages/:pageId')
+  async deleteWikiPage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('pageId', ParseUuidPipe) pageId: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.DELETE_WIKI_PAGE, {
+      actorId: user.id,
+      pageId,
+    });
+    return { message: 'Wiki page deleted', data };
+  }
+
+  @Get('incidents')
+  async listIncidents(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('scope') scope?: 'active' | 'all' | 'resolved',
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_INCIDENTS, {
+      actorId: user.id,
+      scope: scope || 'active',
+    });
+    return { message: 'Incidents retrieved', data };
+  }
+
+  @Get('conversations/:id/incident')
+  async getChannelIncident(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.GET_CHANNEL_INCIDENT, {
+      actorId: user.id,
+      conversationId: id,
+    });
+    return { message: 'Channel incident retrieved', data };
+  }
+
+  @Post('conversations/:id/incidents')
+  @HttpCode(HttpStatus.CREATED)
+  async openIncident(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() dto: OpenIncidentDto,
+  ) {
+    const result = await this.proxy.sendChat<{
+      incident: unknown;
+      message: SendMessageResult;
+    }>(CHAT_PATTERNS.OPEN_INCIDENT, {
+      actorId: user.id,
+      conversationId: id,
+      severity: dto.severity,
+      title: dto.title,
+    });
+    const { recipientIds, mutedRecipientIds: _muted, ...message } =
+      result.message;
+    await this.conversationCache.setMemberIds(id, recipientIds ?? []);
+    this.chatGateway.broadcastMessage(message, recipientIds ?? []);
+    return {
+      message: 'Incident opened',
+      data: { incident: result.incident, message },
+    };
+  }
+
+  @Patch('incidents/:incidentId')
+  async updateIncident(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('incidentId', ParseUuidPipe) incidentId: string,
+    @Body() dto: UpdateIncidentDto,
+  ) {
+    const result = await this.proxy.sendChat<{
+      incident: { conversationId: string };
+      message: SendMessageResult | null;
+    }>(CHAT_PATTERNS.UPDATE_INCIDENT, {
+      actorId: user.id,
+      incidentId,
+      status: dto.status,
+    });
+    if (result.message) {
+      const { recipientIds, mutedRecipientIds: _muted, ...message } =
+        result.message;
+      await this.conversationCache.setMemberIds(
+        result.incident.conversationId,
+        recipientIds ?? [],
+      );
+      this.chatGateway.broadcastMessage(message, recipientIds ?? []);
+      return {
+        message: 'Incident updated',
+        data: { incident: result.incident, message },
+      };
+    }
+    return {
+      message: 'Incident updated',
+      data: { incident: result.incident, message: null },
+    };
   }
 
   @Post('conversations/:id/messages/:messageId/remind')

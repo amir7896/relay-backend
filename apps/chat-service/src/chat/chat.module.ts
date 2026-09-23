@@ -12,6 +12,9 @@ import { ScheduledMessage } from '../database/entities/scheduled-message.entity'
 import { MessageBookmark } from '../database/entities/message-bookmark.entity';
 import { ChannelInvite } from '../database/entities/channel-invite.entity';
 import { MessageDraft } from '../database/entities/message-draft.entity';
+import { SavedReply } from '../database/entities/saved-reply.entity';
+import { WikiPage } from '../database/entities/wiki-page.entity';
+import { Incident } from '../database/entities/incident.entity';
 import { MessageReminder } from '../database/entities/message-reminder.entity';
 import { ThreadFollow } from '../database/entities/thread-follow.entity';
 import { MessageEdit } from '../database/entities/message-edit.entity';
@@ -41,6 +44,9 @@ import { IntegrationsService } from './integrations.service';
       MessageBookmark,
       ChannelInvite,
       MessageDraft,
+      SavedReply,
+      WikiPage,
+      Incident,
       MessageReminder,
       ThreadFollow,
       MessageEdit,

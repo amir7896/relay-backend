@@ -243,6 +243,115 @@ export class UpsertDraftDto {
   body!: string;
 }
 
+export class CreateSavedReplyDto {
+  @ApiProperty({ example: 'On it' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  title!: string;
+
+  @ApiProperty({ example: 'On it — will update you by EOD.' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(4000)
+  body!: string;
+
+  @ApiPropertyOptional({ example: 'onit' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  shortcut?: string | null;
+}
+
+export class UpdateSavedReplyDto {
+  @ApiPropertyOptional({ example: 'On it' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(80)
+  title?: string;
+
+  @ApiPropertyOptional({ example: 'On it — will update you by EOD.' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(4000)
+  body?: string;
+
+  @ApiPropertyOptional({ example: 'onit', nullable: true })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  shortcut?: string | null;
+}
+
+export class CreateWikiPageDto {
+  @ApiProperty({ example: 'Onboarding' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  title!: string;
+
+  @ApiProperty({
+    example: '# Welcome\n\nStart here for setup steps…',
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(20000)
+  body!: string;
+
+  @ApiPropertyOptional({ example: 'onboarding' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  slug?: string | null;
+}
+
+export class UpdateWikiPageDto {
+  @ApiPropertyOptional({ example: 'Onboarding' })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  title?: string;
+
+  @ApiPropertyOptional({
+    example: '# Welcome\n\nUpdated steps…',
+  })
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(20000)
+  body?: string;
+
+  @ApiPropertyOptional({ example: 'onboarding', nullable: true })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  slug?: string | null;
+}
+
+export class OpenIncidentDto {
+  @ApiProperty({ example: 'sev2', enum: ['sev1', 'sev2', 'sev3', 'sev4'] })
+  @IsIn(['sev1', 'sev2', 'sev3', 'sev4'])
+  severity!: 'sev1' | 'sev2' | 'sev3' | 'sev4';
+
+  @ApiProperty({ example: 'Database is down' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(200)
+  title!: string;
+}
+
+export class UpdateIncidentDto {
+  @ApiProperty({
+    example: 'resolved',
+    enum: ['open', 'mitigated', 'resolved'],
+  })
+  @IsIn(['open', 'mitigated', 'resolved'])
+  status!: 'open' | 'mitigated' | 'resolved';
+}
+
 export class UpdateNotificationPrefsDto {
   @ApiPropertyOptional({ enum: ['all', 'mentions', 'none'] })
   @IsOptional()
@@ -503,6 +612,12 @@ export class VotePollDto {
   @ApiProperty({ format: 'uuid' })
   @IsUUID('4')
   optionId!: string;
+}
+
+export class InvokeMessageActionDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID('4')
+  actionId!: string;
 }
 
 export class SaveBookmarkDto {

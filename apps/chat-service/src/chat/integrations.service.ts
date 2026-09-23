@@ -39,6 +39,45 @@ export class IntegrationsService {
     private readonly config: ConfigService,
   ) {}
 
+  private isDemoIntegrations(): boolean {
+    const raw = this.config.get<string>('DEMO_INTEGRATIONS')?.trim().toLowerCase();
+    if (raw === 'true' || raw === '1' || raw === 'yes') return true;
+    if (raw === 'false' || raw === '0' || raw === 'no') return false;
+    const demo = this.config.get<string>('RELAY_DEMO_MODE')?.trim().toLowerCase();
+    return demo === 'true' || demo === '1' || demo === 'yes';
+  }
+
+  private demoConnectionRow(appKey: string) {
+    const names: Record<string, string> = {
+      github: 'Demo GitHub',
+      jira: 'Demo Jira',
+      'google-drive': 'Demo Drive',
+      zoom: 'Demo Zoom',
+    };
+    return {
+      id: `demo-${appKey}`,
+      organizationId: requireOrganizationId(),
+      appKey,
+      providerAccountId: `demo-${appKey}`,
+      providerAccountName: names[appKey] || `Demo ${appKey}`,
+      accessTokenEnc: null,
+      refreshTokenEnc: null,
+      tokenType: 'bearer',
+      scopes: 'demo',
+      expiresAt: null,
+      meta:
+        appKey === 'jira'
+          ? {
+              cloudId: 'demo-cloud',
+              siteUrl: 'https://demo.atlassian.net',
+              demo: true,
+            }
+          : { demo: true },
+      status: 'connected',
+      installedBy: null,
+    };
+  }
+
   private async queryOne(sql: string, params: unknown[] = []) {
     const rows = await this.queryRows(sql, params);
     return rows[0] ?? null;
@@ -106,6 +145,12 @@ export class IntegrationsService {
         [orgId, p.appKey],
       );
       if (!row) {
+        if (
+          this.isDemoIntegrations() &&
+          (p.appKey === 'github' || p.appKey === 'jira')
+        ) {
+          return this.toConnectionView(this.demoConnectionRow(String(p.appKey)));
+        }
         return {
           appKey: p.appKey,
           status: 'disconnected',
@@ -123,7 +168,15 @@ export class IntegrationsService {
       `SELECT * FROM app_oauth_connections WHERE "organizationId"=$1`,
       [orgId],
     );
-    return rows.map((row: any) => this.toConnectionView(row));
+    const views = rows.map((row: any) => this.toConnectionView(row));
+    if (this.isDemoIntegrations()) {
+      for (const key of ['github', 'jira']) {
+        if (!views.some((item: { appKey: string; connected: boolean }) => item.appKey === key && item.connected)) {
+          views.push(this.toConnectionView(this.demoConnectionRow(key)));
+        }
+      }
+    }
+    return views;
   }
 
   async connectionMap(orgId = requireOrganizationId()) {
@@ -134,6 +187,14 @@ export class IntegrationsService {
     const map = new Map<string, any>();
     for (const row of rows) {
       map.set(String(row.appKey), row);
+    }
+    if (this.isDemoIntegrations()) {
+      for (const key of ['github', 'jira']) {
+        const existing = map.get(key);
+        if (!existing || existing.status !== 'connected') {
+          map.set(key, this.demoConnectionRow(key));
+        }
+      }
     }
     return map;
   }
@@ -397,6 +458,29 @@ export class IntegrationsService {
     kind?: string,
     number?: string,
   ) {
+    if (this.isDemoIntegrations()) {
+      if (kind && number) {
+        return {
+          url,
+          title: `${owner}/${repo}#${number}: Demo ${kind === 'pull' ? 'PR' : 'issue'}`.slice(
+            0,
+            200,
+          ),
+          description: `open · demo-user — Seeded unfurl (DEMO_INTEGRATIONS). No live GitHub API call.`,
+          image: null,
+          provider: 'github',
+          externalId: `${owner}/${repo}#${number}`,
+        };
+      }
+      return {
+        url,
+        title: `${owner}/${repo}`,
+        description: `TypeScript · ★ 128 — Demo repository unfurl (DEMO_INTEGRATIONS)`,
+        image: null,
+        provider: 'github',
+        externalId: `${owner}/${repo}`,
+      };
+    }
     const conn = await this.loadConnection('github').catch(() => null);
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
@@ -471,6 +555,16 @@ export class IntegrationsService {
   }
 
   private async unfurlJira(url: string, issueKey: string) {
+    if (this.isDemoIntegrations()) {
+      return {
+        url,
+        title: `${issueKey}: Demo issue from Relay`.slice(0, 200),
+        description: 'Task · In Progress · Demo assignee (DEMO_INTEGRATIONS)',
+        image: null,
+        provider: 'jira',
+        externalId: issueKey,
+      };
+    }
     const conn = await this.loadConnection('jira').catch(() => null);
     if (!conn) {
       return {
@@ -580,6 +674,28 @@ export class IntegrationsService {
 
   async listProjects(p: any) {
     const appKey = String(p.appKey || '');
+    if (this.isDemoIntegrations() && (appKey === 'github' || appKey === 'jira')) {
+      if (appKey === 'github') {
+        return [
+          {
+            id: 'demo-org/relay',
+            name: 'demo-org/relay',
+            url: 'https://github.com/demo-org/relay',
+            private: false,
+          },
+          {
+            id: 'demo-org/platform',
+            name: 'demo-org/platform',
+            url: 'https://github.com/demo-org/platform',
+            private: true,
+          },
+        ];
+      }
+      return [
+        { id: 'DEMO', name: 'DEMO', url: 'https://demo.atlassian.net', key: 'DEMO' },
+        { id: 'REL', name: 'Relay', url: 'https://demo.atlassian.net', key: 'REL' },
+      ];
+    }
     if (appKey === 'github') {
       const conn = await this.loadConnection('github');
       if (!conn) return RpcErrors.badRequest('GitHub is not connected') as never;
@@ -844,6 +960,26 @@ export class IntegrationsService {
   }
 
   private async createGithubIssue(p: any, title: string, body: string) {
+    if (this.isDemoIntegrations()) {
+      const installed = await this.queryOne(
+        `SELECT config FROM installed_apps
+         WHERE "organizationId"=$1 AND "appKey"='github' LIMIT 1`,
+        [requireOrganizationId()],
+      );
+      const config =
+        installed?.config && typeof installed.config === 'object'
+          ? installed.config
+          : {};
+      const repo =
+        String(p.repo || config.defaultRepo || 'demo-org/relay').trim() ||
+        'demo-org/relay';
+      const number = 1000 + Math.floor(Math.random() * 900);
+      return {
+        externalId: `${repo}#${number}`,
+        externalUrl: `https://github.com/${repo}/issues/${number}`,
+        title: `${repo}#${number}: ${title}`.slice(0, 200),
+      };
+    }
     const conn = await this.loadConnection('github');
     if (!conn) return RpcErrors.badRequest('Connect GitHub in Apps first') as never;
 
@@ -895,6 +1031,28 @@ export class IntegrationsService {
   }
 
   private async createJiraIssue(p: any, title: string, body: string) {
+    if (this.isDemoIntegrations()) {
+      const installed = await this.queryOne(
+        `SELECT config FROM installed_apps
+         WHERE "organizationId"=$1 AND "appKey"='jira' LIMIT 1`,
+        [requireOrganizationId()],
+      );
+      const config =
+        installed?.config && typeof installed.config === 'object'
+          ? installed.config
+          : {};
+      const projectKey =
+        String(p.projectKey || config.defaultProjectKey || 'DEMO')
+          .trim()
+          .toUpperCase() || 'DEMO';
+      const number = 10 + Math.floor(Math.random() * 90);
+      const key = `${projectKey}-${number}`;
+      return {
+        externalId: key,
+        externalUrl: `https://demo.atlassian.net/browse/${key}`,
+        title: `${key}: ${title}`.slice(0, 200),
+      };
+    }
     const conn = await this.loadConnection('jira');
     if (!conn) return RpcErrors.badRequest('Connect Jira in Apps first') as never;
     const cloudId = String((conn.row.meta as any)?.cloudId || '');
@@ -1039,7 +1197,108 @@ export class IntegrationsService {
       body: text,
       botUsername: appKey === 'jira' ? 'Jira' : appKey === 'github' ? 'GitHub' : appKey,
     });
-    return { posted: true, message };
+    return { posted: true, message, conversationId };
+  }
+
+  /**
+   * Authenticated demo helper — ensures the app is installed with an events
+   * channel, then posts a sample GitHub/Jira inbound webhook payload.
+   */
+  async demoInboundEvent(p: any) {
+    const appKey = String(p.appKey || '').trim();
+    if (appKey !== 'github' && appKey !== 'jira') {
+      return RpcErrors.badRequest('Demo events are available for github and jira') as never;
+    }
+    const conversationId = String(p.conversationId || '').trim();
+    if (!conversationId) {
+      return RpcErrors.badRequest('conversationId is required') as never;
+    }
+    const orgId = requireOrganizationId();
+    const member = await this.queryOne(
+      `SELECT "userId" FROM conversation_members
+       WHERE "conversationId"=$1 AND "userId"=$2 AND "leftAt" IS NULL LIMIT 1`,
+      [conversationId, p.actorId],
+    );
+    if (!member) {
+      return RpcErrors.forbidden('You are not a member of this conversation') as never;
+    }
+
+    const existing = await this.queryOne(
+      `SELECT * FROM installed_apps
+       WHERE "organizationId"=$1 AND "appKey"=$2 LIMIT 1`,
+      [orgId, appKey],
+    );
+    const prevConfig =
+      existing?.config && typeof existing.config === 'object'
+        ? (existing.config as Record<string, unknown>)
+        : {};
+    const nextConfig = {
+      ...prevConfig,
+      eventsConversationId: conversationId,
+      ...(appKey === 'github' && !prevConfig.defaultRepo
+        ? { defaultRepo: 'demo-org/relay' }
+        : {}),
+      ...(appKey === 'jira' && !prevConfig.defaultProjectKey
+        ? { defaultProjectKey: 'DEMO' }
+        : {}),
+    };
+    await this.queryOne(
+      `INSERT INTO installed_apps ("organizationId","appKey","config","installedBy")
+       VALUES ($1,$2,$3::jsonb,$4)
+       ON CONFLICT ("organizationId","appKey") DO UPDATE SET
+         config=EXCLUDED.config
+       RETURNING *`,
+      [orgId, appKey, JSON.stringify(nextConfig), p.actorId],
+    );
+
+    const sample = this.sampleDemoPayload(appKey, String(p.kind || '').trim());
+    return this.ingestEvent({
+      appKey,
+      organizationId: orgId,
+      eventType: sample.eventType,
+      payload: sample.payload,
+    });
+  }
+
+  private sampleDemoPayload(appKey: string, kind: string) {
+    if (appKey === 'jira') {
+      return {
+        eventType: 'jira:issue_updated',
+        payload: {
+          issueKey: 'DEMO-42',
+          issue: {
+            key: 'DEMO-42',
+            fields: { summary: 'Demo: polish Unreads + Connect invites' },
+          },
+        },
+      };
+    }
+    if (kind === 'pull_request' || kind === 'pr') {
+      return {
+        eventType: 'pull_request',
+        payload: {
+          action: 'opened',
+          pull_request: {
+            number: 128,
+            title: 'feat: demo inbound GitHub events',
+            html_url: 'https://github.com/demo-org/relay/pull/128',
+          },
+          repository: { full_name: 'demo-org/relay' },
+        },
+      };
+    }
+    return {
+      eventType: 'issues',
+      payload: {
+        action: 'opened',
+        issue: {
+          number: 42,
+          title: 'Demo: inbound webhook posted to Relay',
+          html_url: 'https://github.com/demo-org/relay/issues/42',
+        },
+        repository: { full_name: 'demo-org/relay' },
+      },
+    };
   }
 
   private formatInboundEvent(
@@ -1140,6 +1399,7 @@ export class IntegrationsService {
       reactions: [],
       linkPreview: null,
       poll: null,
+      interactive: null,
       pinned: false,
       editedAt: null,
       deletedForEveryone: false,

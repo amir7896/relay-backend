@@ -264,6 +264,58 @@ export class SlackProductsService {
     return this.toCanvasView(row, p.conversationId);
   }
 
+  private toWhiteboardView(row: any | null, conversationId: string) {
+    const organizationId = requireOrganizationId();
+    if (!row) {
+      return {
+        id: '',
+        organizationId,
+        conversationId,
+        ydocState: null,
+        updatedBy: '',
+        createdAt: '',
+        updatedAt: '',
+      };
+    }
+    return {
+      id: String(row.id),
+      organizationId: String(row.organizationId ?? organizationId),
+      conversationId: String(row.conversationId ?? conversationId),
+      ydocState: row.ydocState ? String(row.ydocState) : null,
+      updatedBy: String(row.updatedBy ?? ''),
+      createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
+      updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : '',
+    };
+  }
+
+  async getWhiteboard(p: any) {
+    await this.requireMembership(p.conversationId, p.actorId);
+    const row = await this.queryOne(
+      `SELECT * FROM channel_whiteboards WHERE "organizationId"=$1 AND "conversationId"=$2`,
+      [requireOrganizationId(), p.conversationId],
+    );
+    return this.toWhiteboardView(row ?? null, p.conversationId);
+  }
+
+  async saveWhiteboardYdoc(p: any) {
+    await this.requireMembership(p.conversationId, p.actorId);
+    const ydocState = String(p.ydocState ?? '');
+    if (!ydocState || ydocState.length > 5_000_000) {
+      return RpcErrors.badRequest('Invalid whiteboard document state') as never;
+    }
+    const row = await this.queryOne(
+      `INSERT INTO channel_whiteboards ("organizationId","conversationId","ydocState","updatedBy")
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT ("organizationId","conversationId") DO UPDATE SET
+         "ydocState"=EXCLUDED."ydocState",
+         "updatedBy"=EXCLUDED."updatedBy",
+         "updatedAt"=now()
+       RETURNING *`,
+      [requireOrganizationId(), p.conversationId, ydocState, p.actorId],
+    );
+    return this.toWhiteboardView(row, p.conversationId);
+  }
+
   private toCanvasCommentView(row: any) {
     return {
       id: String(row.id),
@@ -1141,6 +1193,7 @@ export class SlackProductsService {
       reactions: [] as unknown[],
       linkPreview: null,
       poll: null,
+      interactive: null,
       pinned: false,
       pinnedAt: null,
       pinnedByUserId: null,
@@ -1565,6 +1618,7 @@ export class SlackProductsService {
       reactions: [],
       linkPreview: null,
       poll: null,
+      interactive: null,
       pinned: false,
       editedAt: null,
       deletedForEveryone: false,
@@ -2429,11 +2483,9 @@ export class SlackProductsService {
           ? 'Daily Meeting Check-in'
           : 'Daily Standup';
     const lines = [
-      `*${title}* — please reply in this thread (or use \`/standup your update\`).`,
+      `*${title}* — please reply in this thread.`,
       '',
       ...questions.map((question, index) => `${index + 1}. ${question}`),
-      '',
-      '_Tip: `/standup summary` posts today’s collected updates._',
     ];
     return lines.join('\n');
   }
@@ -2501,6 +2553,7 @@ export class SlackProductsService {
       reactions: [],
       linkPreview: null,
       poll: null,
+      interactive: null,
       pinned: false,
       pinnedAt: null,
       pinnedByUserId: null,
@@ -2766,6 +2819,102 @@ export class SlackProductsService {
       promptMessageId: run.promptMessageId ? String(run.promptMessageId) : null,
       runDate: String(run.runDate),
       responses: run.responses || {},
+    };
+  }
+
+  /** Who replied to the open standup in this channel (Apps Today board). */
+  async getStandupBoard(p: any) {
+    await this.requireMembership(p.conversationId, p.actorId);
+    const requestedKey =
+      p.appKey != null && String(p.appKey).trim()
+        ? String(p.appKey).trim()
+        : null;
+    const appKeyFilter =
+      requestedKey && BOT_APP_KEYS.has(requestedKey) ? requestedKey : null;
+
+    const memberRows = await this.queryRows(
+      `SELECT "userId" FROM conversation_members
+       WHERE "conversationId"=$1 AND "leftAt" IS NULL`,
+      [p.conversationId],
+    );
+    const memberIds = memberRows.map((row) => String(row.userId));
+
+    const run = await this.queryOne(
+      `SELECT id, "appKey", "promptMessageId", "runDate", responses, "promptedAt", status
+       FROM standup_runs
+       WHERE "organizationId"=$1 AND "conversationId"=$2 AND status='open'
+         AND ($3::text IS NULL OR "appKey"=$3)
+       ORDER BY "promptedAt" DESC LIMIT 1`,
+      [requireOrganizationId(), p.conversationId, appKeyFilter],
+    );
+
+    if (!run) {
+      return {
+        open: false,
+        run: null,
+        questions: [] as string[],
+        replies: [] as Array<{
+          userId: string;
+          body: string;
+          messageId: string | null;
+          at: string | null;
+        }>,
+        pendingUserIds: memberIds,
+        repliedCount: 0,
+        memberCount: memberIds.length,
+      };
+    }
+
+    const installed = await this.queryOne(
+      `SELECT * FROM installed_apps WHERE "organizationId"=$1 AND "appKey"=$2`,
+      [requireOrganizationId(), run.appKey],
+    );
+    const config = installed
+      ? this.normalizeAppConfig(String(run.appKey), installed.config || {})
+      : { questions: this.defaultQuestions(String(run.appKey)) };
+    const questions = Array.isArray((config as any).questions)
+      ? (config as any).questions.map((q: unknown) => String(q))
+      : this.defaultQuestions(String(run.appKey));
+
+    const rawResponses =
+      typeof run.responses === 'string'
+        ? JSON.parse(run.responses || '{}')
+        : run.responses || {};
+    const replies = Object.entries(rawResponses as Record<string, any>)
+      .map(([userId, value]) => ({
+        userId: String(userId),
+        body: String(value?.body ?? '').slice(0, 4000),
+        messageId: value?.messageId ? String(value.messageId) : null,
+        at: value?.at ? String(value.at) : null,
+      }))
+      .sort((a, b) => {
+        const ta = a.at ? Date.parse(a.at) : 0;
+        const tb = b.at ? Date.parse(b.at) : 0;
+        return ta - tb;
+      });
+
+    const repliedSet = new Set(replies.map((r) => r.userId));
+    const pendingUserIds = memberIds.filter((id) => !repliedSet.has(id));
+
+    return {
+      open: true,
+      run: {
+        id: String(run.id),
+        appKey: String(run.appKey),
+        promptMessageId: run.promptMessageId
+          ? String(run.promptMessageId)
+          : null,
+        runDate: String(run.runDate),
+        promptedAt: run.promptedAt
+          ? new Date(run.promptedAt).toISOString()
+          : null,
+        status: String(run.status),
+      },
+      questions,
+      replies,
+      pendingUserIds,
+      repliedCount: replies.length,
+      memberCount: memberIds.length,
     };
   }
 
