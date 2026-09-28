@@ -19,6 +19,7 @@ import { MessageDraft } from './database/entities/message-draft.entity';
 import { SavedReply } from './database/entities/saved-reply.entity';
 import { WikiPage } from './database/entities/wiki-page.entity';
 import { Incident } from './database/entities/incident.entity';
+import { StuckSignal } from './database/entities/stuck-signal.entity';
 import { MessageReminder } from './database/entities/message-reminder.entity';
 import { ThreadFollow } from './database/entities/thread-follow.entity';
 import { MessageEdit } from './database/entities/message-edit.entity';
@@ -61,6 +62,7 @@ import { SLACK_PRODUCT_ENTITIES } from './database/entities/slack-product.entiti
             SavedReply,
             WikiPage,
             Incident,
+            StuckSignal,
             MessageReminder,
             ThreadFollow,
             MessageEdit,

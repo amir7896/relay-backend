@@ -1032,6 +1032,30 @@ export class ChatController {
       };
     }
 
+    const actMatch = raw.match(/^\/act(?:\s+(.*))?$/i);
+    if (actMatch) {
+      const intentText = String(actMatch[1] ?? '').trim();
+      if (intentText.length < 3) {
+        return {
+          message: 'Slash command executed',
+          data: {
+            kind: 'ephemeral' as const,
+            ephemeral:
+              'Usage: /act remind me in 1h to ping design\nOr: /act I’m stuck on auth · /act add task ship landing · /act open sev2 payments down\nTip: use the ✦ Act mic in the composer to speak.',
+          },
+        };
+      }
+      const act = await this.ai.parseActionIntent(intentText);
+      return {
+        message: 'Slash command executed',
+        data: {
+          kind: 'act' as const,
+          act: { ...act, raw: intentText },
+          ephemeral: 'Voice → Action ready — confirm in the Act panel.',
+        },
+      };
+    }
+
     const result = await this.proxy.sendChat<InvokeSlashCommandResult>(
       CHAT_PATTERNS.INVOKE_SLASH_COMMAND,
       {
@@ -1631,9 +1655,14 @@ export class ChatController {
         emoji: dto.emoji,
       },
     );
-    const { recipientIds, ...data } = result;
+    const { recipientIds, reactionAdded, reactedEmoji, ...data } = result;
     await this.conversationCache.setMemberIds(id, recipientIds);
     this.chatGateway.broadcastMessage(data, recipientIds);
+    if (reactionAdded && reactedEmoji) {
+      void this.evaluateChannelWorkflows(user.id, id, 'emoji_reaction', data, {
+        emoji: reactedEmoji,
+      });
+    }
     return { message: CHAT_SUCCESS_MESSAGES.MESSAGE_REACTED, data };
   }
 
@@ -2253,6 +2282,76 @@ export class ChatController {
     };
   }
 
+  @Get('stuck')
+  async listStuckSignals(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('scope') scope?: 'active' | 'all' | 'resolved' | 'mine',
+  ) {
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_STUCK_SIGNALS, {
+      actorId: user.id,
+      scope: scope || 'active',
+    });
+    return { message: 'Stuck signals retrieved', data };
+  }
+
+  @Post('conversations/:id/stuck')
+  @HttpCode(HttpStatus.CREATED)
+  async openStuckSignal(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() body: { body?: string },
+  ) {
+    const result = await this.proxy.sendChat<{
+      stuck: unknown;
+      message: SendMessageResult;
+    }>(CHAT_PATTERNS.OPEN_STUCK_SIGNAL, {
+      actorId: user.id,
+      conversationId: id,
+      body: body?.body,
+    });
+    const { recipientIds, mutedRecipientIds: _muted, ...message } =
+      result.message;
+    await this.conversationCache.setMemberIds(id, recipientIds ?? []);
+    this.chatGateway.broadcastMessage(message, recipientIds ?? []);
+    return {
+      message: 'Stuck signal raised',
+      data: { stuck: result.stuck, message },
+    };
+  }
+
+  @Patch('stuck/:stuckId')
+  async updateStuckSignal(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('stuckId', ParseUuidPipe) stuckId: string,
+    @Body() body: { action?: 'claim' | 'resolve' | 'reopen' },
+  ) {
+    const result = await this.proxy.sendChat<{
+      stuck: { conversationId: string };
+      message: SendMessageResult | null;
+    }>(CHAT_PATTERNS.UPDATE_STUCK_SIGNAL, {
+      actorId: user.id,
+      stuckId,
+      action: body?.action,
+    });
+    if (result.message) {
+      const { recipientIds, mutedRecipientIds: _muted, ...message } =
+        result.message;
+      await this.conversationCache.setMemberIds(
+        result.stuck.conversationId,
+        recipientIds ?? [],
+      );
+      this.chatGateway.broadcastMessage(message, recipientIds ?? []);
+      return {
+        message: 'Stuck signal updated',
+        data: { stuck: result.stuck, message },
+      };
+    }
+    return {
+      message: 'Stuck signal updated',
+      data: { stuck: result.stuck, message: null },
+    };
+  }
+
   @Post('conversations/:id/messages/:messageId/remind')
   @HttpCode(HttpStatus.CREATED)
   async createReminder(
@@ -2360,6 +2459,28 @@ export class ChatController {
   ) {
     const data = await this.ai.catchMeUp(user.id, id, body?.since);
     return { message: 'Catch-up summary ready', data };
+  }
+
+  @Post('conversations/:id/pulse')
+  @HttpCode(HttpStatus.OK)
+  async channelPulse(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() body?: { since?: string | null },
+  ) {
+    const data = await this.ai.channelPulse(user.id, id, body?.since);
+    return { message: 'Channel pulse ready', data };
+  }
+
+  @Post('conversations/:id/act/parse')
+  @HttpCode(HttpStatus.OK)
+  async parseActIntent(
+    @CurrentUser() _user: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) _id: string,
+    @Body() body?: { text?: string },
+  ) {
+    const data = await this.ai.parseActionIntent(String(body?.text ?? ''));
+    return { message: 'Action intent ready', data };
   }
 
   @Get('conversations/:id/smart-replies')
@@ -3004,14 +3125,16 @@ export class ChatController {
   private async evaluateChannelWorkflows(
     actorId: string,
     conversationId: string,
-    triggerType: 'message_contains' | 'channel_created',
+    triggerType: 'message_contains' | 'channel_created' | 'emoji_reaction',
     message?: MessageView,
+    extras?: { emoji?: string },
   ): Promise<void> {
     try {
       const result = (await this.proxy.sendChat(CHAT_PATTERNS.EVALUATE_WORKFLOWS, {
         actorId,
         conversationId,
         triggerType,
+        emoji: extras?.emoji,
         message: message
           ? {
               id: message.id,

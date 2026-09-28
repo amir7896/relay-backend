@@ -16,10 +16,17 @@ export interface ForgotPasswordResult {
   accepted: boolean;
   /** Present in development when SMTP is not configured */
   debugResetUrl?: string;
+  /** Present in development when SMTP is not configured — 6-digit OTP */
+  debugOtp?: string;
 }
 
 export interface ResetPasswordPayload {
-  token: string;
+  /** Long link token or 6-digit OTP */
+  token?: string;
+  /** Required when resetting with OTP alone */
+  email?: string;
+  /** 6-digit email OTP (alias of short token) */
+  otp?: string;
   password: string;
 }
 

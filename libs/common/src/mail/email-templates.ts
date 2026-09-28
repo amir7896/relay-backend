@@ -171,25 +171,28 @@ export function verifyEmailTemplate(input: {
 export function resetPasswordTemplate(input: {
   appUrl: string;
   resetUrl: string;
-  expiresHours?: number;
+  otp: string;
+  expiresMinutes?: number;
 }): EmailContent {
-  const hours = input.expiresHours ?? 2;
+  const minutes = input.expiresMinutes ?? 30;
   const subject = 'Reset your Relay password';
   const text = joinText([
     'Password reset request',
     'We received a request to reset the password for your Relay account.',
-    `Reset password: ${input.resetUrl}`,
-    `This link expires in ${hours} hours.`,
+    `Your reset code (OTP): ${input.otp}`,
+    `Or open this link: ${input.resetUrl}`,
+    `This code expires in ${minutes} minutes and can only be used once.`,
     'If you did not request a password reset, you can safely ignore this email. Your password will stay the same.',
   ]);
   const html = renderLayout({
     appUrl: input.appUrl,
-    preheader: 'Use this secure link to choose a new Relay password.',
+    preheader: 'Use your Relay password reset code.',
     title: 'Reset your password',
     greeting: 'Hi there,',
     paragraphs: [
       'We received a request to reset the password for your Relay account.',
-      `For your security, this link expires in <strong>${hours} hours</strong> and can only be used once.`,
+      `Your one-time code: <strong style="font-size:28px;letter-spacing:6px;">${escapeHtml(input.otp)}</strong>`,
+      `For your security, this code expires in <strong>${minutes} minutes</strong> and can only be used once.`,
     ],
     cta: { label: 'Choose a new password', url: input.resetUrl },
     footnotes: [

@@ -107,21 +107,26 @@ export class Message {
     closed: boolean;
   } | null;
 
-  /** Block Kit–lite interactive card (approvals, action buttons). */
+  /** Block Kit–lite interactive card (approvals, RSVP, action buttons). */
   @Column({ type: 'jsonb', nullable: true })
   interactive!: {
-    kind: 'approval';
+    kind: 'approval' | 'rsvp';
     title: string;
-    status: 'open' | 'approved' | 'denied';
+    status: 'open' | 'approved' | 'denied' | 'closed';
     actions: Array<{
       id: string;
       label: string;
       style: 'primary' | 'danger' | 'default';
-      value: 'approve' | 'deny';
+      value: 'approve' | 'deny' | 'going' | 'maybe' | 'cant';
     }>;
     decidedBy: string | null;
     decidedAt: string | null;
-    decidedValue: 'approve' | 'deny' | null;
+    decidedValue: 'approve' | 'deny' | 'going' | 'maybe' | 'cant' | null;
+    responses?: Array<{
+      userId: string;
+      value: 'going' | 'maybe' | 'cant';
+      at: string;
+    }>;
   } | null;
 
   @Index()

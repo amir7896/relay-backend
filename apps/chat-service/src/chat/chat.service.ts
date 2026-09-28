@@ -121,6 +121,11 @@ import type {
   IncidentView,
   IncidentSeverity,
   IncidentStatus,
+  ListStuckSignalsPayload,
+  OpenStuckSignalPayload,
+  UpdateStuckSignalPayload,
+  StuckSignalView,
+  StuckSignalStatus,
   CreateReminderPayload,
   CancelReminderPayload,
   CompleteReminderPayload,
@@ -160,6 +165,7 @@ import { MessageDraft } from '../database/entities/message-draft.entity';
 import { SavedReply } from '../database/entities/saved-reply.entity';
 import { WikiPage } from '../database/entities/wiki-page.entity';
 import { Incident } from '../database/entities/incident.entity';
+import { StuckSignal } from '../database/entities/stuck-signal.entity';
 import { MessageReminder } from '../database/entities/message-reminder.entity';
 import { ThreadFollow } from '../database/entities/thread-follow.entity';
 import { MessageEdit } from '../database/entities/message-edit.entity';
@@ -216,6 +222,10 @@ const BUILTIN_SLASH_COMMANDS: Array<{
     description: 'Post an approval card (/approve Ship Friday?)',
   },
   {
+    name: 'rsvp',
+    description: 'Post an RSVP card (/rsvp Sprint review Thu 3pm)',
+  },
+  {
     name: 'sr',
     description: 'Insert a saved reply (/sr shortcut)',
   },
@@ -228,12 +238,21 @@ const BUILTIN_SLASH_COMMANDS: Array<{
     description: 'Ops war-room — /incident open sev2 title | resolve',
   },
   {
+    name: 'stuck',
+    description: 'I’m stuck — peer unblock (/stuck why… | claim | resolve)',
+  },
+  {
     name: 'assign',
     description: 'Assign a list task (/assign @name title)',
   },
   {
     name: 'ai',
     description: 'Ask Relay — opens the Ask panel (/ai …)',
+  },
+  {
+    name: 'act',
+    description:
+      'Voice → Action — stuck, task, remind, or incident (/act …)',
   },
   {
     name: 'standup',
@@ -277,6 +296,8 @@ export class ChatService {
     private readonly wikiPages: Repository<WikiPage>,
     @InjectRepository(Incident)
     private readonly incidents: Repository<Incident>,
+    @InjectRepository(StuckSignal)
+    private readonly stuckSignals: Repository<StuckSignal>,
     @InjectRepository(MessageReminder)
     private readonly messageReminders: Repository<MessageReminder>,
     @InjectRepository(ThreadFollow)
@@ -1962,6 +1983,7 @@ export class ChatService {
         emoji,
       },
     });
+    const reactionAdded = !existing;
     if (existing) {
       await this.messageReactions.remove(existing);
     } else {
@@ -1995,6 +2017,8 @@ export class ChatService {
         payload.actorId,
       ),
       recipientIds: this.recipientIds(conversation),
+      reactionAdded,
+      reactedEmoji: emoji,
     };
   }
 
@@ -2238,9 +2262,11 @@ export class ChatService {
     const title = String(payload.title ?? '').trim();
     if (title.length < 2 || title.length > 280) {
       return RpcErrors.badRequest(
-        'Approval title must be between 2 and 280 characters',
+        'Title must be between 2 and 280 characters',
       );
     }
+
+    const kind = payload.kind === 'rsvp' ? 'rsvp' : 'approval';
 
     const conversation = await this.requireMembership(
       payload.conversationId,
@@ -2253,6 +2279,65 @@ export class ChatService {
     if (delivery.forbidden) {
       return RpcErrors.forbidden('You cannot message this conversation');
     }
+
+    const interactive =
+      kind === 'rsvp'
+        ? {
+            kind: 'rsvp' as const,
+            title,
+            status: 'open' as const,
+            actions: [
+              {
+                id: randomUUID(),
+                label: 'Going',
+                style: 'primary' as const,
+                value: 'going' as const,
+              },
+              {
+                id: randomUUID(),
+                label: 'Maybe',
+                style: 'default' as const,
+                value: 'maybe' as const,
+              },
+              {
+                id: randomUUID(),
+                label: "Can't",
+                style: 'danger' as const,
+                value: 'cant' as const,
+              },
+            ],
+            decidedBy: null,
+            decidedAt: null,
+            decidedValue: null,
+            responses: [] as Array<{
+              userId: string;
+              value: 'going' | 'maybe' | 'cant';
+              at: string;
+            }>,
+          }
+        : {
+            kind: 'approval' as const,
+            title,
+            status: 'open' as const,
+            actions: [
+              {
+                id: randomUUID(),
+                label: 'Approve',
+                style: 'primary' as const,
+                value: 'approve' as const,
+              },
+              {
+                id: randomUUID(),
+                label: 'Deny',
+                style: 'danger' as const,
+                value: 'deny' as const,
+              },
+            ],
+            decidedBy: null,
+            decidedAt: null,
+            decidedValue: null,
+            responses: [],
+          };
 
     const saved = await this.messages.save(
       this.messages.create({
@@ -2269,28 +2354,7 @@ export class ChatService {
         mentions: [],
         linkPreview: null,
         poll: null,
-        interactive: {
-          kind: 'approval',
-          title,
-          status: 'open',
-          actions: [
-            {
-              id: randomUUID(),
-              label: 'Approve',
-              style: 'primary',
-              value: 'approve',
-            },
-            {
-              id: randomUUID(),
-              label: 'Deny',
-              style: 'danger',
-              value: 'deny',
-            },
-          ],
-          decidedBy: null,
-          decidedAt: null,
-          decidedValue: null,
-        },
+        interactive,
         undelivered: delivery.undelivered,
         expiresAt:
           !delivery.undelivered && conversation.disappearingDurationSeconds > 0
@@ -2307,7 +2371,7 @@ export class ChatService {
       'message.interactive_created',
       'conversation',
       conversation.id,
-      { messageId: saved.id, kind: 'approval' },
+      { messageId: saved.id, kind },
     );
 
     return {
@@ -2348,7 +2412,11 @@ export class ChatService {
       return RpcErrors.badRequest('Cannot act on a deleted message');
     }
     if (message.interactive.status !== 'open') {
-      return RpcErrors.badRequest('This approval is already decided');
+      return RpcErrors.badRequest(
+        message.interactive.kind === 'rsvp'
+          ? 'This RSVP is closed'
+          : 'This approval is already decided',
+      );
     }
 
     const action = message.interactive.actions.find(
@@ -2358,14 +2426,43 @@ export class ChatService {
       return RpcErrors.badRequest('Invalid action');
     }
 
-    const decidedAt = new Date().toISOString();
-    message.interactive = {
-      ...message.interactive,
-      status: action.value === 'approve' ? 'approved' : 'denied',
-      decidedBy: payload.actorId,
-      decidedAt,
-      decidedValue: action.value,
-    };
+    if (message.interactive.kind === 'rsvp') {
+      if (
+        action.value !== 'going' &&
+        action.value !== 'maybe' &&
+        action.value !== 'cant'
+      ) {
+        return RpcErrors.badRequest('Invalid RSVP action');
+      }
+      const at = new Date().toISOString();
+      const existing = Array.isArray(message.interactive.responses)
+        ? [...message.interactive.responses]
+        : [];
+      const withoutMe = existing.filter(
+        (item) => item.userId !== payload.actorId,
+      );
+      withoutMe.push({
+        userId: payload.actorId,
+        value: action.value,
+        at,
+      });
+      message.interactive = {
+        ...message.interactive,
+        responses: withoutMe,
+      };
+    } else {
+      if (action.value !== 'approve' && action.value !== 'deny') {
+        return RpcErrors.badRequest('Invalid approval action');
+      }
+      const decidedAt = new Date().toISOString();
+      message.interactive = {
+        ...message.interactive,
+        status: action.value === 'approve' ? 'approved' : 'denied',
+        decidedBy: payload.actorId,
+        decidedAt,
+        decidedValue: action.value,
+      };
+    }
     await this.messages.save(message);
 
     const reactions = await this.messageReactions.find({
@@ -3679,6 +3776,242 @@ export class ChatService {
 
     return {
       incident: this.toIncidentView(
+        saved,
+        await this.conversationNameFor(saved.conversationId),
+      ),
+      message,
+    };
+  }
+
+  private toStuckSignalView(
+    row: StuckSignal,
+    conversationName: string | null,
+  ): StuckSignalView {
+    return {
+      id: row.id,
+      conversationId: row.conversationId,
+      conversationName,
+      body: row.body,
+      status: row.status,
+      openedBy: row.openedBy,
+      claimedBy: row.claimedBy,
+      resolvedBy: row.resolvedBy,
+      resolvedAt: row.resolvedAt ? row.resolvedAt.toISOString() : null,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
+  async listStuckSignals(
+    payload: ListStuckSignalsPayload,
+  ): Promise<StuckSignalView[]> {
+    const organizationId = requireOrganizationId();
+    const scope = payload.scope ?? 'active';
+
+    let rows: StuckSignal[];
+    if (scope === 'mine') {
+      rows = await this.stuckSignals.find({
+        where: {
+          organizationId,
+          openedBy: payload.actorId,
+          status: In(['open', 'helping'] as StuckSignalStatus[]),
+        },
+        order: { updatedAt: 'DESC' },
+        take: 100,
+      });
+    } else if (scope === 'resolved') {
+      rows = await this.stuckSignals.find({
+        where: { organizationId, status: 'resolved' },
+        order: { updatedAt: 'DESC' },
+        take: 100,
+      });
+    } else if (scope === 'all') {
+      rows = await this.stuckSignals.find({
+        where: { organizationId },
+        order: { updatedAt: 'DESC' },
+        take: 100,
+      });
+    } else {
+      rows = await this.stuckSignals.find({
+        where: {
+          organizationId,
+          status: In(['open', 'helping'] as StuckSignalStatus[]),
+        },
+        order: { updatedAt: 'DESC' },
+        take: 100,
+      });
+    }
+
+    const views: StuckSignalView[] = [];
+    for (const row of rows) {
+      views.push(
+        this.toStuckSignalView(
+          row,
+          await this.conversationNameFor(row.conversationId),
+        ),
+      );
+    }
+    return views;
+  }
+
+  async openStuckSignal(
+    payload: OpenStuckSignalPayload,
+  ): Promise<{ stuck: StuckSignalView; message: SendMessageResult }> {
+    const conversation = await this.requireMembership(
+      payload.conversationId,
+      payload.actorId,
+    );
+    if (conversation.type !== ConversationType.GROUP) {
+      return RpcErrors.badRequest(
+        'Stuck signals work in group channels (ask teammates there)',
+      ) as never;
+    }
+
+    const body = String(payload.body ?? '').trim().slice(0, 500);
+    if (body.length < 3) {
+      return RpcErrors.badRequest(
+        'Describe what you’re stuck on (at least a few words)',
+      ) as never;
+    }
+
+    const existing = await this.stuckSignals.findOne({
+      where: {
+        organizationId: requireOrganizationId(),
+        conversationId: conversation.id,
+        openedBy: payload.actorId,
+        status: In(['open', 'helping'] as StuckSignalStatus[]),
+      },
+    });
+    if (existing) {
+      return RpcErrors.badRequest(
+        'You already have an open stuck signal in this channel. Resolve it first with /stuck resolve',
+      ) as never;
+    }
+
+    const saved = await this.stuckSignals.save(
+      this.stuckSignals.create({
+        organizationId: requireOrganizationId(),
+        conversationId: conversation.id,
+        body,
+        status: 'open',
+        openedBy: payload.actorId,
+        claimedBy: null,
+        resolvedBy: null,
+        resolvedAt: null,
+      }),
+    );
+
+    const message = await this.sendMessage({
+      actorId: payload.actorId,
+      conversationId: conversation.id,
+      body: [
+        '🆘 **I’m stuck**',
+        '',
+        body,
+        '',
+        '_Teammates: `/stuck claim` to help · `/stuck resolve` when unblocked_',
+      ].join('\n'),
+      type: MessageType.TEXT,
+    });
+
+    return {
+      stuck: this.toStuckSignalView(
+        saved,
+        conversation.name?.trim() || 'Channel',
+      ),
+      message,
+    };
+  }
+
+  async updateStuckSignal(
+    payload: UpdateStuckSignalPayload,
+  ): Promise<{ stuck: StuckSignalView; message: SendMessageResult | null }> {
+    const row = await this.stuckSignals.findOne({
+      where: {
+        id: payload.stuckId,
+        organizationId: requireOrganizationId(),
+      },
+    });
+    if (!row) {
+      return RpcErrors.notFound('Stuck signal') as never;
+    }
+    await this.requireMembership(row.conversationId, payload.actorId);
+
+    const action = String(payload.action ?? '')
+      .trim()
+      .toLowerCase();
+    if (action !== 'claim' && action !== 'resolve' && action !== 'reopen') {
+      return RpcErrors.badRequest(
+        'Action must be claim, resolve, or reopen',
+      ) as never;
+    }
+
+    if (row.status === 'resolved' && action !== 'reopen') {
+      return RpcErrors.badRequest('This stuck signal is already resolved') as never;
+    }
+
+    let announce: string | null = null;
+    if (action === 'claim') {
+      if (row.openedBy === payload.actorId) {
+        return RpcErrors.badRequest(
+          'You can’t claim your own stuck signal',
+        ) as never;
+      }
+      if (row.status === 'helping' && row.claimedBy === payload.actorId) {
+        return {
+          stuck: this.toStuckSignalView(
+            row,
+            await this.conversationNameFor(row.conversationId),
+          ),
+          message: null,
+        };
+      }
+      row.status = 'helping';
+      row.claimedBy = payload.actorId;
+      announce = [
+        '🤝 **Helping**',
+        '',
+        row.body,
+        '',
+        '_Someone grabbed this stuck signal_',
+      ].join('\n');
+    } else if (action === 'resolve') {
+      row.status = 'resolved';
+      row.resolvedBy = payload.actorId;
+      row.resolvedAt = new Date();
+      announce = [
+        '✅ **Unstuck**',
+        '',
+        row.body,
+        '',
+        '_Blocker cleared — thanks helpers_',
+      ].join('\n');
+    } else {
+      row.status = 'open';
+      row.claimedBy = null;
+      row.resolvedBy = null;
+      row.resolvedAt = null;
+      announce = [
+        '🆘 **Stuck again**',
+        '',
+        row.body,
+        '',
+        '_Reopened — still need help_',
+      ].join('\n');
+    }
+
+    const saved = await this.stuckSignals.save(row);
+    const message = announce
+      ? await this.sendMessage({
+          actorId: payload.actorId,
+          conversationId: saved.conversationId,
+          body: announce,
+          type: MessageType.TEXT,
+        })
+      : null;
+
+    return {
+      stuck: this.toStuckSignalView(
         saved,
         await this.conversationNameFor(saved.conversationId),
       ),
@@ -5762,6 +6095,10 @@ export class ChatService {
       return this.handleApproveSlash(payload, conversation, text);
     }
 
+    if (name === 'rsvp') {
+      return this.handleRsvpSlash(payload, conversation, text);
+    }
+
     if (name === 'sr' || name === 'savedreply') {
       return this.handleSavedReplySlash(payload, text);
     }
@@ -5772,6 +6109,10 @@ export class ChatService {
 
     if (name === 'incident') {
       return this.handleIncidentSlash(payload, conversation, text);
+    }
+
+    if (name === 'stuck' || name === 'unstuck') {
+      return this.handleStuckSlash(payload, conversation, text, name);
     }
 
     if (name === 'assign') {
@@ -6107,6 +6448,34 @@ export class ChatService {
     return { kind: 'message', message };
   }
 
+  private async handleRsvpSlash(
+    payload: InvokeSlashCommandPayload,
+    _conversation: Conversation,
+    text: string,
+  ): Promise<InvokeSlashCommandResult> {
+    const title = text.trim();
+    if (!title || title.toLowerCase() === 'help') {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          'Usage: `/rsvp Sprint review Thursday 3pm`\nPosts an RSVP card — teammates tap Going / Maybe / Can\'t. Responses update live.',
+      };
+    }
+    if (title.length < 2) {
+      return {
+        kind: 'ephemeral',
+        ephemeral: 'Add an event title after /rsvp.',
+      };
+    }
+    const message = await this.createInteractive({
+      actorId: payload.actorId,
+      conversationId: payload.conversationId,
+      title: title.slice(0, 280),
+      kind: 'rsvp',
+    });
+    return { kind: 'message', message };
+  }
+
   private async handleSavedReplySlash(
     payload: InvokeSlashCommandPayload,
     text: string,
@@ -6402,6 +6771,154 @@ export class ChatService {
       ephemeral:
         'Usage: `/incident open sev2 title` · `/incident status` · `/incident resolve` · `/incident list`',
     };
+  }
+
+  private async handleStuckSlash(
+    payload: InvokeSlashCommandPayload,
+    conversation: Conversation,
+    text: string,
+    commandName: string,
+  ): Promise<InvokeSlashCommandResult> {
+    const raw = text.trim();
+    const lower = raw.toLowerCase();
+
+    if (commandName === 'unstuck' || lower === 'resolve' || lower === 'done') {
+      const mine = await this.stuckSignals.findOne({
+        where: {
+          organizationId: requireOrganizationId(),
+          conversationId: conversation.id,
+          openedBy: payload.actorId,
+          status: In(['open', 'helping'] as StuckSignalStatus[]),
+        },
+        order: { updatedAt: 'DESC' },
+      });
+      const target =
+        mine ??
+        (await this.stuckSignals.findOne({
+          where: {
+            organizationId: requireOrganizationId(),
+            conversationId: conversation.id,
+            status: In(['open', 'helping'] as StuckSignalStatus[]),
+          },
+          order: { updatedAt: 'DESC' },
+        }));
+      if (!target) {
+        return {
+          kind: 'ephemeral',
+          ephemeral: 'No open stuck signal in this channel.',
+        };
+      }
+      try {
+        const result = await this.updateStuckSignal({
+          actorId: payload.actorId,
+          stuckId: target.id,
+          action: 'resolve',
+        });
+        if (result.message) {
+          return { kind: 'message', message: result.message };
+        }
+        return { kind: 'ephemeral', ephemeral: 'Already resolved.' };
+      } catch (err) {
+        return {
+          kind: 'ephemeral',
+          ephemeral:
+            err && typeof err === 'object' && 'message' in err
+              ? String((err as { message: unknown }).message)
+              : 'Could not resolve stuck signal',
+        };
+      }
+    }
+
+    if (!raw || lower === 'help') {
+      return {
+        kind: 'ephemeral',
+        ephemeral: [
+          '**I’m Stuck** — peer unblock (unique to Relay)',
+          '• `/stuck Auth is failing on staging` — raise a signal',
+          '• `/stuck claim` — I’ve got this',
+          '• `/stuck resolve` or `/unstuck` — cleared',
+          '• `/stuck list` — open signals in the workspace',
+        ].join('\n'),
+      };
+    }
+
+    if (lower === 'list') {
+      const items = await this.listStuckSignals({
+        actorId: payload.actorId,
+        scope: 'active',
+      });
+      if (!items.length) {
+        return {
+          kind: 'ephemeral',
+          ephemeral: 'Nobody is stuck right now. Nice.',
+        };
+      }
+      const lines = items
+        .slice(0, 12)
+        .map(
+          (item) =>
+            `• **${item.status}** — ${item.body.slice(0, 80)} _(in ${item.conversationName ?? 'channel'})_`,
+        )
+        .join('\n');
+      return {
+        kind: 'ephemeral',
+        ephemeral: `Open stuck signals:\n${lines}`,
+      };
+    }
+
+    if (lower === 'claim' || lower === 'helpme' || lower === 'grab') {
+      const open = await this.stuckSignals.findOne({
+        where: {
+          organizationId: requireOrganizationId(),
+          conversationId: conversation.id,
+          status: 'open',
+        },
+        order: { updatedAt: 'DESC' },
+      });
+      if (!open) {
+        return {
+          kind: 'ephemeral',
+          ephemeral: 'No open stuck signal to claim in this channel.',
+        };
+      }
+      try {
+        const result = await this.updateStuckSignal({
+          actorId: payload.actorId,
+          stuckId: open.id,
+          action: 'claim',
+        });
+        if (result.message) {
+          return { kind: 'message', message: result.message };
+        }
+        return { kind: 'ephemeral', ephemeral: 'Already helping.' };
+      } catch (err) {
+        return {
+          kind: 'ephemeral',
+          ephemeral:
+            err && typeof err === 'object' && 'message' in err
+              ? String((err as { message: unknown }).message)
+              : 'Could not claim stuck signal',
+        };
+      }
+    }
+
+    // Default: treat remaining text as the stuck description
+    try {
+      const result = await this.openStuckSignal({
+        actorId: payload.actorId,
+        conversationId: conversation.id,
+        body: raw,
+      });
+      return { kind: 'message', message: result.message };
+    } catch (err) {
+      return {
+        kind: 'ephemeral',
+        ephemeral:
+          err && typeof err === 'object' && 'message' in err
+            ? String((err as { message: unknown }).message)
+            : 'Could not raise stuck signal',
+      };
+    }
   }
 
   private async handleAssignSlash(
@@ -7253,6 +7770,544 @@ export class ChatService {
       }),
     );
     return this.toAuditView(saved);
+  }
+
+  async listRetentionPolicies() {
+    const orgId = requireOrganizationId();
+    const rows = await this.auditEvents.manager.query(
+      `SELECT * FROM retention_policies WHERE "organizationId"=$1 ORDER BY "createdAt" DESC`,
+      [orgId],
+    );
+    return (rows as any[]).map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      scope: String(row.scope),
+      conversationId: row.conversationId ? String(row.conversationId) : null,
+      retainDays: Number(row.retainDays),
+      enabled: Boolean(row.enabled),
+      createdBy: String(row.createdBy),
+      createdAt: new Date(row.createdAt).toISOString(),
+    }));
+  }
+
+  async upsertRetentionPolicy(payload: {
+    actorId: string;
+    id?: string;
+    name: string;
+    scope?: 'workspace' | 'channel';
+    conversationId?: string | null;
+    retainDays: number;
+    enabled?: boolean;
+  }) {
+    const orgId = requireOrganizationId();
+    const name = String(payload.name ?? '').trim().slice(0, 120);
+    const retainDays = Math.max(1, Math.min(3650, Number(payload.retainDays) || 365));
+    if (!name) return RpcErrors.badRequest('Policy name is required') as never;
+    if (payload.id) {
+      const row = await this.auditEvents.manager.query(
+        `UPDATE retention_policies
+         SET name=$1, scope=$2, "conversationId"=$3, "retainDays"=$4, enabled=$5, "updatedAt"=now()
+         WHERE id=$6 AND "organizationId"=$7
+         RETURNING *`,
+        [
+          name,
+          payload.scope ?? 'workspace',
+          payload.conversationId ?? null,
+          retainDays,
+          payload.enabled !== false,
+          payload.id,
+          orgId,
+        ],
+      );
+      if (!row?.[0]) return RpcErrors.notFound('Retention policy') as never;
+    } else {
+      await this.auditEvents.manager.query(
+        `INSERT INTO retention_policies
+          ("organizationId","name","scope","conversationId","retainDays","enabled","createdBy")
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          orgId,
+          name,
+          payload.scope ?? 'workspace',
+          payload.conversationId ?? null,
+          retainDays,
+          payload.enabled !== false,
+          payload.actorId,
+        ],
+      );
+    }
+    await this.logAudit({
+      actorId: payload.actorId,
+      action: 'compliance.retention_upserted',
+      targetType: 'retention_policy',
+      meta: { name, retainDays },
+    });
+    return this.listRetentionPolicies();
+  }
+
+  async deleteRetentionPolicy(payload: { actorId: string; id: string }) {
+    const orgId = requireOrganizationId();
+    await this.auditEvents.manager.query(
+      `DELETE FROM retention_policies WHERE id=$1 AND "organizationId"=$2`,
+      [payload.id, orgId],
+    );
+    await this.logAudit({
+      actorId: payload.actorId,
+      action: 'compliance.retention_deleted',
+      targetType: 'retention_policy',
+      targetId: payload.id,
+    });
+    return { deleted: true };
+  }
+
+  /**
+   * Soft-purge messages older than each enabled retention policy.
+   * Active legal holds (workspace / channel / user) always win — those rows are skipped.
+   * When organizationId is omitted, runs across every org that has an enabled policy.
+   */
+  async runRetentionPurge(payload: {
+    actorId?: string;
+    organizationId?: string;
+    trigger?: 'scheduled' | 'manual';
+  } = {}): Promise<{
+    results: Array<{
+      organizationId: string;
+      purgedCount: number;
+      skippedHoldCount: number;
+      policiesApplied: number;
+    }>;
+    purgedTotal: number;
+  }> {
+    const trigger = payload.trigger ?? 'scheduled';
+    const actorId =
+      payload.actorId ?? '00000000-0000-0000-0000-000000000000';
+    const policyParams: unknown[] = [];
+    let policyWhere = `enabled = true`;
+    if (payload.organizationId) {
+      policyParams.push(payload.organizationId);
+      policyWhere += ` AND "organizationId"=$${policyParams.length}`;
+    }
+    const policies = (await this.auditEvents.manager.query(
+      `SELECT id, "organizationId", scope, "conversationId", "retainDays"
+       FROM retention_policies
+       WHERE ${policyWhere}
+       ORDER BY "organizationId", "retainDays" ASC`,
+      policyParams,
+    )) as Array<{
+      id: string;
+      organizationId: string;
+      scope: string;
+      conversationId: string | null;
+      retainDays: number;
+    }>;
+
+    const byOrg = new Map<string, typeof policies>();
+    for (const policy of policies) {
+      const list = byOrg.get(policy.organizationId) ?? [];
+      list.push(policy);
+      byOrg.set(policy.organizationId, list);
+    }
+
+    const results: Array<{
+      organizationId: string;
+      purgedCount: number;
+      skippedHoldCount: number;
+      policiesApplied: number;
+    }> = [];
+    let purgedTotal = 0;
+
+    for (const [organizationId, orgPolicies] of byOrg) {
+      const result = await runWithOrganization(organizationId, async () => {
+        let purgedCount = 0;
+        let skippedHoldCount = 0;
+        for (const policy of orgPolicies) {
+          const retainDays = Math.max(
+            1,
+            Math.min(3650, Number(policy.retainDays) || 365),
+          );
+          const params: unknown[] = [organizationId, retainDays];
+          const scopeClause =
+            policy.scope === 'channel' && policy.conversationId
+              ? (() => {
+                  params.push(policy.conversationId);
+                  return `AND m."conversationId"=$${params.length}`;
+                })()
+              : '';
+
+          const skippedRows = (await this.auditEvents.manager.query(
+            `SELECT COUNT(*)::int AS count
+             FROM messages m
+             WHERE m."organizationId"=$1
+               AND m."deletedAt" IS NULL
+               AND m."createdAt" < (now() - ($2::int * interval '1 day'))
+               ${scopeClause}
+               AND (
+                 EXISTS (
+                   SELECT 1 FROM legal_holds h
+                   WHERE h."organizationId"=m."organizationId"
+                     AND h.active=true
+                     AND h.scope='workspace'
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM legal_holds h
+                   WHERE h."organizationId"=m."organizationId"
+                     AND h.active=true
+                     AND h.scope='channel'
+                     AND h."conversationId"=m."conversationId"
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM legal_holds h
+                   WHERE h."organizationId"=m."organizationId"
+                     AND h.active=true
+                     AND h.scope='user'
+                     AND h."userId"=m."senderId"
+                 )
+               )`,
+            params,
+          )) as Array<{ count: number }>;
+          skippedHoldCount += Number(skippedRows[0]?.count ?? 0);
+
+          const purged = (await this.auditEvents.manager.query(
+            `UPDATE messages m
+             SET "deletedAt"=now(),
+                 "deletedForEveryoneAt"=COALESCE(m."deletedForEveryoneAt", now()),
+                 body='[purged by retention policy]',
+                 "attachmentUrl"=NULL,
+                 "attachmentMime"=NULL,
+                 "attachmentName"=NULL,
+                 "attachmentSize"=NULL,
+                 "pinnedAt"=NULL,
+                 "pinnedByUserId"=NULL,
+                 "expiresAt"=NULL
+             WHERE m.id IN (
+               SELECT m2.id
+               FROM messages m2
+               WHERE m2."organizationId"=$1
+                 AND m2."deletedAt" IS NULL
+                 AND m2."createdAt" < (now() - ($2::int * interval '1 day'))
+                 ${scopeClause.replace(/m\./g, 'm2.')}
+                 AND NOT EXISTS (
+                   SELECT 1 FROM legal_holds h
+                   WHERE h."organizationId"=m2."organizationId"
+                     AND h.active=true
+                     AND h.scope='workspace'
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM legal_holds h
+                   WHERE h."organizationId"=m2."organizationId"
+                     AND h.active=true
+                     AND h.scope='channel'
+                     AND h."conversationId"=m2."conversationId"
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM legal_holds h
+                   WHERE h."organizationId"=m2."organizationId"
+                     AND h.active=true
+                     AND h.scope='user'
+                     AND h."userId"=m2."senderId"
+                 )
+               LIMIT 500
+             )
+             RETURNING m.id`,
+            params,
+          )) as Array<{ id: string }>;
+          purgedCount += purged.length;
+        }
+
+        await this.logAudit({
+          actorId,
+          action: 'compliance.retention_purged',
+          targetType: 'retention_policy',
+          meta: {
+            purgedCount,
+            skippedHoldCount,
+            policiesApplied: orgPolicies.length,
+            trigger,
+          },
+        });
+
+        return {
+          organizationId,
+          purgedCount,
+          skippedHoldCount,
+          policiesApplied: orgPolicies.length,
+        };
+      });
+      results.push(result);
+      purgedTotal += result.purgedCount;
+    }
+
+    return { results, purgedTotal };
+  }
+
+  async getRetentionPurgeStatus(): Promise<{
+    lastRunAt: string | null;
+    purgedCount: number;
+    skippedHoldCount: number;
+    policiesApplied: number;
+    trigger: 'scheduled' | 'manual' | null;
+  }> {
+    const orgId = requireOrganizationId();
+    const rows = (await this.auditEvents.manager.query(
+      `SELECT "createdAt", meta
+       FROM audit_events
+       WHERE "organizationId"=$1 AND action='compliance.retention_purged'
+       ORDER BY "createdAt" DESC
+       LIMIT 1`,
+      [orgId],
+    )) as Array<{ createdAt: Date; meta: Record<string, unknown> }>;
+    const row = rows[0];
+    if (!row) {
+      return {
+        lastRunAt: null,
+        purgedCount: 0,
+        skippedHoldCount: 0,
+        policiesApplied: 0,
+        trigger: null,
+      };
+    }
+    const meta = row.meta ?? {};
+    const trigger =
+      meta.trigger === 'manual' || meta.trigger === 'scheduled'
+        ? meta.trigger
+        : null;
+    return {
+      lastRunAt: new Date(row.createdAt).toISOString(),
+      purgedCount: Number(meta.purgedCount ?? 0),
+      skippedHoldCount: Number(meta.skippedHoldCount ?? 0),
+      policiesApplied: Number(meta.policiesApplied ?? 0),
+      trigger,
+    };
+  }
+
+  async listLegalHolds() {
+    const orgId = requireOrganizationId();
+    const rows = await this.auditEvents.manager.query(
+      `SELECT * FROM legal_holds WHERE "organizationId"=$1 ORDER BY "createdAt" DESC`,
+      [orgId],
+    );
+    return (rows as any[]).map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      reason: String(row.reason ?? ''),
+      scope: String(row.scope),
+      conversationId: row.conversationId ? String(row.conversationId) : null,
+      userId: row.userId ? String(row.userId) : null,
+      active: Boolean(row.active),
+      createdBy: String(row.createdBy),
+      createdAt: new Date(row.createdAt).toISOString(),
+      releasedAt: row.releasedAt ? new Date(row.releasedAt).toISOString() : null,
+    }));
+  }
+
+  async createLegalHold(payload: {
+    actorId: string;
+    name: string;
+    reason?: string;
+    scope?: 'workspace' | 'channel' | 'user';
+    conversationId?: string | null;
+    userId?: string | null;
+  }) {
+    const orgId = requireOrganizationId();
+    const name = String(payload.name ?? '').trim().slice(0, 160);
+    if (!name) return RpcErrors.badRequest('Hold name is required') as never;
+    await this.auditEvents.manager.query(
+      `INSERT INTO legal_holds
+        ("organizationId","name","reason","scope","conversationId","userId","createdBy")
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [
+        orgId,
+        name,
+        String(payload.reason ?? '').slice(0, 2000),
+        payload.scope ?? 'workspace',
+        payload.conversationId ?? null,
+        payload.userId ?? null,
+        payload.actorId,
+      ],
+    );
+    await this.logAudit({
+      actorId: payload.actorId,
+      action: 'compliance.legal_hold_created',
+      targetType: 'legal_hold',
+      meta: { name },
+    });
+    return this.listLegalHolds();
+  }
+
+  async releaseLegalHold(payload: { actorId: string; id: string }) {
+    const orgId = requireOrganizationId();
+    await this.auditEvents.manager.query(
+      `UPDATE legal_holds
+       SET active=false, "releasedAt"=now(), "releasedBy"=$1
+       WHERE id=$2 AND "organizationId"=$3`,
+      [payload.actorId, payload.id, orgId],
+    );
+    await this.logAudit({
+      actorId: payload.actorId,
+      action: 'compliance.legal_hold_released',
+      targetType: 'legal_hold',
+      targetId: payload.id,
+    });
+    return this.listLegalHolds();
+  }
+
+  async ediscoveryExport(payload: {
+    actorId: string;
+    query?: string;
+    conversationId?: string | null;
+    from?: string | null;
+    to?: string | null;
+    limit?: number;
+  }) {
+    const orgId = requireOrganizationId();
+    const limit = Math.max(1, Math.min(5000, Number(payload.limit) || 1000));
+    const params: unknown[] = [orgId];
+    const where = [`m."organizationId"=$1`, `m."deletedAt" IS NULL`];
+    if (payload.conversationId) {
+      params.push(payload.conversationId);
+      where.push(`m."conversationId"=$${params.length}`);
+    }
+    if (payload.query?.trim()) {
+      params.push(`%${payload.query.trim().slice(0, 200)}%`);
+      where.push(`m.body ILIKE $${params.length}`);
+    }
+    if (payload.from) {
+      params.push(payload.from);
+      where.push(`m."createdAt" >= $${params.length}::timestamptz`);
+    }
+    if (payload.to) {
+      params.push(payload.to);
+      where.push(`m."createdAt" <= $${params.length}::timestamptz`);
+    }
+    params.push(limit);
+    const rows = await this.auditEvents.manager.query(
+      `SELECT m.id, m."conversationId", m."senderId", m.body, m.type, m."createdAt",
+              c.name AS "conversationName", c.type AS "conversationType"
+       FROM messages m
+       LEFT JOIN conversations c ON c.id = m."conversationId"
+       WHERE ${where.join(' AND ')}
+       ORDER BY m."createdAt" ASC
+       LIMIT $${params.length}`,
+      params,
+    );
+    await this.logAudit({
+      actorId: payload.actorId,
+      action: 'compliance.ediscovery_export',
+      targetType: 'export',
+      meta: { count: (rows as any[]).length, query: payload.query ?? null },
+    });
+    return {
+      exportedAt: new Date().toISOString(),
+      count: (rows as any[]).length,
+      items: (rows as any[]).map((row) => ({
+        id: String(row.id),
+        conversationId: String(row.conversationId),
+        conversationName: row.conversationName ?? null,
+        conversationType: row.conversationType ?? null,
+        senderId: String(row.senderId),
+        body: String(row.body ?? ''),
+        type: String(row.type ?? 'text'),
+        createdAt: new Date(row.createdAt).toISOString(),
+      })),
+    };
+  }
+
+  async importMigration(payload: {
+    actorId: string;
+    source: 'slack' | 'teams';
+    dryRun?: boolean;
+    data: {
+      users?: Array<{ id?: string; name?: string; email?: string }>;
+      channels?: Array<{
+        name?: string;
+        messages?: Array<{ user?: string; text?: string; ts?: string }>;
+      }>;
+    };
+  }) {
+    const orgId = requireOrganizationId();
+    const dryRun = Boolean(payload.dryRun);
+    const users = Array.isArray(payload.data?.users) ? payload.data.users : [];
+    const channels = Array.isArray(payload.data?.channels)
+      ? payload.data.channels
+      : [];
+    const summary = {
+      usersSeen: users.length,
+      channelsSeen: channels.length,
+      channelsCreated: 0,
+      messagesImported: 0,
+      dryRun,
+    };
+
+    if (!dryRun) {
+      for (const channel of channels.slice(0, 50)) {
+        const name = String(channel.name ?? '')
+          .replace(/^#/, '')
+          .trim()
+          .slice(0, 80);
+        if (!name) continue;
+        const created = await this.createGroup({
+          actorId: payload.actorId,
+          name,
+          memberIds: [],
+          visibility: 'private',
+        } as any);
+        summary.channelsCreated += 1;
+        const conversationId =
+          created && typeof created === 'object' && 'id' in created
+            ? String((created as { id: string }).id)
+            : null;
+        const msgs = Array.isArray(channel.messages) ? channel.messages : [];
+        for (const msg of msgs.slice(0, 200)) {
+          const text = String(msg.text ?? '').trim();
+          if (!text || !conversationId) continue;
+          await this.sendMessage({
+            actorId: payload.actorId,
+            conversationId,
+            body: `_[imported]_ ${text}`.slice(0, 4000),
+            type: 'text',
+          } as any);
+          summary.messagesImported += 1;
+        }
+      }
+    }
+
+    await this.auditEvents.manager.query(
+      `INSERT INTO migration_jobs
+        ("organizationId","source","status","dryRun","summary","createdBy")
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6)`,
+      [
+        orgId,
+        payload.source,
+        dryRun ? 'dry_run' : 'completed',
+        dryRun,
+        JSON.stringify(summary),
+        payload.actorId,
+      ],
+    );
+    await this.logAudit({
+      actorId: payload.actorId,
+      action: 'compliance.migration_import',
+      targetType: 'migration',
+      meta: summary,
+    });
+    return summary;
+  }
+
+  async listMigrationJobs() {
+    const orgId = requireOrganizationId();
+    const rows = await this.auditEvents.manager.query(
+      `SELECT * FROM migration_jobs WHERE "organizationId"=$1 ORDER BY "createdAt" DESC LIMIT 50`,
+      [orgId],
+    );
+    return (rows as any[]).map((row) => ({
+      id: String(row.id),
+      source: String(row.source),
+      status: String(row.status),
+      dryRun: Boolean(row.dryRun),
+      summary: row.summary ?? {},
+      createdBy: String(row.createdBy),
+      createdAt: new Date(row.createdAt).toISOString(),
+    }));
   }
 
   async listSidebarSections(actorId: string): Promise<SidebarSectionView[]> {
@@ -8505,8 +9560,20 @@ export class ChatService {
     interactive: NonNullable<Message['interactive']>,
     actorId?: string,
   ): InteractiveView {
+    const kind = interactive.kind === 'rsvp' ? 'rsvp' : 'approval';
+    const responses = Array.isArray(interactive.responses)
+      ? interactive.responses.map((item) => ({
+          userId: item.userId,
+          value: item.value,
+          at: item.at,
+        }))
+      : [];
+    const myResponse =
+      actorId && kind === 'rsvp'
+        ? (responses.find((item) => item.userId === actorId)?.value ?? null)
+        : null;
     return {
-      kind: 'approval',
+      kind,
       title: String(interactive.title ?? ''),
       status: interactive.status,
       actions: (interactive.actions ?? []).map((action) => ({
@@ -8521,6 +9588,8 @@ export class ChatService {
       decidedByMe: Boolean(
         actorId && interactive.decidedBy && interactive.decidedBy === actorId,
       ),
+      responses,
+      myResponse,
     };
   }
 

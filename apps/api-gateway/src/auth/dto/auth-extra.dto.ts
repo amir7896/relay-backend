@@ -26,10 +26,32 @@ export class ForgotPasswordDto {
 }
 
 export class ResetPasswordDto {
-  @ApiProperty()
+  @ApiPropertyOptional({
+    description: 'Long reset-link token, or 6-digit OTP from email',
+  })
+  @IsOptional()
   @IsString()
   @IsNotEmpty()
-  token!: string;
+  token?: string;
+
+  @ApiPropertyOptional({
+    description: 'Account email — required when using otp without token',
+  })
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.toLowerCase().trim() : value,
+  )
+  @IsOptional()
+  @IsEmail()
+  email?: string;
+
+  @ApiPropertyOptional({
+    example: '482913',
+    description: '6-digit OTP from the reset email',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{6}$/, { message: 'otp must be a 6-digit code' })
+  otp?: string;
 
   @ApiProperty({ example: 'Str0ng!Pass' })
   @IsString()

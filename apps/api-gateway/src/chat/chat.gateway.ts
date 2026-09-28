@@ -978,6 +978,35 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return payload;
   }
 
+  /** Relay live captions from one peer to the rest of the call (no persistence). */
+  @SubscribeMessage('call:caption')
+  async captionCall(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody()
+    body: CallSignalBody & { text?: string; interim?: boolean },
+  ) {
+    const userId = this.requireUser(client);
+    const callId = this.requireCallId(body);
+    const text = String(body.text ?? '').trim().slice(0, 2000);
+    if (!text) {
+      return { ok: true };
+    }
+    const existing = await this.calls.get(callId);
+    if (!existing || existing.status === 'ended') {
+      return { status: 'error', message: 'Call is no longer available' };
+    }
+    await this.assertLiveConversationMember(userId, existing.conversationId);
+    const payload = {
+      callId,
+      conversationId: existing.conversationId,
+      byUserId: userId,
+      text,
+      interim: Boolean(body.interim),
+    };
+    this.broadcastToCallMembers(existing.memberIds, 'call:caption', payload);
+    return { ok: true };
+  }
+
   getIceServers(): Array<{
     urls: string | string[];
     username?: string;

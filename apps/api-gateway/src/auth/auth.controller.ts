@@ -541,8 +541,14 @@ export class AuthController {
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
   async resetPassword(@Body() dto: ResetPasswordDto) {
+    const token = dto.token?.trim() || dto.otp?.trim();
+    if (!token) {
+      throw new BadRequestAppException('Reset token or OTP is required');
+    }
     const data = await this.proxy.sendAuth(AUTH_PATTERNS.RESET_PASSWORD, {
-      token: dto.token,
+      token,
+      email: dto.email,
+      otp: dto.otp,
       password: dto.password,
     });
     return { message: AUTH_SUCCESS_MESSAGES.PASSWORD_RESET, data };

@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, randomInt } from 'crypto';
 import { IsNull, Repository } from 'typeorm';
 import { MailService, RpcErrors, resetPasswordTemplate, verifyEmailTemplate, workspaceInviteTemplate, buildPaginatedResult, getSkipTake } from '@app/common';
 import type { PaginatedResult } from '@app/common';
@@ -95,38 +95,52 @@ export class AuthTokenService {
       return { accepted: true };
     }
 
-    const raw = await this.issueToken({
+    // 6-digit OTP — mobile-friendly; also works as the reset "token" for web.
+    const otp = String(randomInt(100_000, 1_000_000));
+    await this.issueToken({
       type: AuthTokenType.PASSWORD_RESET,
       email: user.email,
       userId: user.id,
-      ttlMs: this.ttlMs('PASSWORD_RESET_TTL_HOURS', 2),
+      ttlMs: this.otpTtlMs(),
+      rawToken: otp,
     });
 
-    const resetUrl = `${this.mail.publicAppUrl}/reset-password?token=${raw}`;
+    const resetUrl = `${this.mail.publicAppUrl}/reset-password?email=${encodeURIComponent(user.email)}&otp=${otp}`;
     const content = resetPasswordTemplate({
       appUrl: this.mail.publicAppUrl,
       resetUrl,
-      expiresHours: 2,
+      otp,
+      expiresMinutes: Math.round(this.otpTtlMs() / 60_000),
     });
     const result = await this.mail.send({
       to: user.email,
       ...content,
     });
 
+    const debugFallback = !result.delivered;
     return {
       accepted: true,
       debugResetUrl:
-        result.previewUrl ?? (result.delivered ? undefined : resetUrl),
+        result.previewUrl ?? (debugFallback ? resetUrl : undefined),
+      debugOtp: debugFallback ? otp : undefined,
     };
   }
 
   async resetPassword(
-    token: string,
+    tokenOrOtp: string,
     passwordHash: string,
+    emailHint?: string | null,
   ): Promise<{ reset: boolean; userId: string }> {
-    const record = await this.consumeToken(token, AuthTokenType.PASSWORD_RESET);
+    const raw = tokenOrOtp.trim();
+    const record = await this.consumeToken(raw, AuthTokenType.PASSWORD_RESET);
     if (!record.userId) {
       return RpcErrors.badRequest('Reset token is invalid');
+    }
+    if (emailHint) {
+      const expected = emailHint.toLowerCase().trim();
+      if (record.email && record.email.toLowerCase() !== expected) {
+        return RpcErrors.badRequest('Reset code does not match this email');
+      }
     }
     const user = await this.users
       .createQueryBuilder('user')
@@ -345,6 +359,8 @@ export class AuthTokenService {
     pendingChannelId?: string | null;
     maxUses?: number;
     ttlMs: number;
+    /** When set, use this raw value instead of a random hex token (e.g. OTP). */
+    rawToken?: string;
   }): Promise<string> {
     if (
       input.type === AuthTokenType.EMAIL_VERIFY ||
@@ -360,7 +376,7 @@ export class AuthTokenService {
         .execute();
     }
 
-    const raw = randomBytes(32).toString('hex');
+    const raw = input.rawToken ?? randomBytes(32).toString('hex');
     const entity = this.tokens.create({
       type: input.type,
       tokenHash: this.hash(raw),
@@ -402,7 +418,9 @@ export class AuthTokenService {
     raw: string,
     type: AuthTokenType,
   ): Promise<AuthToken | null> {
-    if (!raw || raw.length < 16) {
+    // Password-reset OTPs are 6 digits; other tokens are long hex strings.
+    const minLen = type === AuthTokenType.PASSWORD_RESET ? 6 : 16;
+    if (!raw || raw.length < minLen) {
       return null;
     }
     const match = await this.tokens.findOne({
@@ -413,6 +431,14 @@ export class AuthTokenService {
     if (match.expiresAt.getTime() < Date.now()) return null;
     if (match.usedCount >= match.maxUses) return null;
     return match;
+  }
+
+  private otpTtlMs(): number {
+    const minutes = this.config.get<number>(
+      'PASSWORD_RESET_OTP_TTL_MINUTES',
+      30,
+    );
+    return Math.max(5, minutes) * 60 * 1000;
   }
 
   private ttlMs(envKey: string, defaultHours: number): number {

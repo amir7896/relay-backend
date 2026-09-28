@@ -55,6 +55,9 @@ export const CHAT_PATTERNS = {
   GET_CHANNEL_INCIDENT: 'chat.get_channel_incident',
   OPEN_INCIDENT: 'chat.open_incident',
   UPDATE_INCIDENT: 'chat.update_incident',
+  LIST_STUCK_SIGNALS: 'chat.list_stuck_signals',
+  OPEN_STUCK_SIGNAL: 'chat.open_stuck_signal',
+  UPDATE_STUCK_SIGNAL: 'chat.update_stuck_signal',
   CREATE_REMINDER: 'chat.create_reminder',
   LIST_REMINDERS: 'chat.list_reminders',
   CANCEL_REMINDER: 'chat.cancel_reminder',
@@ -83,6 +86,17 @@ export const CHAT_PATTERNS = {
   GET_ANALYTICS: 'chat.get_analytics',
   LIST_AUDIT: 'chat.list_audit',
   LOG_AUDIT: 'chat.log_audit',
+  LIST_RETENTION_POLICIES: 'chat.list_retention_policies',
+  UPSERT_RETENTION_POLICY: 'chat.upsert_retention_policy',
+  DELETE_RETENTION_POLICY: 'chat.delete_retention_policy',
+  RUN_RETENTION_PURGE: 'chat.run_retention_purge',
+  GET_RETENTION_PURGE_STATUS: 'chat.get_retention_purge_status',
+  LIST_LEGAL_HOLDS: 'chat.list_legal_holds',
+  CREATE_LEGAL_HOLD: 'chat.create_legal_hold',
+  RELEASE_LEGAL_HOLD: 'chat.release_legal_hold',
+  EDISCOVERY_EXPORT: 'chat.ediscovery_export',
+  IMPORT_MIGRATION: 'chat.import_migration',
+  LIST_MIGRATION_JOBS: 'chat.list_migration_jobs',
   GET_WORKSPACE: 'chat.get_workspace',
   UPDATE_WORKSPACE: 'chat.update_workspace',
   ENSURE_GENERAL_MEMBER: 'chat.ensure_general_member',
@@ -163,6 +177,8 @@ export const CHAT_PATTERNS = {
   DELETE_WORKFLOW: 'chat.delete_workflow',
   RUN_WORKFLOW: 'chat.run_workflow',
   EVALUATE_WORKFLOWS: 'chat.evaluate_workflows',
+  DISPATCH_DUE_WORKFLOWS: 'chat.dispatch_due_workflows',
+  APPLY_KICKSTART: 'chat.apply_kickstart',
   CREATE_SHARED_INVITE: 'chat.create_shared_invite',
   GET_SHARED_INFO: 'chat.get_shared_info',
   ACCEPT_SHARED_INVITE: 'chat.accept_shared_invite',
@@ -364,6 +380,10 @@ export interface SendMessageResult extends MessageView {
    * Gateway re-emits the same message with each stub conversationId.
    */
   connectFanouts?: ConnectMessageFanout[];
+  /** Present after react toggle: true when the reaction was added. */
+  reactionAdded?: boolean;
+  /** Normalized emoji that was added or removed. */
+  reactedEmoji?: string;
 }
 
 export interface EditMessagePayload extends ConversationActorPayload {
@@ -586,6 +606,41 @@ export interface UpdateIncidentPayload {
   actorId: string;
   incidentId: string;
   status: IncidentStatus;
+}
+
+export type StuckSignalStatus = 'open' | 'helping' | 'resolved';
+
+export interface StuckSignalView {
+  id: string;
+  conversationId: string;
+  conversationName: string | null;
+  body: string;
+  status: StuckSignalStatus;
+  openedBy: string;
+  claimedBy: string | null;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ListStuckSignalsPayload {
+  actorId: string;
+  /** Default: active (open + helping). */
+  scope?: 'active' | 'all' | 'resolved' | 'mine';
+}
+
+export interface OpenStuckSignalPayload {
+  actorId: string;
+  conversationId: string;
+  body: string;
+}
+
+export interface UpdateStuckSignalPayload {
+  actorId: string;
+  stuckId: string;
+  /** claim → helping, resolve → resolved, reopen → open */
+  action: 'claim' | 'resolve' | 'reopen';
 }
 
 export interface CreateReminderPayload extends ConversationActorPayload {
@@ -864,8 +919,19 @@ export interface VotePollPayload extends ConversationActorPayload {
 }
 
 export type InteractiveActionStyle = 'primary' | 'danger' | 'default';
-export type InteractiveActionValue = 'approve' | 'deny';
-export type InteractiveCardStatus = 'open' | 'approved' | 'denied';
+export type InteractiveActionValue =
+  | 'approve'
+  | 'deny'
+  | 'going'
+  | 'maybe'
+  | 'cant';
+export type InteractiveCardStatus =
+  | 'open'
+  | 'approved'
+  | 'denied'
+  | 'closed';
+export type InteractiveKind = 'approval' | 'rsvp';
+export type RsvpResponseValue = 'going' | 'maybe' | 'cant';
 
 export interface InteractiveActionView {
   id: string;
@@ -874,8 +940,14 @@ export interface InteractiveActionView {
   value: InteractiveActionValue;
 }
 
+export interface InteractiveResponseView {
+  userId: string;
+  value: RsvpResponseValue;
+  at: string;
+}
+
 export interface InteractiveView {
-  kind: 'approval';
+  kind: InteractiveKind;
   title: string;
   status: InteractiveCardStatus;
   actions: InteractiveActionView[];
@@ -883,11 +955,14 @@ export interface InteractiveView {
   decidedAt: string | null;
   decidedValue: InteractiveActionValue | null;
   decidedByMe: boolean;
+  /** RSVP responses (one per user). */
+  responses: InteractiveResponseView[];
+  myResponse: RsvpResponseValue | null;
 }
 
 export interface CreateInteractivePayload extends ConversationActorPayload {
   title: string;
-  kind?: 'approval';
+  kind?: InteractiveKind;
 }
 
 export interface InvokeMessageActionPayload extends ConversationActorPayload {
@@ -1061,6 +1136,21 @@ export interface LogAuditPayload {
   targetType?: string;
   targetId?: string;
   meta?: Record<string, unknown>;
+}
+
+export interface RetentionPurgeResult {
+  organizationId: string;
+  purgedCount: number;
+  skippedHoldCount: number;
+  policiesApplied: number;
+}
+
+export interface RetentionPurgeStatusView {
+  lastRunAt: string | null;
+  purgedCount: number;
+  skippedHoldCount: number;
+  policiesApplied: number;
+  trigger: 'scheduled' | 'manual' | null;
 }
 
 export interface WorkspaceCustomEmoji {
@@ -1467,18 +1557,65 @@ export interface ChannelClipView { id: string; organizationId: string; conversat
 export interface CreateChannelClipPayload extends ConversationActorPayload { messageId?: string | null; mediaUrl: string; mediaType: 'audio' | 'video'; durationSeconds?: number | null }
 export interface DeleteChannelClipPayload extends ConversationActorPayload { clipId: string }
 export interface ChannelHuddleView { id: string; organizationId: string; conversationId: string; status: 'active' | 'ended'; startedBy: string; participantIds: string[]; startedAt: string; endedAt: string | null }
-export type WorkflowTriggerType = 'message_contains' | 'channel_created' | 'manual';
-export type WorkflowActionType = 'post_message' | 'webhook' | 'set_reminder';
-export interface ChannelWorkflowView { id: string; organizationId: string; conversationId: string | null; name: string; enabled: boolean; triggerType: WorkflowTriggerType; triggerConfig: Record<string, unknown>; actionType: WorkflowActionType; actionConfig: Record<string, unknown>; createdBy: string; createdAt: string }
-export interface CreateWorkflowPayload { actorId: string; conversationId?: string | null; name: string; enabled?: boolean; triggerType: WorkflowTriggerType; triggerConfig?: Record<string, unknown>; actionType: WorkflowActionType; actionConfig?: Record<string, unknown> }
-export interface UpdateWorkflowPayload extends Partial<Omit<CreateWorkflowPayload, 'actorId'>> { actorId: string; workflowId: string; conversationId?: string | null }
+export type WorkflowTriggerType =
+  | 'message_contains'
+  | 'channel_created'
+  | 'manual'
+  | 'form_submitted'
+  | 'emoji_reaction'
+  | 'schedule';
+export type WorkflowActionType = 'post_message' | 'webhook' | 'set_reminder' | 'collect_form';
+export type WorkflowStepType = 'trigger' | 'form' | 'condition' | 'action';
+export interface WorkflowStepView {
+  id: string;
+  type: WorkflowStepType;
+  label?: string;
+  config?: Record<string, unknown>;
+}
+export interface ChannelWorkflowView {
+  id: string;
+  organizationId: string;
+  conversationId: string | null;
+  name: string;
+  enabled: boolean;
+  triggerType: WorkflowTriggerType;
+  triggerConfig: Record<string, unknown>;
+  actionType: WorkflowActionType;
+  actionConfig: Record<string, unknown>;
+  steps: WorkflowStepView[];
+  createdBy: string;
+  createdAt: string;
+}
+export interface CreateWorkflowPayload {
+  actorId: string;
+  conversationId?: string | null;
+  name: string;
+  enabled?: boolean;
+  triggerType: WorkflowTriggerType;
+  triggerConfig?: Record<string, unknown>;
+  actionType: WorkflowActionType;
+  actionConfig?: Record<string, unknown>;
+  steps?: WorkflowStepView[];
+}
+export interface UpdateWorkflowPayload extends Partial<Omit<CreateWorkflowPayload, 'actorId'>> {
+  actorId: string;
+  workflowId: string;
+  conversationId?: string | null;
+}
 export interface DeleteWorkflowPayload { actorId: string; workflowId: string; conversationId?: string | null }
 export interface ListWorkflowsPayload { actorId: string; conversationId?: string | null }
-export interface RunWorkflowPayload { actorId: string; workflowId: string; conversationId?: string | null }
+export interface RunWorkflowPayload {
+  actorId: string;
+  workflowId: string;
+  conversationId?: string | null;
+  formAnswers?: Record<string, string>;
+}
 export interface EvaluateWorkflowsPayload {
   actorId: string;
   conversationId: string;
-  triggerType: 'message_contains' | 'channel_created';
+  triggerType: 'message_contains' | 'channel_created' | 'emoji_reaction';
+  /** Normalized emoji for emoji_reaction triggers. */
+  emoji?: string;
   message?: {
     id: string;
     body: string;

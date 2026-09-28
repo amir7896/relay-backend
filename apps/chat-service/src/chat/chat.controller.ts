@@ -422,6 +422,27 @@ export class ChatController {
     return this.withOrg(payload, () => this.chatService.updateIncident(payload));
   }
 
+  @MessagePattern(CHAT_PATTERNS.LIST_STUCK_SIGNALS)
+  listStuckSignals(@Payload() payload: any) {
+    return this.withOrg(payload, () =>
+      this.chatService.listStuckSignals(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.OPEN_STUCK_SIGNAL)
+  openStuckSignal(@Payload() payload: any) {
+    return this.withOrg(payload, () =>
+      this.chatService.openStuckSignal(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UPDATE_STUCK_SIGNAL)
+  updateStuckSignal(@Payload() payload: any) {
+    return this.withOrg(payload, () =>
+      this.chatService.updateStuckSignal(payload),
+    );
+  }
+
   @MessagePattern(CHAT_PATTERNS.CREATE_REMINDER)
   createReminder(
     @Payload() payload: CreateReminderPayload & TenantChatPayload,
@@ -944,6 +965,8 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.DELETE_WORKFLOW) deleteWorkflow(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.deleteWorkflow(p)); }
   @MessagePattern(CHAT_PATTERNS.RUN_WORKFLOW) runWorkflow(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.runWorkflow(p)); }
   @MessagePattern(CHAT_PATTERNS.EVALUATE_WORKFLOWS) evaluateWorkflows(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.evaluateWorkflows(p)); }
+  @MessagePattern(CHAT_PATTERNS.DISPATCH_DUE_WORKFLOWS) dispatchDueWorkflows() { return this.slackProducts.dispatchDueWorkflows(); }
+  @MessagePattern(CHAT_PATTERNS.APPLY_KICKSTART) applyKickstart(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.applyKickstart(p)); }
   @MessagePattern(CHAT_PATTERNS.CREATE_SHARED_INVITE) createSharedInvite(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.createSharedInvite(p)); }
   @MessagePattern(CHAT_PATTERNS.GET_SHARED_INFO) getSharedInfo(@Payload() p: any) { return this.withOrg(p, () => this.slackProducts.getSharedInfo(p)); }
   @MessagePattern(CHAT_PATTERNS.ACCEPT_SHARED_INVITE) acceptSharedInvite(@Payload() p: any) { return this.slackProducts.acceptSharedInvite(p); }
@@ -1028,6 +1051,88 @@ export class ChatController {
   @MessagePattern(CHAT_PATTERNS.LOG_AUDIT)
   logAudit(@Payload() payload: LogAuditPayload & TenantChatPayload) {
     return this.withOrg(payload, () => this.chatService.logAudit(payload));
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_RETENTION_POLICIES)
+  listRetentionPolicies(@Payload() payload: TenantChatPayload = {}) {
+    return this.withOrg(payload, () => this.chatService.listRetentionPolicies());
+  }
+
+  @MessagePattern(CHAT_PATTERNS.UPSERT_RETENTION_POLICY)
+  upsertRetentionPolicy(@Payload() payload: any) {
+    return this.withOrg(payload, () =>
+      this.chatService.upsertRetentionPolicy(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.DELETE_RETENTION_POLICY)
+  deleteRetentionPolicy(@Payload() payload: any) {
+    return this.withOrg(payload, () =>
+      this.chatService.deleteRetentionPolicy(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.RUN_RETENTION_PURGE)
+  runRetentionPurge(
+    @Payload()
+    payload: {
+      actorId?: string;
+      organizationId?: string;
+      trigger?: 'scheduled' | 'manual';
+    } = {},
+  ) {
+    // System / manual job — may span orgs when organizationId is omitted.
+    if (payload.organizationId) {
+      return this.withOrg(payload, () =>
+        this.chatService.runRetentionPurge(payload),
+      );
+    }
+    return this.chatService.runRetentionPurge(payload);
+  }
+
+  @MessagePattern(CHAT_PATTERNS.GET_RETENTION_PURGE_STATUS)
+  getRetentionPurgeStatus(@Payload() payload: TenantChatPayload = {}) {
+    return this.withOrg(payload, () =>
+      this.chatService.getRetentionPurgeStatus(),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_LEGAL_HOLDS)
+  listLegalHolds(@Payload() payload: TenantChatPayload = {}) {
+    return this.withOrg(payload, () => this.chatService.listLegalHolds());
+  }
+
+  @MessagePattern(CHAT_PATTERNS.CREATE_LEGAL_HOLD)
+  createLegalHold(@Payload() payload: any) {
+    return this.withOrg(payload, () =>
+      this.chatService.createLegalHold(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.RELEASE_LEGAL_HOLD)
+  releaseLegalHold(@Payload() payload: any) {
+    return this.withOrg(payload, () =>
+      this.chatService.releaseLegalHold(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.EDISCOVERY_EXPORT)
+  ediscoveryExport(@Payload() payload: any) {
+    return this.withOrg(payload, () =>
+      this.chatService.ediscoveryExport(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.IMPORT_MIGRATION)
+  importMigration(@Payload() payload: any) {
+    return this.withOrg(payload, () =>
+      this.chatService.importMigration(payload),
+    );
+  }
+
+  @MessagePattern(CHAT_PATTERNS.LIST_MIGRATION_JOBS)
+  listMigrationJobs(@Payload() payload: TenantChatPayload = {}) {
+    return this.withOrg(payload, () => this.chatService.listMigrationJobs());
   }
 
   @MessagePattern(CHAT_PATTERNS.GET_WORKSPACE)

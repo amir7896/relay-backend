@@ -44,6 +44,12 @@ import { MessageDraft } from './entities/message-draft.entity';
 import { SavedReply } from './entities/saved-reply.entity';
 import { WikiPage } from './entities/wiki-page.entity';
 import { Incident } from './entities/incident.entity';
+import { StuckSignal } from './entities/stuck-signal.entity';
+import {
+  LegalHold,
+  MigrationJob,
+  RetentionPolicy,
+} from './entities/compliance.entities';
 import { MessageReminder } from './entities/message-reminder.entity';
 import { ThreadFollow } from './entities/thread-follow.entity';
 import { MessageEdit } from './entities/message-edit.entity';
@@ -70,6 +76,8 @@ import { AddMessageInteractive1743000029000 } from './migrations/1743000029000-A
 import { AddSavedReplies1743000030000 } from './migrations/1743000030000-AddSavedReplies';
 import { AddWikiPages1743000031000 } from './migrations/1743000031000-AddWikiPages';
 import { AddIncidents1743000032000 } from './migrations/1743000032000-AddIncidents';
+import { AddComplianceAndWorkflowSteps1743000033000 } from './migrations/1743000033000-AddComplianceAndWorkflowSteps';
+import { AddStuckSignals1743000034000 } from './migrations/1743000034000-AddStuckSignals';
 
 config({
   path: [
@@ -101,6 +109,10 @@ export default new DataSource({
     SavedReply,
     WikiPage,
     Incident,
+    StuckSignal,
+    RetentionPolicy,
+    LegalHold,
+    MigrationJob,
     MessageReminder,
     ThreadFollow,
     MessageEdit,
@@ -156,6 +168,8 @@ export default new DataSource({
     AddSavedReplies1743000030000,
     AddWikiPages1743000031000,
     AddIncidents1743000032000,
+    AddComplianceAndWorkflowSteps1743000033000,
+    AddStuckSignals1743000034000,
   ],
   synchronize: false,
 });

@@ -5,6 +5,7 @@ import {
   Headers,
   HttpCode,
   HttpStatus,
+  Param,
   Patch,
   Post,
   Query,
@@ -14,13 +15,13 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
+import type { Request } from 'express';
 import {
   AuthenticatedUser,
   BadRequestAppException,
   CurrentUser,
   ForbiddenAppException,
   Public,
-  Roles,
   UserRole,
 } from '@app/common';
 import type { PaginatedResult } from '@app/common';
@@ -29,6 +30,7 @@ import type {
   AuditEventView,
   ChatAnalyticsView,
   OrganizationView,
+  RetentionPurgeStatusView,
   WorkspaceSettingsView,
 } from '@app/contracts';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
@@ -46,6 +48,8 @@ const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettingsView = {
   customEmojis: [],
 };
 
+type OrgRequest = Request & { organization?: OrganizationView };
+
 @Controller()
 export class AdminController {
   constructor(
@@ -55,9 +59,29 @@ export class AdminController {
     private readonly storage: StorageService,
   ) {}
 
+  /** Platform admin or workspace owner/admin may use Compliance / Analytics. */
+  private assertWorkspaceManager(
+    user: AuthenticatedUser,
+    request: OrgRequest,
+  ) {
+    if (user.role === UserRole.ADMIN) {
+      return;
+    }
+    const role = request.organization?.role;
+    if (role === 'owner' || role === 'admin') {
+      return;
+    }
+    throw new ForbiddenAppException(
+      'Only workspace owners and admins can access compliance and analytics',
+    );
+  }
+
   @Get('admin/analytics')
-  @Roles(UserRole.ADMIN)
-  async analytics(@CurrentUser() user: AuthenticatedUser) {
+  async analytics(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+  ) {
+    this.assertWorkspaceManager(user, request);
     const data = await this.proxy.sendChat<ChatAnalyticsView>(
       CHAT_PATTERNS.GET_ANALYTICS,
       { actorId: user.id },
@@ -70,11 +94,12 @@ export class AdminController {
   }
 
   @Get('admin/audit')
-  @Roles(UserRole.ADMIN)
   async audit(
     @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
     @Query() query: ChatPageQueryDto,
   ) {
+    this.assertWorkspaceManager(user, request);
     const data = await this.proxy.sendChat<PaginatedResult<AuditEventView>>(
       CHAT_PATTERNS.LIST_AUDIT,
       { actorId: user.id, page: query.page, limit: query.limit },
@@ -83,8 +108,11 @@ export class AdminController {
   }
 
   @Get('admin/audit/export')
-  @Roles(UserRole.ADMIN)
-  async auditExport(@CurrentUser() user: AuthenticatedUser) {
+  async auditExport(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+  ) {
+    this.assertWorkspaceManager(user, request);
     const data = await this.proxy.sendChat<PaginatedResult<AuditEventView>>(
       CHAT_PATTERNS.LIST_AUDIT,
       { actorId: user.id, page: 1, limit: 5_000 },
@@ -242,5 +270,207 @@ export class AdminController {
   ) {
     const data = await this.linkPreview.fetch(dto.url, user.id);
     return { message: 'Link preview ready', data };
+  }
+
+  @Get('admin/compliance/retention')
+  async listRetention(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+  ) {
+    this.assertWorkspaceManager(user, request);
+    const data = await this.proxy.sendChat(
+      CHAT_PATTERNS.LIST_RETENTION_POLICIES,
+      { actorId: user.id },
+    );
+    return { message: 'Retention policies', data };
+  }
+
+  @Post('admin/compliance/retention')
+  async upsertRetention(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+    @Body()
+    body: {
+      id?: string;
+      name: string;
+      scope?: 'workspace' | 'channel';
+      conversationId?: string | null;
+      retainDays: number;
+      enabled?: boolean;
+    },
+  ) {
+    this.assertWorkspaceManager(user, request);
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.UPSERT_RETENTION_POLICY, {
+      actorId: user.id,
+      ...body,
+    });
+    return { message: 'Retention policy saved', data };
+  }
+
+  @Post('admin/compliance/retention/:id/delete')
+  async deleteRetention(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+    @Param('id') id: string,
+  ) {
+    this.assertWorkspaceManager(user, request);
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.DELETE_RETENTION_POLICY, {
+      actorId: user.id,
+      id,
+    });
+    return { message: 'Retention policy deleted', data };
+  }
+
+  @Get('admin/compliance/retention/purge-status')
+  async retentionPurgeStatus(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+  ) {
+    this.assertWorkspaceManager(user, request);
+    const data = await this.proxy.sendChat<RetentionPurgeStatusView>(
+      CHAT_PATTERNS.GET_RETENTION_PURGE_STATUS,
+      { actorId: user.id },
+    );
+    return { message: 'Retention purge status', data };
+  }
+
+  @Post('admin/compliance/retention/purge')
+  async runRetentionPurge(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+  ) {
+    this.assertWorkspaceManager(user, request);
+    const organizationId = request.organization?.id;
+    if (!organizationId) {
+      throw new ForbiddenAppException('Workspace required');
+    }
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.RUN_RETENTION_PURGE, {
+      actorId: user.id,
+      organizationId,
+      trigger: 'manual',
+    });
+    return { message: 'Retention purge complete', data };
+  }
+
+  @Get('admin/compliance/holds')
+  async listHolds(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+  ) {
+    this.assertWorkspaceManager(user, request);
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_LEGAL_HOLDS, {
+      actorId: user.id,
+    });
+    return { message: 'Legal holds', data };
+  }
+
+  @Post('admin/compliance/holds')
+  async createHold(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+    @Body()
+    body: {
+      name: string;
+      reason?: string;
+      scope?: 'workspace' | 'channel' | 'user';
+      conversationId?: string | null;
+      userId?: string | null;
+    },
+  ) {
+    this.assertWorkspaceManager(user, request);
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.CREATE_LEGAL_HOLD, {
+      actorId: user.id,
+      ...body,
+    });
+    return { message: 'Legal hold created', data };
+  }
+
+  @Post('admin/compliance/holds/:id/release')
+  async releaseHold(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+    @Param('id') id: string,
+  ) {
+    this.assertWorkspaceManager(user, request);
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.RELEASE_LEGAL_HOLD, {
+      actorId: user.id,
+      id,
+    });
+    return { message: 'Legal hold released', data };
+  }
+
+  @Post('admin/compliance/ediscovery')
+  async ediscovery(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+    @Body()
+    body: {
+      query?: string;
+      conversationId?: string | null;
+      from?: string | null;
+      to?: string | null;
+      limit?: number;
+    },
+  ) {
+    this.assertWorkspaceManager(user, request);
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.EDISCOVERY_EXPORT, {
+      actorId: user.id,
+      ...body,
+    });
+    return { message: 'eDiscovery export ready', data };
+  }
+
+  @Get('admin/migrations')
+  async listMigrations(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+  ) {
+    this.assertWorkspaceManager(user, request);
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.LIST_MIGRATION_JOBS, {
+      actorId: user.id,
+    });
+    return { message: 'Migration jobs', data };
+  }
+
+  @Post('admin/migrations/import')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 8 * 1024 * 1024 },
+    }),
+  )
+  async importMigration(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: OrgRequest,
+    @Body() body: { source?: string; dryRun?: string },
+    @UploadedFile()
+    file:
+      | {
+          buffer: Buffer;
+          originalname: string;
+          mimetype: string;
+          size: number;
+        }
+      | undefined,
+  ) {
+    this.assertWorkspaceManager(user, request);
+    if (!file?.buffer?.length) {
+      throw new BadRequestAppException('Upload a Slack/Teams JSON export file');
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(file.buffer.toString('utf8'));
+    } catch {
+      throw new BadRequestAppException('Invalid JSON export file');
+    }
+    const source = body.source === 'teams' ? 'teams' : 'slack';
+    const dryRun = body.dryRun === 'true' || body.dryRun === '1';
+    const data = await this.proxy.sendChat(CHAT_PATTERNS.IMPORT_MIGRATION, {
+      actorId: user.id,
+      source,
+      dryRun,
+      data: parsed,
+    });
+    return { message: dryRun ? 'Dry run complete' : 'Import complete', data };
   }
 }

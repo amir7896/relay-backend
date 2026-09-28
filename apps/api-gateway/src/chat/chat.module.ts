@@ -23,6 +23,8 @@ import { StandupDispatcher } from './standup.dispatcher';
 import { ReminderDispatcher } from './reminder.dispatcher';
 import { StatusClearDispatcher } from './status-clear.dispatcher';
 import { DisappearingMessageDispatcher } from './disappearing-message.dispatcher';
+import { RetentionPurgeDispatcher } from './retention-purge.dispatcher';
+import { WorkflowDispatcher } from './workflow.dispatcher';
 import { IntegrationsController } from './integrations.controller';
 import { AppOauthService } from './app-oauth.service';
 
@@ -61,6 +63,8 @@ import { AppOauthService } from './app-oauth.service';
     ReminderDispatcher,
     StatusClearDispatcher,
     DisappearingMessageDispatcher,
+    RetentionPurgeDispatcher,
+    WorkflowDispatcher,
     AppOauthService,
   ],
   exports: [PresenceService, AiService, LinkPreviewService, PushService],

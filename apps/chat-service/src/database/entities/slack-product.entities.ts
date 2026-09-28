@@ -113,6 +113,7 @@ export class ChannelWorkflow {
   @Column({ type: 'jsonb', default: {} }) triggerConfig!: Record<string, unknown>;
   @Column({ type: 'varchar', length: 32 }) actionType!: string;
   @Column({ type: 'jsonb', default: {} }) actionConfig!: Record<string, unknown>;
+  @Column({ type: 'jsonb', default: [] }) steps!: Array<Record<string, unknown>>;
   @Column('uuid') createdBy!: string;
   @CreateDateColumn({ type: 'timestamptz' }) createdAt!: Date;
 }

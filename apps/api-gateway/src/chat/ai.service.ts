@@ -1,8 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { PaginatedResult } from '@app/common';
+import { BadRequestAppException } from '@app/common';
 import { CHAT_PATTERNS } from '@app/contracts';
-import type { ConversationView, MessageView } from '@app/contracts';
+import type {
+  ChannelCanvasView,
+  ConversationView,
+  MessageView,
+} from '@app/contracts';
 import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
 
 type ChatMessageParam = { role: 'system' | 'user' | 'assistant'; content: string };
@@ -200,15 +205,15 @@ export class AiService {
 
     const transcript = lines.join('\n').slice(0, 6000);
     const ai = await this.chatComplete({
-      temperature: 0.3,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Summarize this team chat in 3-5 concise bullet points. Focus on decisions, asks, and next steps.',
-        },
-        { role: 'user', content: transcript },
-      ],
+            temperature: 0.3,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'Summarize this team chat in 3-5 concise bullet points. Focus on decisions, asks, and next steps.',
+              },
+              { role: 'user', content: transcript },
+            ],
     });
     if (ai?.content) {
       return { summary: ai.content, poweredByAi: true };
@@ -226,6 +231,114 @@ export class AiService {
     return {
       summary: `Recent highlights:\n${recent.join('\n')}`,
       poweredByAi: false,
+    };
+  }
+
+  /** Summarize a free-text call/huddle caption transcript into meeting notes. */
+  async summarizeCallTranscript(
+    transcript: string,
+  ): Promise<{ summary: string; poweredByAi: boolean; demoMode?: boolean }> {
+    const cleaned = String(transcript ?? '').trim().slice(0, 8000);
+    if (!cleaned) {
+      return { summary: 'No captions to summarize.', poweredByAi: false };
+    }
+
+    const lines = cleaned
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const ai = await this.chatComplete({
+      temperature: 0.3,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You turn live call captions into concise meeting notes. Output 3-6 bullet points covering decisions, action items (with owners if mentioned), and open questions. Do not invent facts.',
+        },
+        { role: 'user', content: cleaned },
+      ],
+    });
+    if (ai?.content) {
+      return { summary: ai.content.trim(), poweredByAi: true };
+    }
+
+    if (this.isDemoAi()) {
+      return {
+        summary: this.demoSummarizeLines(
+          lines.map((line) => `- ${line}`),
+          'Call notes',
+        ),
+        poweredByAi: true,
+        demoMode: true,
+      };
+    }
+
+    const recent = lines.slice(-6);
+    return {
+      summary: `Call notes:\n${recent.map((line) => `• ${line.slice(0, 160)}`).join('\n')}`,
+      poweredByAi: false,
+    };
+  }
+
+  /**
+   * Summarize call captions and append a dated section to the channel Canvas.
+   */
+  async appendCallNotesToCanvas(
+    actorId: string,
+    conversationId: string,
+    transcript: string,
+  ): Promise<{
+    canvas: ChannelCanvasView;
+    summary: string;
+    poweredByAi: boolean;
+    demoMode?: boolean;
+  }> {
+    const cleaned = String(transcript ?? '').trim();
+    if (!cleaned) {
+      throw new BadRequestAppException('Transcript is required');
+    }
+
+    const existing = await this.proxy.sendChat<{
+      title?: string;
+      body?: string;
+    }>(CHAT_PATTERNS.GET_CANVAS, { actorId, conversationId });
+
+    const noted = await this.summarizeCallTranscript(cleaned);
+    const stamp = new Date().toLocaleString(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+    const section = [
+      `## Call notes · ${stamp}`,
+      '',
+      noted.summary.trim(),
+      '',
+      '_Source: live captions_',
+    ].join('\n');
+
+    const previousBody = String(existing?.body ?? '').trim();
+    const nextBody = previousBody
+      ? `${previousBody}\n\n---\n\n${section}`
+      : section;
+    const title =
+      String(existing?.title ?? '').trim() || 'Channel notes';
+
+    const canvas = await this.proxy.sendChat<ChannelCanvasView>(
+      CHAT_PATTERNS.PUT_CANVAS,
+      {
+        actorId,
+        conversationId,
+        title: title.slice(0, 160),
+        body: nextBody.slice(0, 100_000),
+      },
+    );
+
+    return {
+      canvas,
+      summary: noted.summary,
+      poweredByAi: noted.poweredByAi,
+      demoMode: noted.demoMode,
     };
   }
 
@@ -364,6 +477,548 @@ export class AiService {
       messageCount: unread.length,
       firstUnreadMessageId,
       since: sinceRaw,
+    };
+  }
+
+  /**
+   * Channel Pulse — ambient async intelligence.
+   * Turns unread activity into decisions, open loops, and blockers with
+   * message anchors — not another paragraph summary.
+   */
+  async channelPulse(
+    actorId: string,
+    conversationId: string,
+    sinceOverride?: string | null,
+  ): Promise<{
+    headline: string;
+    decisions: Array<{
+      text: string;
+      messageId: string | null;
+    }>;
+    openLoops: Array<{
+      text: string;
+      suggestedOwner: string | null;
+      messageId: string | null;
+    }>;
+    blockers: Array<{
+      text: string;
+      messageId: string | null;
+    }>;
+    poweredByAi: boolean;
+    messageCount: number;
+    firstUnreadMessageId: string | null;
+    since: string | null;
+  }> {
+    const conversation = await this.proxy.sendChat<{
+      lastReadAt: string | null;
+      unreadCount?: number;
+      name?: string | null;
+      members: Array<{ userId: string; lastReadAt: string | null }>;
+    }>(CHAT_PATTERNS.GET_CONVERSATION, { actorId, conversationId });
+
+    const membership = conversation.members?.find(
+      (member) => member.userId === actorId,
+    );
+    const sinceRaw =
+      (sinceOverride && String(sinceOverride).trim()) ||
+      membership?.lastReadAt ||
+      conversation.lastReadAt ||
+      null;
+    const sinceMs = sinceRaw ? Date.parse(sinceRaw) : NaN;
+
+    const history = await this.proxy.sendChat<PaginatedResult<MessageView>>(
+      CHAT_PATTERNS.LIST_MESSAGES,
+      { actorId, conversationId, page: 1, limit: 80 },
+    );
+
+    const chronological = [...history.items]
+      .reverse()
+      .filter(
+        (message) =>
+          !message.deletedForEveryone &&
+          !message.threadRootId &&
+          message.type !== 'call',
+      );
+
+    let unread = Number.isFinite(sinceMs)
+      ? chronological.filter(
+          (message) => Date.parse(message.createdAt) > sinceMs,
+        )
+      : chronological.slice(
+          -Math.max(1, Number(conversation.unreadCount) || 12),
+        );
+
+    const fromOthers = unread.filter((message) => message.senderId !== actorId);
+    if (fromOthers.length > 0) {
+      unread = fromOthers;
+    }
+
+    const empty = {
+      headline: 'You’re caught up — no pulse signals right now.',
+      decisions: [] as Array<{ text: string; messageId: string | null }>,
+      openLoops: [] as Array<{
+        text: string;
+        suggestedOwner: string | null;
+        messageId: string | null;
+      }>,
+      blockers: [] as Array<{ text: string; messageId: string | null }>,
+      poweredByAi: false,
+      messageCount: 0,
+      firstUnreadMessageId: null as string | null,
+      since: sinceRaw,
+    };
+
+    if (unread.length === 0) {
+      return empty;
+    }
+
+    const indexed = unread
+      .map((message, index) => {
+        const body =
+          message.body?.trim() ||
+          (message.attachment
+            ? `[file: ${message.attachment.name || 'attachment'}]`
+            : '');
+        if (!body) return null;
+        return {
+          index: index + 1,
+          id: message.id,
+          senderId: message.senderId,
+          body: body.slice(0, 400),
+        };
+      })
+      .filter((row): row is NonNullable<typeof row> => Boolean(row));
+
+    const firstUnreadMessageId = unread[0]?.id ?? null;
+    const transcript = indexed
+      .map(
+        (row) =>
+          `[${row.index}] id=${row.id} from=${row.senderId.slice(0, 8)}: ${row.body}`,
+      )
+      .join('\n')
+      .slice(0, 8000);
+
+    const idByIndex = new Map(indexed.map((row) => [row.index, row.id]));
+
+    const parsePulseJson = (raw: string) => {
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+      try {
+        const parsed = JSON.parse(jsonMatch[0]) as {
+          headline?: unknown;
+          decisions?: unknown;
+          openLoops?: unknown;
+          blockers?: unknown;
+        };
+        const mapDecision = (item: unknown) => {
+          if (!item || typeof item !== 'object') return null;
+          const row = item as { text?: unknown; ref?: unknown };
+          const text = String(row.text ?? '').trim();
+          if (!text) return null;
+          const ref = Number(row.ref);
+          return {
+            text: text.slice(0, 240),
+            messageId:
+              Number.isFinite(ref) && idByIndex.has(ref)
+                ? idByIndex.get(ref)!
+                : null,
+          };
+        };
+        const mapLoop = (item: unknown) => {
+          if (!item || typeof item !== 'object') return null;
+          const row = item as {
+            text?: unknown;
+            ref?: unknown;
+            suggestedOwner?: unknown;
+          };
+          const text = String(row.text ?? '').trim();
+          if (!text) return null;
+          const ref = Number(row.ref);
+          return {
+            text: text.slice(0, 240),
+            suggestedOwner: row.suggestedOwner
+              ? String(row.suggestedOwner).trim().slice(0, 80)
+              : null,
+            messageId:
+              Number.isFinite(ref) && idByIndex.has(ref)
+                ? idByIndex.get(ref)!
+                : null,
+          };
+        };
+        const decisions = (
+          Array.isArray(parsed.decisions) ? parsed.decisions : []
+        )
+          .map(mapDecision)
+          .filter((row): row is NonNullable<typeof row> => Boolean(row))
+          .slice(0, 5);
+        const openLoops = (
+          Array.isArray(parsed.openLoops) ? parsed.openLoops : []
+        )
+          .map(mapLoop)
+          .filter((row): row is NonNullable<typeof row> => Boolean(row))
+          .slice(0, 5);
+        const blockers = (Array.isArray(parsed.blockers) ? parsed.blockers : [])
+          .map(mapDecision)
+          .filter((row): row is NonNullable<typeof row> => Boolean(row))
+          .slice(0, 5);
+        if (
+          decisions.length === 0 &&
+          openLoops.length === 0 &&
+          blockers.length === 0
+        ) {
+          return null;
+        }
+        return {
+          headline: String(
+            parsed.headline ??
+              `Pulse · ${unread.length} unread in ${conversation.name || 'channel'}`,
+          ).slice(0, 160),
+          decisions,
+          openLoops,
+          blockers,
+        };
+      } catch {
+        return null;
+      }
+    };
+
+    if (indexed.length > 0) {
+      const ai = await this.chatComplete({
+        temperature: 0.2,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are Channel Pulse for a team messenger. Analyze unread messages and return JSON ONLY: {"headline":"one short line","decisions":[{"text":"...","ref":1}],"openLoops":[{"text":"...","suggestedOwner":"name or null","ref":2}],"blockers":[{"text":"...","ref":3}]}. decisions = choices already made. openLoops = unanswered questions / waiting on someone. blockers = stuck / blocked / risk. Use ref = message index numbers from the transcript. Max 4 items per array. Be concrete. No markdown.',
+          },
+          {
+            role: 'user',
+            content: `Unread messages (${unread.length}):\n${transcript}`,
+          },
+        ],
+      });
+      if (ai?.content) {
+        const structured = parsePulseJson(ai.content);
+        if (structured) {
+          return {
+            ...structured,
+            poweredByAi: true,
+            messageCount: unread.length,
+            firstUnreadMessageId,
+            since: sinceRaw,
+          };
+        }
+      }
+    }
+
+    const heuristic = this.heuristicChannelPulse(indexed);
+    return {
+      ...heuristic,
+      poweredByAi: this.isDemoAi(),
+      messageCount: unread.length,
+      firstUnreadMessageId,
+      since: sinceRaw,
+    };
+  }
+
+  private heuristicChannelPulse(
+    indexed: Array<{ index: number; id: string; senderId: string; body: string }>,
+  ): {
+    headline: string;
+    decisions: Array<{ text: string; messageId: string | null }>;
+    openLoops: Array<{
+      text: string;
+      suggestedOwner: string | null;
+      messageId: string | null;
+    }>;
+    blockers: Array<{ text: string; messageId: string | null }>;
+  } {
+    const decisions: Array<{ text: string; messageId: string | null }> = [];
+    const openLoops: Array<{
+      text: string;
+      suggestedOwner: string | null;
+      messageId: string | null;
+    }> = [];
+    const blockers: Array<{ text: string; messageId: string | null }> = [];
+
+    for (const row of indexed) {
+      const lower = row.body.toLowerCase();
+      if (
+        /\b(blocked|blocker|stuck|waiting on|can't proceed|cannot proceed|dependency)\b/i.test(
+          lower,
+        )
+      ) {
+        if (blockers.length < 4) {
+          blockers.push({ text: row.body.slice(0, 180), messageId: row.id });
+        }
+        continue;
+      }
+      if (
+        row.body.includes('?') ||
+        /\b(can you|could you|please|need|anyone|who can|wmydt|wdyt)\b/i.test(
+          lower,
+        )
+      ) {
+        if (openLoops.length < 4) {
+          openLoops.push({
+            text: row.body.slice(0, 180),
+            suggestedOwner: null,
+            messageId: row.id,
+          });
+        }
+        continue;
+      }
+      if (
+        /\b(decided|decision|approved|ship it|going with|we'll|we will|final|locked)\b/i.test(
+          lower,
+        )
+      ) {
+        if (decisions.length < 4) {
+          decisions.push({ text: row.body.slice(0, 180), messageId: row.id });
+        }
+      }
+    }
+
+    if (
+      decisions.length === 0 &&
+      openLoops.length === 0 &&
+      blockers.length === 0
+    ) {
+      for (const row of indexed.slice(-3)) {
+        openLoops.push({
+          text: row.body.slice(0, 180),
+          suggestedOwner: null,
+          messageId: row.id,
+        });
+      }
+    }
+
+    const parts: string[] = [];
+    if (decisions.length) parts.push(`${decisions.length} decision${decisions.length === 1 ? '' : 's'}`);
+    if (openLoops.length) parts.push(`${openLoops.length} open loop${openLoops.length === 1 ? '' : 's'}`);
+    if (blockers.length) parts.push(`${blockers.length} blocker${blockers.length === 1 ? '' : 's'}`);
+
+    return {
+      headline:
+        parts.length > 0
+          ? `Pulse · ${parts.join(' · ')}`
+          : `Pulse · ${indexed.length} recent messages`,
+      decisions,
+      openLoops,
+      blockers,
+    };
+  }
+
+  /**
+   * Voice → Action: turn natural language into one Relay work object.
+   * Always confirm in the UI before writing.
+   */
+  async parseActionIntent(rawText: string): Promise<{
+    action: 'stuck' | 'task' | 'remind' | 'incident' | 'unknown';
+    title: string;
+    body: string;
+    whenHint: string | null;
+    severity: 'sev1' | 'sev2' | 'sev3' | 'sev4' | null;
+    confidence: number;
+    poweredByAi: boolean;
+    summary: string;
+  }> {
+    const cleaned = String(rawText ?? '').trim().slice(0, 1000);
+    if (cleaned.length < 3) {
+      throw new BadRequestAppException(
+        'Say or type what you want Relay to do (at least a few words)',
+      );
+    }
+
+    const ai = await this.chatComplete({
+      temperature: 0.1,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You map spoken/typed intent to ONE Relay workspace action. Return JSON ONLY: {"action":"stuck"|"task"|"remind"|"incident"|"unknown","title":"short title","body":"optional detail","whenHint":"1h|30m|tomorrow|null","severity":"sev1|sev2|sev3|sev4|null","summary":"one line for the confirm UI"}. Rules: stuck = blocked / need help; task = todo / add to list; remind = remind me later; incident = outage / sev / war-room; unknown = unclear. Prefer concrete titles under 120 chars.',
+        },
+        { role: 'user', content: cleaned },
+      ],
+    });
+
+    if (ai?.content) {
+      const jsonMatch = ai.content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+          const actionRaw = String(parsed.action ?? 'unknown').toLowerCase();
+          const allowedActions = new Set([
+            'stuck',
+            'task',
+            'remind',
+            'incident',
+            'unknown',
+          ]);
+          const action = (
+            allowedActions.has(actionRaw) ? actionRaw : 'unknown'
+          ) as 'stuck' | 'task' | 'remind' | 'incident' | 'unknown';
+          const severityRaw = String(parsed.severity ?? '').toLowerCase();
+          const allowedSev = new Set(['sev1', 'sev2', 'sev3', 'sev4']);
+          const severity = (
+            allowedSev.has(severityRaw) ? severityRaw : null
+          ) as 'sev1' | 'sev2' | 'sev3' | 'sev4' | null;
+          const title = String(parsed.title ?? cleaned).trim().slice(0, 160);
+          const body = String(parsed.body ?? '').trim().slice(0, 500);
+          const whenHint = parsed.whenHint
+            ? String(parsed.whenHint).trim().slice(0, 40)
+            : null;
+          const summary = String(parsed.summary ?? title).trim().slice(0, 200);
+          if (title) {
+            return {
+              action,
+              title,
+              body,
+              whenHint: whenHint === 'null' ? null : whenHint,
+              severity,
+              confidence: action === 'unknown' ? 0.4 : 0.85,
+              poweredByAi: true,
+              summary,
+            };
+          }
+        } catch {
+          // heuristic below
+        }
+      }
+    }
+
+    return {
+      ...this.heuristicActionIntent(cleaned),
+      poweredByAi: this.isDemoAi(),
+    };
+  }
+
+  private heuristicActionIntent(cleaned: string): {
+    action: 'stuck' | 'task' | 'remind' | 'incident' | 'unknown';
+    title: string;
+    body: string;
+    whenHint: string | null;
+    severity: 'sev1' | 'sev2' | 'sev3' | 'sev4' | null;
+    confidence: number;
+    summary: string;
+  } {
+    const lower = cleaned.toLowerCase();
+    const whenMatch = lower.match(
+      /\b(?:in\s+)?(\d+\s*(?:h|hr|hrs|hour|hours|m|min|mins|minute|minutes)|tomorrow|tonight|later)\b/i,
+    );
+    let whenHint: string | null = null;
+    if (whenMatch) {
+      const raw = whenMatch[1].replace(/\s+/g, '');
+      if (/tomorrow/i.test(raw)) whenHint = 'tomorrow';
+      else if (/tonight|later/i.test(raw)) whenHint = '1h';
+      else if (/m|min/i.test(raw)) {
+        const n = parseInt(raw, 10) || 30;
+        whenHint = `${n}m`;
+      } else {
+        const n = parseInt(raw, 10) || 1;
+        whenHint = `${n}h`;
+      }
+    }
+
+    const sevMatch = lower.match(/\bsev\s*([1-4])\b|\bseverity\s*([1-4])\b/);
+    const severity = sevMatch
+      ? (`sev${sevMatch[1] || sevMatch[2]}` as 'sev1' | 'sev2' | 'sev3' | 'sev4')
+      : null;
+
+    if (
+      /\b(incident|outage|down|sev\s*[1-4]|war.?room|page oncall)\b/i.test(lower)
+    ) {
+      const title = cleaned
+        .replace(/^\/act\s+/i, '')
+        .replace(/\b(open\s+)?(sev\s*[1-4]|incident)\b/gi, '')
+        .trim()
+        .slice(0, 160) || 'Ongoing incident';
+      return {
+        action: 'incident',
+        title,
+        body: cleaned,
+        whenHint: null,
+        severity: severity ?? 'sev2',
+        confidence: 0.7,
+        summary: `Open ${severity ?? 'sev2'} incident: ${title}`,
+      };
+    }
+
+    if (
+      /\b(remind|reminder|ping me|nudge me|don't forget|dont forget)\b/i.test(
+        lower,
+      ) ||
+      whenHint
+    ) {
+      const title = cleaned
+        .replace(/^\/act\s+/i, '')
+        .replace(
+          /\b(remind( me)?( to)?|in\s+\d+\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)|tomorrow|tonight|later)\b/gi,
+          '',
+        )
+        .trim()
+        .slice(0, 160) || cleaned.slice(0, 160);
+      return {
+        action: 'remind',
+        title,
+        body: cleaned,
+        whenHint: whenHint ?? '1h',
+        severity: null,
+        confidence: 0.72,
+        summary: `Remind in ${whenHint ?? '1h'}: ${title}`,
+      };
+    }
+
+    if (
+      /\b(stuck|blocked|blocker|need help|can't proceed|cannot proceed|waiting on)\b/i.test(
+        lower,
+      )
+    ) {
+      const title = cleaned.replace(/^\/act\s+/i, '').trim().slice(0, 160);
+      return {
+        action: 'stuck',
+        title,
+        body: title,
+        whenHint: null,
+        severity: null,
+        confidence: 0.75,
+        summary: `Raise Stuck: ${title}`,
+      };
+    }
+
+    if (
+      /\b(task|todo|to-do|add to list|create task|follow up|action item)\b/i.test(
+        lower,
+      )
+    ) {
+      const title = cleaned
+        .replace(/^\/act\s+/i, '')
+        .replace(
+          /\b(add( a)?|create( a)?|new)?\s*(task|todo|to-do|action item|list item)\b/gi,
+          '',
+        )
+        .replace(/\b(to (the )?list|please)\b/gi, '')
+        .trim()
+        .slice(0, 160) || cleaned.slice(0, 160);
+      return {
+        action: 'task',
+        title,
+        body: cleaned,
+        whenHint: null,
+        severity: null,
+        confidence: 0.7,
+        summary: `Create task: ${title}`,
+      };
+    }
+
+    return {
+      action: 'unknown',
+      title: cleaned.slice(0, 160),
+      body: cleaned,
+      whenHint: null,
+      severity: null,
+      confidence: 0.35,
+      summary: `Not sure — pick an action for: ${cleaned.slice(0, 80)}`,
     };
   }
 

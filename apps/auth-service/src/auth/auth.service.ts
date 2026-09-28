@@ -598,9 +598,14 @@ export class AuthService implements OnModuleInit {
   async resetPassword(
     payload: ResetPasswordPayload,
   ): Promise<{ reset: boolean }> {
+    const token = (payload.token ?? payload.otp ?? '').trim();
+    if (!token) {
+      return RpcErrors.badRequest('Reset token or OTP is required');
+    }
     const result = await this.authTokens.resetPassword(
-      payload.token,
+      token,
       await hashPassword(payload.password),
+      payload.email ?? null,
     );
     await this.refreshTokens.update(
       { userId: result.userId, revoked: false },

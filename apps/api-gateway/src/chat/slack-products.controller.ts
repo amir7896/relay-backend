@@ -20,6 +20,7 @@ import { MicroserviceProxy } from '../infrastructure/proxy/microservice.proxy';
 import { StorageService } from '../storage/storage.service';
 import { ChatGateway } from './chat.gateway';
 import { PushService } from './push.service';
+import { AiService } from './ai.service';
 import { SkipOrg } from '../organizations/skip-org.decorator';
 
 @Controller('chat')
@@ -30,6 +31,7 @@ export class SlackProductsController {
     private readonly storage: StorageService,
     private readonly mail: MailService,
     private readonly push: PushService,
+    private readonly ai: AiService,
   ) {}
   private payload(user: AuthenticatedUser, id?: string, extra: Record<string, unknown> = {}) {
     return { actorId: user.id, ...(id ? { conversationId: id } : {}), ...extra };
@@ -82,6 +84,29 @@ export class SlackProductsController {
     this.chatGateway.broadcastCanvas(data);
     return { message: 'Canvas saved', data };
   }
+
+  @Post('conversations/:id/canvas/call-notes')
+  async postCallNotesToCanvas(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() body: { transcript?: string },
+  ) {
+    const transcript = String(body?.transcript ?? '').trim();
+    if (!transcript) {
+      throw new BadRequestAppException('Transcript is required');
+    }
+    const result = await this.ai.appendCallNotesToCanvas(
+      u.id,
+      id,
+      transcript,
+    );
+    this.chatGateway.broadcastCanvas(result.canvas);
+    return {
+      message: 'Call notes added to Canvas',
+      data: result,
+    };
+  }
+
   @Get('conversations/:id/canvas/comments')
   listCanvasComments(
     @CurrentUser() u: AuthenticatedUser,
@@ -337,6 +362,35 @@ export class SlackProductsController {
   }
   @Get('conversations/:id/workflows') workflows(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string) { return this.wrap('Workflows retrieved', CHAT_PATTERNS.LIST_WORKFLOWS, this.payload(u, id)); }
   @Post('conversations/:id/workflows') createWorkflow(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Body() b: Record<string, unknown>) { return this.wrap('Workflow created', CHAT_PATTERNS.CREATE_WORKFLOW, this.payload(u, id, b)); }
+  @Post('conversations/:id/kickstart')
+  async applyKickstart(
+    @CurrentUser() u: AuthenticatedUser,
+    @Param('id', ParseUuidPipe) id: string,
+    @Body() body: { templateId?: string },
+  ) {
+    const templateId = String(body?.templateId ?? '').trim();
+    if (!templateId) {
+      throw new BadRequestAppException('templateId is required');
+    }
+    const data = (await this.proxy.sendChat(
+      CHAT_PATTERNS.APPLY_KICKSTART,
+      this.payload(u, id, { templateId }),
+    )) as {
+      templateId: string;
+      message?: Record<string, unknown> & { recipientIds?: string[] };
+      canvas?: ChannelCanvasView;
+      list?: Record<string, unknown>;
+      workflow?: Record<string, unknown>;
+    };
+    if (data.message) {
+      const { recipientIds, ...view } = data.message;
+      this.chatGateway.broadcastMessage(view as any, recipientIds ?? []);
+    }
+    if (data.canvas) {
+      this.chatGateway.broadcastCanvas(data.canvas);
+    }
+    return { message: 'Channel kickstarted', data };
+  }
   @Patch('conversations/:id/workflows/:workflowId') updateWorkflow(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Param('workflowId', ParseUuidPipe) workflowId: string, @Body() b: Record<string, unknown>) { return this.wrap('Workflow updated', CHAT_PATTERNS.UPDATE_WORKFLOW, this.payload(u, id, { workflowId, ...b })); }
   @Delete('conversations/:id/workflows/:workflowId') deleteWorkflow(@CurrentUser() u: AuthenticatedUser, @Param('id', ParseUuidPipe) id: string, @Param('workflowId', ParseUuidPipe) workflowId: string) { return this.wrap('Workflow deleted', CHAT_PATTERNS.DELETE_WORKFLOW, this.payload(u, id, { workflowId })); }
   @Post('conversations/:id/workflows/:workflowId/run')
@@ -344,8 +398,15 @@ export class SlackProductsController {
     @CurrentUser() u: AuthenticatedUser,
     @Param('id', ParseUuidPipe) id: string,
     @Param('workflowId', ParseUuidPipe) workflowId: string,
+    @Body() body: Record<string, unknown> = {},
   ) {
-    const data = (await this.proxy.sendChat(CHAT_PATTERNS.RUN_WORKFLOW, this.payload(u, id, { workflowId }))) as {
+    const data = (await this.proxy.sendChat(
+      CHAT_PATTERNS.RUN_WORKFLOW,
+      this.payload(u, id, {
+        workflowId,
+        formAnswers: body.formAnswers,
+      }),
+    )) as {
       messages?: Array<Record<string, unknown> & { conversationId: string; recipientIds?: string[] }>;
     };
     for (const message of data.messages ?? []) {

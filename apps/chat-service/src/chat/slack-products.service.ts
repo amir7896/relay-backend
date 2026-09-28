@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { DataSource } from 'typeorm';
 import { RpcErrors } from '@app/common';
-import { requireOrganizationId } from '@app/database';
+import { requireOrganizationId, runWithOrganization } from '@app/database';
 import {
   INTEGRATION_CATALOG_META,
   IntegrationsService,
@@ -58,8 +58,20 @@ const APP_CATALOG = [
 ] as const;
 const STATUSES = new Set(['todo', 'doing', 'done']);
 const PRIORITIES = new Set(['lowest', 'low', 'medium', 'high', 'highest']);
-const TRIGGERS = new Set(['message_contains', 'channel_created', 'manual']);
-const ACTIONS = new Set(['post_message', 'webhook', 'set_reminder']);
+const TRIGGERS = new Set([
+  'message_contains',
+  'channel_created',
+  'manual',
+  'form_submitted',
+  'emoji_reaction',
+  'schedule',
+]);
+const ACTIONS = new Set([
+  'post_message',
+  'webhook',
+  'set_reminder',
+  'collect_form',
+]);
 
 @Injectable()
 export class SlackProductsService {
@@ -1286,16 +1298,33 @@ export class SlackProductsService {
   }
 
   private toWorkflowView(row: any) {
+    const triggerConfig = this.parseJson(row.triggerConfig);
+    const actionConfig = this.parseJson(row.actionConfig);
+    const stepsRaw = Array.isArray(row.steps)
+      ? row.steps
+      : this.parseJson(row.steps);
+    const steps = Array.isArray(stepsRaw) ? stepsRaw : [];
     return {
       id: String(row.id),
       organizationId: String(row.organizationId),
       conversationId: row.conversationId ? String(row.conversationId) : null,
       name: String(row.name ?? ''),
       enabled: Boolean(row.enabled),
-      triggerType: row.triggerType as 'message_contains' | 'channel_created' | 'manual',
-      triggerConfig: this.parseJson(row.triggerConfig),
-      actionType: row.actionType as 'post_message' | 'webhook' | 'set_reminder',
-      actionConfig: this.parseJson(row.actionConfig),
+      triggerType: row.triggerType as
+        | 'message_contains'
+        | 'channel_created'
+        | 'manual'
+        | 'form_submitted'
+        | 'emoji_reaction'
+        | 'schedule',
+      triggerConfig,
+      actionType: row.actionType as
+        | 'post_message'
+        | 'webhook'
+        | 'set_reminder'
+        | 'collect_form',
+      actionConfig,
+      steps,
       createdBy: String(row.createdBy),
       createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : '',
     };
@@ -1316,6 +1345,34 @@ export class SlackProductsService {
         return RpcErrors.badRequest('Trigger keyword is required (max 200 characters)') as never;
       }
     }
+    if (p.triggerType === 'emoji_reaction') {
+      const emoji = String(p.triggerConfig?.emoji ?? '').trim();
+      if (!emoji || emoji.length > 64) {
+        return RpcErrors.badRequest('Trigger emoji is required (max 64 characters)') as never;
+      }
+    }
+    if (p.triggerType === 'schedule') {
+      const time = this.normalizeClockTime(p.triggerConfig?.time);
+      if (!/^\d{2}:\d{2}$/.test(time)) {
+        return RpcErrors.badRequest('Schedule time must be HH:mm') as never;
+      }
+      const timezone = String(p.triggerConfig?.timezone ?? 'UTC').trim();
+      if (!timezone || timezone.length > 80) {
+        return RpcErrors.badRequest('Timezone is required') as never;
+      }
+      const weekdays = Array.isArray(p.triggerConfig?.weekdays)
+        ? p.triggerConfig.weekdays
+        : [1, 2, 3, 4, 5];
+      if (
+        !weekdays.length ||
+        weekdays.some(
+          (day: unknown) =>
+            !Number.isInteger(Number(day)) || Number(day) < 0 || Number(day) > 6,
+        )
+      ) {
+        return RpcErrors.badRequest('Weekdays must be integers 0–6 (Sun–Sat)') as never;
+      }
+    }
     if (p.actionType === 'post_message') {
       const body = String(p.actionConfig?.body ?? '').trim();
       if (!body || body.length > 4000) {
@@ -1334,6 +1391,14 @@ export class SlackProductsService {
         return RpcErrors.badRequest('Reminder delay must be between 1 minute and 30 days') as never;
       }
     }
+    if (p.actionType === 'collect_form') {
+      const fields = Array.isArray(p.actionConfig?.fields)
+        ? p.actionConfig.fields
+        : [];
+      if (!fields.length) {
+        return RpcErrors.badRequest('Form action needs at least one field') as never;
+      }
+    }
   }
 
   async listWorkflows(p: any) {
@@ -1347,8 +1412,18 @@ export class SlackProductsService {
 
   async createWorkflow(p: any) {
     if (p.conversationId) await this.requireMembership(p.conversationId, p.actorId);
-    const triggerConfig = this.parseJson(p.triggerConfig);
+    let triggerConfig = this.parseJson(p.triggerConfig);
     const actionConfig = this.parseJson(p.actionConfig);
+    if (p.triggerType === 'schedule') {
+      triggerConfig = {
+        ...triggerConfig,
+        time: this.normalizeClockTime(triggerConfig.time ?? '09:00'),
+        timezone: String(triggerConfig.timezone ?? 'UTC').trim() || 'UTC',
+        weekdays: Array.isArray(triggerConfig.weekdays)
+          ? triggerConfig.weekdays.map((d: unknown) => Number(d))
+          : [1, 2, 3, 4, 5],
+      };
+    }
     this.validateWorkflowShape({
       triggerType: p.triggerType,
       actionType: p.actionType,
@@ -1356,8 +1431,8 @@ export class SlackProductsService {
       actionConfig,
     });
     const row = await this.queryOne(
-      `INSERT INTO channel_workflows ("organizationId","conversationId","name","enabled","triggerType","triggerConfig","actionType","actionConfig","createdBy")
-       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9) RETURNING *`,
+      `INSERT INTO channel_workflows ("organizationId","conversationId","name","enabled","triggerType","triggerConfig","actionType","actionConfig","steps","createdBy")
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10) RETURNING *`,
       [
         requireOrganizationId(),
         p.conversationId ?? null,
@@ -1367,10 +1442,277 @@ export class SlackProductsService {
         JSON.stringify(triggerConfig),
         p.actionType,
         JSON.stringify(actionConfig),
+        JSON.stringify(Array.isArray(p.steps) ? p.steps : []),
         p.actorId,
       ],
     );
     return this.toWorkflowView(row);
+  }
+
+  /**
+   * Relay Kickstart — one-click channel setup with a curated template
+   * (welcome message + Canvas + List + Workflow).
+   */
+  async applyKickstart(p: {
+    actorId: string;
+    conversationId: string;
+    templateId: string;
+  }) {
+    await this.requireMembership(p.conversationId, p.actorId);
+    const templateId = String(p.templateId ?? '').trim().toLowerCase();
+    const template = this.kickstartTemplate(templateId);
+    if (!template) {
+      return RpcErrors.badRequest(
+        'Unknown template. Use project, incident, or onboarding.',
+      ) as never;
+    }
+
+    const message = await this.postWorkflowMessage(
+      p.conversationId,
+      template.welcomeBody,
+      p.actorId,
+      `Kickstart · ${template.label}`,
+    );
+
+    const canvas = await this.putCanvas({
+      actorId: p.actorId,
+      conversationId: p.conversationId,
+      title: template.canvasTitle,
+      body: template.canvasBody,
+    });
+
+    const list = await this.createList({
+      actorId: p.actorId,
+      conversationId: p.conversationId,
+      name: template.listName,
+    });
+    const items = [];
+    for (let i = 0; i < template.listItems.length; i += 1) {
+      const title = template.listItems[i];
+      const created = await this.createListItem({
+        actorId: p.actorId,
+        conversationId: p.conversationId,
+        listId: list.id,
+        title,
+        status: 'todo',
+        sortOrder: i,
+      });
+      items.push(
+        created && typeof created === 'object' && 'item' in created
+          ? (created as { item: unknown }).item
+          : created,
+      );
+    }
+
+    const workflow = await this.createWorkflow({
+      actorId: p.actorId,
+      conversationId: p.conversationId,
+      name: template.workflow.name,
+      enabled: true,
+      triggerType: template.workflow.triggerType,
+      triggerConfig: template.workflow.triggerConfig,
+      actionType: template.workflow.actionType,
+      actionConfig: template.workflow.actionConfig,
+      steps: [
+        {
+          id: 'trigger',
+          type: 'trigger',
+          config: { triggerType: template.workflow.triggerType },
+        },
+        {
+          id: 'action',
+          type: 'action',
+          config: { actionType: template.workflow.actionType },
+        },
+      ],
+    });
+
+    return {
+      templateId: template.id,
+      label: template.label,
+      message,
+      canvas,
+      list: { ...list, items },
+      workflow,
+    };
+  }
+
+  private kickstartTemplate(id: string): {
+    id: string;
+    label: string;
+    welcomeBody: string;
+    canvasTitle: string;
+    canvasBody: string;
+    listName: string;
+    listItems: string[];
+    workflow: {
+      name: string;
+      triggerType: string;
+      triggerConfig: Record<string, unknown>;
+      actionType: string;
+      actionConfig: Record<string, unknown>;
+    };
+  } | null {
+    if (id === 'project') {
+      return {
+        id: 'project',
+        label: 'Project kickoff',
+        welcomeBody: [
+          '*🚀 Project Kickstart*',
+          '',
+          'This channel is ready for shipping.',
+          '• Canvas → goals & decisions',
+          '• Lists → tracked work',
+          '• React ✅ on a message to auto-acknowledge',
+          '',
+          '_Kickstarted by Relay_',
+        ].join('\n'),
+        canvasTitle: 'Project brief',
+        canvasBody: [
+          '# Project brief',
+          '',
+          '## Goal',
+          '_What does success look like?_',
+          '',
+          '## Scope',
+          '- In:',
+          '- Out:',
+          '',
+          '## Milestones',
+          '1. ',
+          '2. ',
+          '3. ',
+          '',
+          '## Decisions log',
+          '| Date | Decision | Owner |',
+          '| --- | --- | --- |',
+          '|  |  |  |',
+        ].join('\n'),
+        listName: 'Project tasks',
+        listItems: [
+          'Define success metrics',
+          'Draft first milestone plan',
+          'Assign owners',
+          'Schedule kickoff huddle',
+        ],
+        workflow: {
+          name: '✅ → Acknowledged',
+          triggerType: 'emoji_reaction',
+          triggerConfig: { emoji: '✅', condition: 'always' },
+          actionType: 'post_message',
+          actionConfig: {
+            body: '✅ Noted — thanks for confirming.',
+          },
+        },
+      };
+    }
+    if (id === 'incident') {
+      return {
+        id: 'incident',
+        label: 'Incident response',
+        welcomeBody: [
+          '*🚨 Incident Kickstart*',
+          '',
+          'Use this channel as the war room.',
+          '1. Update Canvas timeline',
+          '2. Track actions in Lists',
+          '3. Type `sev` to post the severity checklist',
+          '',
+          '_Kickstarted by Relay_',
+        ].join('\n'),
+        canvasTitle: 'Incident timeline',
+        canvasBody: [
+          '# Incident timeline',
+          '',
+          '## Status',
+          '`investigating` · `identified` · `monitoring` · `resolved`',
+          '',
+          '## Summary',
+          '_What is broken? Who is impacted?_',
+          '',
+          '## Timeline',
+          '- T+0 — Detected',
+          '- T+ — ',
+          '',
+          '## Comms',
+          '- Internal:',
+          '- External:',
+        ].join('\n'),
+        listName: 'Incident actions',
+        listItems: [
+          'Page on-call / declare severity',
+          'Stabilize / mitigate',
+          'Root-cause notes',
+          'Customer comms draft',
+          'Postmortem scheduled',
+        ],
+        workflow: {
+          name: 'sev → checklist',
+          triggerType: 'message_contains',
+          triggerConfig: { contains: 'sev', condition: 'always' },
+          actionType: 'post_message',
+          actionConfig: {
+            body: [
+              '*Severity checklist*',
+              '• Impact confirmed?',
+              '• Mitigation in progress?',
+              '• Comms owner assigned?',
+              '• Next update time set?',
+            ].join('\n'),
+          },
+        },
+      };
+    }
+    if (id === 'onboarding') {
+      return {
+        id: 'onboarding',
+        label: 'Team onboarding',
+        welcomeBody: [
+          '*👋 Onboarding Kickstart*',
+          '',
+          'Welcome aboard! Start here:',
+          '• Canvas → culture & links',
+          '• Lists → Day-1 checklist',
+          '• React 👋 when you finish Day 1',
+          '',
+          '_Kickstarted by Relay_',
+        ].join('\n'),
+        canvasTitle: 'Onboarding guide',
+        canvasBody: [
+          '# Onboarding guide',
+          '',
+          '## Welcome',
+          'Glad you’re here. Use this channel for questions.',
+          '',
+          '## Must-know links',
+          '- Handbook:',
+          '- Tools access:',
+          '- Team calendar:',
+          '',
+          '## Who to meet',
+          '- Manager:',
+          '- Buddy:',
+        ].join('\n'),
+        listName: 'Day-1 checklist',
+        listItems: [
+          'Set profile photo & status',
+          'Join core channels',
+          'Meet your buddy',
+          'Complete access requests',
+          'Ship a tiny first PR / task',
+        ],
+        workflow: {
+          name: '👋 → Welcome reply',
+          triggerType: 'emoji_reaction',
+          triggerConfig: { emoji: '👋', condition: 'always' },
+          actionType: 'post_message',
+          actionConfig: {
+            body: '👋 Awesome — Day 1 complete. Ping your buddy with any blockers!',
+          },
+        },
+      };
+    }
+    return null;
   }
 
   private async requireWorkflow(p: any) {
@@ -1438,6 +1780,10 @@ export class SlackProductsService {
       conversationId,
       message: null,
       manual: true,
+      formAnswers:
+        p.formAnswers && typeof p.formAnswers === 'object'
+          ? (p.formAnswers as Record<string, string>)
+          : undefined,
     });
     return { workflow, messages };
   }
@@ -1464,6 +1810,13 @@ export class SlackProductsService {
         const haystack = String(p.message?.body ?? '').toLowerCase();
         if (!needle || !haystack.includes(needle)) continue;
       }
+      if (p.triggerType === 'emoji_reaction') {
+        const expected = this.normalizeWorkflowEmoji(
+          String(workflow.triggerConfig.emoji ?? ''),
+        );
+        const actual = this.normalizeWorkflowEmoji(String(p.emoji ?? ''));
+        if (!expected || !actual || expected !== actual) continue;
+      }
       const condition = String(workflow.triggerConfig.condition ?? 'always');
       if (condition === 'weekdays') {
         const day = new Date().getDay(); // 0 Sun … 6 Sat
@@ -1479,6 +1832,7 @@ export class SlackProductsService {
           conversationId: p.conversationId,
           message: p.message ?? null,
           manual: false,
+          emoji: p.emoji ? String(p.emoji) : undefined,
         });
         messages.push(...produced);
       } catch (error) {
@@ -1488,6 +1842,85 @@ export class SlackProductsService {
     return { messages };
   }
 
+  private normalizeWorkflowEmoji(raw: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed) return '';
+    const short = /^:([a-z0-9_+-]{1,32}):$/i.exec(trimmed);
+    if (short) return `:${short[1].toLowerCase()}:`;
+    return trimmed;
+  }
+
+  async dispatchDueWorkflows() {
+    const rows = await this.queryRows(
+      `SELECT * FROM channel_workflows
+       WHERE enabled=true AND "triggerType"='schedule' AND "conversationId" IS NOT NULL
+       ORDER BY "createdAt" ASC`,
+    );
+    const messages: Array<
+      Record<string, unknown> & { conversationId: string; recipientIds?: string[] }
+    > = [];
+
+    for (const row of rows) {
+      try {
+        const orgId = String(row.organizationId);
+        const produced = await runWithOrganization(orgId, async () => {
+          const workflow = this.toWorkflowView(row);
+          const timezone = String(workflow.triggerConfig.timezone ?? 'UTC').trim() || 'UTC';
+          const scheduledTime = this.normalizeClockTime(workflow.triggerConfig.time);
+          const scheduledMinutes = this.timeToMinutes(scheduledTime);
+          if (scheduledMinutes == null) return [];
+
+          const clock = this.zonedClock(timezone);
+          const weekdays = Array.isArray(workflow.triggerConfig.weekdays)
+            ? workflow.triggerConfig.weekdays.map((d: unknown) => Number(d))
+            : [1, 2, 3, 4, 5];
+          if (!weekdays.includes(clock.weekday)) return [];
+
+          const delta = clock.minutesOfDay - scheduledMinutes;
+          // Fire during the scheduled minute and up to 15 minutes after.
+          if (delta < 0 || delta > 15) return [];
+
+          const slotKey = `${clock.runDate}@${scheduledTime}`;
+          if (String(workflow.triggerConfig.lastSlot ?? '') === slotKey) {
+            return [];
+          }
+
+          const conversationId = String(workflow.conversationId);
+          const fired = await this.executeWorkflow(workflow, {
+            actorId: String(workflow.createdBy),
+            conversationId,
+            message: null,
+            manual: false,
+          });
+
+          const nextConfig = {
+            ...workflow.triggerConfig,
+            time: scheduledTime,
+            timezone,
+            weekdays,
+            lastSlot: slotKey,
+          };
+          await this.db.query(
+            `UPDATE channel_workflows
+             SET "triggerConfig"=$1::jsonb
+             WHERE id=$2 AND "organizationId"=$3`,
+            [JSON.stringify(nextConfig), workflow.id, orgId],
+          );
+
+          return fired;
+        });
+        messages.push(...produced);
+      } catch (error) {
+        console.warn(
+          '[workflows] schedule dispatch failed:',
+          (error as Error)?.message ?? error,
+        );
+      }
+    }
+
+    return messages;
+  }
+
   private async executeWorkflow(
     workflow: ReturnType<SlackProductsService['toWorkflowView']>,
     context: {
@@ -1495,11 +1928,43 @@ export class SlackProductsService {
       conversationId: string;
       message: { id: string; body: string; senderId: string } | null;
       manual: boolean;
+      formAnswers?: Record<string, string>;
+      emoji?: string;
     },
   ) {
     const messages: Array<Record<string, unknown> & { conversationId: string; recipientIds?: string[] }> = [];
+    const formBlock =
+      context.formAnswers && Object.keys(context.formAnswers).length
+        ? `\n\n*Form answers*\n${Object.entries(context.formAnswers)
+            .map(([key, value]) => `• *${key}:* ${value}`)
+            .join('\n')}`
+        : '';
+
+    if (workflow.actionType === 'collect_form') {
+      const title = String(workflow.actionConfig.title ?? workflow.name).trim();
+      const fields = Array.isArray(workflow.actionConfig.fields)
+        ? workflow.actionConfig.fields
+        : [];
+      const fieldLines = fields
+        .map((field: any) => {
+          const label = String(field?.label ?? field?.id ?? 'Field').trim();
+          const answer = context.formAnswers?.[label] ?? context.formAnswers?.[String(field?.id ?? '')];
+          return answer ? `• *${label}:* ${answer}` : `• *${label}:* _(awaiting)_`;
+        })
+        .join('\n');
+      const body = `*${title || 'Workflow form'}*\n${fieldLines || '_No fields_'}${formBlock}`;
+      const posted = await this.postWorkflowMessage(
+        context.conversationId,
+        body,
+        workflow.createdBy || context.actorId,
+        workflow.name,
+      );
+      if (posted) messages.push(posted);
+      return messages;
+    }
+
     if (workflow.actionType === 'post_message') {
-      const body = String(workflow.actionConfig.body ?? '').trim();
+      const body = `${String(workflow.actionConfig.body ?? '').trim()}${formBlock}`.trim();
       if (!body) return messages;
       const posted = await this.postWorkflowMessage(
         context.conversationId,
@@ -1528,6 +1993,8 @@ export class SlackProductsService {
               conversationId: context.conversationId,
             },
             message: context.message,
+            emoji: context.emoji ?? null,
+            formAnswers: context.formAnswers ?? null,
             actorId: context.actorId,
             triggeredAt: new Date().toISOString(),
           }),
